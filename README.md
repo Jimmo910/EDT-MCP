@@ -1,5 +1,5 @@
 [![GitHub all releases](https://img.shields.io/github/downloads/DitriXNew/EDT-MCP/total)](https://github.com/DitriXNew/EDT-MCP/releases)
-![EDT](https://img.shields.io/badge/EDT-2026.1+-blue?style=plastic)
+![EDT](https://img.shields.io/badge/EDT-2025.2+-blue?style=plastic)
 # EDT MCP Server
 
 MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (Claude, GitHub Copilot, Cursor, etc.) to interact with EDT workspace.
@@ -31,7 +31,7 @@ MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (C
 
 ## Installation
 
-**Only EDT 2026.1+** (for plugin v1.27.0+; use plugin v1.26.1 for EDT 2025.x)
+**Only EDT 2025.2+**
 
 ### From Update Site
 
@@ -66,6 +66,39 @@ Once the installation has been completed successfully, we will see the following
 After that, EDT will automatically monitor the update site and install available updates when detected.
 
 As well, we can also manually check via **Help → About → Installation Details → Select MCP → Update**
+
+### Required JVM flag for form screenshots
+
+The `get_form_screenshot` and `get_form_layout_snapshot` tools need EDT to be launched with the following JVM flag:
+
+```
+-DnativeFormBufferedLayoutRender=true
+```
+
+**Without it**, both tools return blank output (gray PNG / empty `elements` list).
+
+**Why:** EDT's `NativeRenderService` reads `nativeFormBufferedLayoutRender` once at class-load time. If it was unset at JVM startup, the singleton `HippoLayoutService` is constructed without its offscreen buffer handler, the C++ form renderer never writes captureable pixels back to Java, and the screenshot helper falls through to an SWT `Control.print()` of the native window — which on Windows produces a gray rectangle. Setting the flag at runtime via reflection does not help because the singleton has already been built.
+
+**How to add it (persistent, recommended):**
+
+1. Close EDT.
+2. Open `1cedt.ini` (next to `1cedt.exe`, e.g. `C:\Program Files\1C\1CE\components\1c-edt-2025.2.6+4-x86_64\1cedt.ini`).
+3. After the `-vmargs` line, add:
+
+   ```
+   -DnativeFormBufferedLayoutRender=true
+   ```
+4. Start EDT.
+
+**How to add it (one-shot, no install changes):**
+
+```cmd
+"<path-to-EDT>\1cedt.exe" -data "<workspace>" -vmargs -DnativeFormBufferedLayoutRender=true
+```
+
+The same flag is also recommended for production EDT use — it enables the buffered native renderer that EDT itself benefits from.
+
+If your screenshots still come back blank after adding the flag, verify with `-vmargs` actually appears before it in `1cedt.ini` (Eclipse stops parsing `-vmargs` block once it hits a non-`-D` line) and that EDT was fully restarted.
 
 ### Configuration
 
