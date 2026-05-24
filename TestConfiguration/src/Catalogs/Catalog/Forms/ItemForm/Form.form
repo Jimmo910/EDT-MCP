@@ -1,5 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <form:Form xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:form="http://g5.1c.ru/v8/dt/form">
+  <items xsi:type="form:Decoration">
+    <name>Decoration1</name>
+    <id>10</id>
+    <title>
+      <key>en</key>
+      <value>Decoration1</value>
+    </title>
+    <visible>true</visible>
+    <enabled>true</enabled>
+    <userVisible>
+      <common>true</common>
+    </userVisible>
+    <extendedTooltip>
+      <name>Decoration1ExtendedTooltip</name>
+      <id>12</id>
+      <type>Label</type>
+      <autoMaxWidth>true</autoMaxWidth>
+      <autoMaxHeight>true</autoMaxHeight>
+      <extInfo xsi:type="form:LabelDecorationExtInfo">
+        <horizontalAlign>Left</horizontalAlign>
+      </extInfo>
+    </extendedTooltip>
+    <contextMenu>
+      <name>Decoration1ContextMenu</name>
+      <id>11</id>
+      <autoFill>true</autoFill>
+    </contextMenu>
+    <autoMaxWidth>true</autoMaxWidth>
+    <autoMaxHeight>true</autoMaxHeight>
+    <extInfo xsi:type="form:PictureDecorationExtInfo">
+      <fileDragMode>AsFileRef</fileDragMode>
+    </extInfo>
+  </items>
   <items xsi:type="form:FormField">
     <name>Code</name>
     <id>1</id>

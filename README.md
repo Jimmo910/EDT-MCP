@@ -1,5 +1,5 @@
 [![GitHub all releases](https://img.shields.io/github/downloads/DitriXNew/EDT-MCP/total)](https://github.com/DitriXNew/EDT-MCP/releases)
-![EDT](https://img.shields.io/badge/EDT-2026.1+-blue?style=plastic)
+![EDT](https://img.shields.io/badge/EDT-2025.2+-blue?style=plastic)
 # EDT MCP Server
 
 MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (Claude, GitHub Copilot, Cursor, etc.) to interact with EDT workspace.
@@ -31,7 +31,7 @@ MCP (Model Context Protocol) server plugin for 1C:EDT, enabling AI assistants (C
 
 ## Installation
 
-**Only EDT 2026.1+** (for plugin v1.27.0+; use plugin v1.26.1 for EDT 2025.x)
+**Only EDT 2025.2+**
 
 ### From Update Site
 
@@ -66,6 +66,39 @@ Once the installation has been completed successfully, we will see the following
 After that, EDT will automatically monitor the update site and install available updates when detected.
 
 As well, we can also manually check via **Help → About → Installation Details → Select MCP → Update**
+
+### Required JVM flag for form screenshots
+
+The `get_form_screenshot` and `get_form_layout_snapshot` tools need EDT to be launched with the following JVM flag:
+
+```
+-DnativeFormBufferedLayoutRender=true
+```
+
+**Without it**, both tools return blank output (gray PNG / empty `elements` list).
+
+**Why:** EDT's `NativeRenderService` reads `nativeFormBufferedLayoutRender` once at class-load time. If it was unset at JVM startup, the singleton `HippoLayoutService` is constructed without its offscreen buffer handler, the C++ form renderer never writes captureable pixels back to Java, and the screenshot helper falls through to an SWT `Control.print()` of the native window — which on Windows produces a gray rectangle. Setting the flag at runtime via reflection does not help because the singleton has already been built.
+
+**How to add it (persistent, recommended):**
+
+1. Close EDT.
+2. Open `1cedt.ini` (next to `1cedt.exe`, e.g. `C:\Program Files\1C\1CE\components\1c-edt-2025.2.6+4-x86_64\1cedt.ini`).
+3. After the `-vmargs` line, add:
+
+   ```
+   -DnativeFormBufferedLayoutRender=true
+   ```
+4. Start EDT.
+
+**How to add it (one-shot, no install changes):**
+
+```cmd
+"<path-to-EDT>\1cedt.exe" -data "<workspace>" -vmargs -DnativeFormBufferedLayoutRender=true
+```
+
+The same flag is also recommended for production EDT use — it enables the buffered native renderer that EDT itself benefits from.
+
+If your screenshots still come back blank after adding the flag, verify with `-vmargs` actually appears before it in `1cedt.ini` (Eclipse stops parsing `-vmargs` block once it hits a non-`-D` line) and that EDT was fully restarted.
 
 ### Configuration
 
@@ -1290,6 +1323,75 @@ groups:
     - CommonModule.LocalizationServer
     - CommonModule.LocalizationReuse
 ```
+
+## Building from source
+
+The plugin is a Maven/Tycho project under [mcp/](mcp/). CI builds it via [.github/workflows/build.yml](.github/workflows/build.yml); the same flow can be run locally with [source/compile.sh](source/compile.sh).
+
+### Prerequisites
+
+- JDK 17 (e.g. Temurin / Oracle JDK)
+- Apache Maven 3.9+ (no `mvnw` wrapper is committed — install Maven manually or via a package manager: `winget`, Homebrew, `apt`, SDKMAN, etc.)
+- `bash` (Git Bash on Windows works) and either `zip` or the `jar` binary that ships with the JDK
+- Network access to `https://edt.1c.ru/`, `https://download.eclipse.org/` and Maven Central — Tycho downloads the EDT p2 repository and Eclipse SDK on the first run (hundreds of MB, cached afterwards under `~/.m2/`)
+
+### Quick start
+
+```bash
+# from the repo root
+bash source/compile.sh --skip-tests
+```
+
+Output:
+
+```
+source/dist/MCP-EDT.v<VERSION>.zip
+```
+
+This is a valid p2 update site — install via EDT → *Help → Install New Software → Add → Archive…*.
+
+### Script options
+
+`source/compile.sh` accepts every path as a flag (with matching environment-variable fallback) so it can be driven from CI or run against an out-of-tree checkout:
+
+| Flag | ENV fallback | Default | Meaning |
+|---|---|---|---|
+| `--skip-tests` | — | off | Skip Maven Surefire tests |
+| `--version X.Y.Z` | — | parsed from `README.md`, falls back to `dev` | Version label used in the output zip name |
+| `--archive-prefix PREFIX` | — | `MCP-EDT.v` | Archive name prefix (final name: `<prefix><version>.zip`) |
+| `--project-root PATH` | `EDT_MCP_PROJECT_ROOT` | parent of script dir | Repo root containing `mcp/` |
+| `--mcp-dir PATH` | — | `<project-root>/mcp` | Maven project directory |
+| `--repo-dir PATH` | — | `<project-root>/mcp/repositories/com.ditrix.edt.mcp.server.repository/target/repository` | Tycho p2 output to repackage |
+| `--output-dir PATH` | `EDT_MCP_OUTPUT_DIR` | `<script-dir>/dist` | Where the final zip lands |
+| `--java-home PATH` | `JAVA_HOME` | — | JDK 17 home; if set, prepended to `PATH` for Maven |
+| `--maven-home PATH` | `MAVEN_HOME` / `M2_HOME` | — | Maven home (uses `<maven-home>/bin/mvn`); otherwise falls back to `mvn` on `PATH` |
+| `-h`, `--help` | — | — | Show help |
+
+### Examples
+
+```bash
+# Self-contained invocation, no env tweaks required
+bash source/compile.sh \
+    --java-home "/c/Program Files/Java/jdk-17" \
+    --maven-home /d/Soft/maven \
+    --skip-tests \
+    --version 1.27.1
+
+# Drop the artifact somewhere else
+bash source/compile.sh --output-dir /tmp/edt-mcp-builds
+
+# Same, configured via environment
+JAVA_HOME="/c/Program Files/Java/jdk-17" \
+MAVEN_HOME=/d/Soft/maven \
+EDT_MCP_OUTPUT_DIR=/tmp/edt-mcp-builds \
+bash source/compile.sh
+```
+
+### Notes
+
+- A full first build pulls the EDT 2025.2 / 2026.1 p2 repository (depending on `mcp/targets/default/default.target`) and the Eclipse 2023-12 release — expect several minutes. Subsequent builds run in ~1 minute thanks to the local p2 cache.
+- The output zip uses forward-slash entries (produced by `jar` when `zip` is unavailable) so it installs cleanly on both Windows and Linux EDT instances.
+- `source/dist/` is gitignored; only the script itself is tracked.
 
 ## Requirements
 
