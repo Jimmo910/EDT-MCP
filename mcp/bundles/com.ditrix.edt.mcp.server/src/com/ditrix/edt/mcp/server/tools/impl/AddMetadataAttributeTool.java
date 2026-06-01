@@ -49,9 +49,11 @@ import com._1c.g5.v8.dt.metadata.mdclass.DbObjectAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.Document;
 import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlan;
 import com._1c.g5.v8.dt.metadata.mdclass.InformationRegister;
+import com._1c.g5.v8.dt.metadata.mdclass.InformationRegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.Indexing;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.RegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.Report;
 import com._1c.g5.v8.dt.metadata.mdclass.Task;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -88,6 +90,17 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
 {
     public static final String NAME = "add_metadata_attribute"; //$NON-NLS-1$
 
+    /**
+     * The kind of register child to create. {@link #ATTRIBUTE} is the default and
+     * the only kind valid for non-register objects. {@link #DIMENSION} and
+     * {@link #RESOURCE} apply only to {@link InformationRegister} and
+     * {@link AccumulationRegister}.
+     */
+    private enum Kind
+    {
+        ATTRIBUTE, DIMENSION, RESOURCE
+    }
+
     @Override
     public String getName()
     {
@@ -109,6 +122,10 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                "'Number(15,2,nonnegative)', 'Date(DateTime)', 'CatalogRef.Products', " + //$NON-NLS-1$
                "'String(10), CatalogRef.Products'. " + //$NON-NLS-1$
                "When 'type' is omitted the attribute keeps the default type (backward compatible). " + //$NON-NLS-1$
+               "For InformationRegister and AccumulationRegister the 'kind' parameter selects " + //$NON-NLS-1$
+               "what to create: 'Attribute' (default), 'Dimension' or 'Resource'. " + //$NON-NLS-1$
+               "Dimensions accept the 'master', 'mainFilter' (InformationRegister only) and " + //$NON-NLS-1$
+               "'indexing' flags. " + //$NON-NLS-1$
                "Russian type and object names are also supported."; //$NON-NLS-1$
     }
 
@@ -123,7 +140,12 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                 "(e.g. 'Catalog.Products', 'Document.SalesOrder'). " + //$NON-NLS-1$
                 "Russian names supported.", true) //$NON-NLS-1$
             .stringProperty("attributeName", //$NON-NLS-1$
-                "Name for the new attribute (required)", true) //$NON-NLS-1$
+                "Name for the new attribute/dimension/resource (required)", true) //$NON-NLS-1$
+            .stringProperty("kind", //$NON-NLS-1$
+                "Optional kind of register child to create: 'Attribute' (default), " + //$NON-NLS-1$
+                "'Dimension' or 'Resource'. 'Dimension'/'Resource' are valid only for " + //$NON-NLS-1$
+                "InformationRegister and AccumulationRegister.", //$NON-NLS-1$
+                false)
             .stringProperty("type", //$NON-NLS-1$
                 "Optional attribute type. A single type or a comma-separated " + //$NON-NLS-1$
                 "list for a composite type. Platform types support qualifiers: " + //$NON-NLS-1$
@@ -142,6 +164,14 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                 false)
             .booleanProperty("multiLine", //$NON-NLS-1$
                 "Optional multi-line text field flag (for String attributes).", //$NON-NLS-1$
+                false)
+            .booleanProperty("master", //$NON-NLS-1$
+                "Optional 'master' (leading) flag for a register dimension " + //$NON-NLS-1$
+                "(kind=Dimension). Supported only for InformationRegister dimensions.", //$NON-NLS-1$
+                false)
+            .booleanProperty("mainFilter", //$NON-NLS-1$
+                "Optional 'main filter' flag for a register dimension " + //$NON-NLS-1$
+                "(kind=Dimension). Supported only for InformationRegister dimensions.", //$NON-NLS-1$
                 false)
             .build();
     }
@@ -210,13 +240,37 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         boolean multiLineSet = params.containsKey("multiLine"); //$NON-NLS-1$
         boolean multiLine = multiLineSet && JsonUtils.extractBooleanArgument(params, "multiLine", false); //$NON-NLS-1$
 
-        return executeInternal(projectName, parentFqn, attributeName,
-            typeSpec, indexing, fillChecking, multiLineSet, multiLine);
+        Kind kind;
+        try
+        {
+            kind = parseKind(JsonUtils.extractStringArgument(params, "kind")); //$NON-NLS-1$
+        }
+        catch (IllegalArgumentException e)
+        {
+            return ToolResult.error(e.getMessage()).toJson();
+        }
+
+        boolean masterSet = params.containsKey("master"); //$NON-NLS-1$
+        boolean master = masterSet && JsonUtils.extractBooleanArgument(params, "master", false); //$NON-NLS-1$
+        boolean mainFilterSet = params.containsKey("mainFilter"); //$NON-NLS-1$
+        boolean mainFilter = mainFilterSet && JsonUtils.extractBooleanArgument(params, "mainFilter", false); //$NON-NLS-1$
+
+        // Dimension-only flags must not be combined with a non-dimension kind.
+        if (kind != Kind.DIMENSION && (masterSet || mainFilterSet))
+        {
+            return ToolResult.error("'master' and 'mainFilter' are only valid when kind=Dimension.").toJson(); //$NON-NLS-1$
+        }
+
+        return executeInternal(projectName, parentFqn, attributeName, kind,
+            typeSpec, indexing, fillChecking, multiLineSet, multiLine,
+            masterSet, master, mainFilterSet, mainFilter);
     }
 
-    private String executeInternal(String projectName, String parentFqn, String attributeName,
+    private String executeInternal(String projectName, String parentFqn, String attributeName, final Kind kind,
         final AttributeTypeSpec typeSpec, final Indexing indexing, final FillChecking fillChecking,
-        final boolean multiLineSet, final boolean multiLine)
+        final boolean multiLineSet, final boolean multiLine,
+        final boolean masterSet, final boolean master,
+        final boolean mainFilterSet, final boolean mainFilter)
     {
         // Get project and configuration
         ProjectContext ctx = resolveProjectAndConfig(projectName);
@@ -277,6 +331,23 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                 "InformationRegister, AccumulationRegister, AccountingRegister.").toJson(); //$NON-NLS-1$
         }
 
+        // Dimension/Resource are only meaningful for registers that expose those
+        // collections (InformationRegister and AccumulationRegister).
+        boolean isRegisterWithDimensions =
+            parentObject instanceof InformationRegister || parentObject instanceof AccumulationRegister;
+        if (kind != Kind.ATTRIBUTE && !isRegisterWithDimensions)
+        {
+            return ToolResult.error("kind='" + describeKind(kind) + "' is only valid for " + //$NON-NLS-1$ //$NON-NLS-2$
+                "InformationRegister and AccumulationRegister, not for '" //$NON-NLS-1$
+                + parentObject.eClass().getName() + "'. Use kind='Attribute' (the default) instead.").toJson(); //$NON-NLS-1$
+        }
+        // 'master'/'mainFilter' exist only on InformationRegister dimensions.
+        if ((masterSet || mainFilterSet) && !(parentObject instanceof InformationRegister))
+        {
+            return ToolResult.error("'master' and 'mainFilter' are only supported for " + //$NON-NLS-1$
+                "InformationRegister dimensions, not for '" + parentObject.eClass().getName() + "'.").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         // Get bmId of parent for BM task
         if (!(parentObject instanceof IBmObject))
         {
@@ -302,31 +373,33 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                         throw new RuntimeException("Parent object not found in transaction"); //$NON-NLS-1$
                     }
 
-                    // Check if attribute with this name already exists
-                    if (hasAttribute(parent, attributeName))
-                    {
-                        throw new RuntimeException("Attribute already exists: " + attributeName); //$NON-NLS-1$
-                    }
-
-                    // Create and add attribute
-                    MdObject newAttribute = createAttribute(parent);
-                    if (newAttribute == null)
+                    // Check if a child of this kind with this name already exists.
+                    if (hasChild(parent, kind, attributeName))
                     {
                         throw new RuntimeException(
-                            "Cannot create attribute for: " + parent.eClass().getName()); //$NON-NLS-1$
+                            describeKind(kind) + " already exists: " + attributeName); //$NON-NLS-1$
                     }
-                    newAttribute.setName(attributeName);
-                    newAttribute.setUuid(UUID.randomUUID());
+
+                    // Create and add the child (attribute, dimension or resource).
+                    MdObject newChild = createChild(parent, kind);
+                    if (newChild == null)
+                    {
+                        throw new RuntimeException("Cannot create " + describeKind(kind) //$NON-NLS-1$
+                            + " for: " + parent.eClass().getName()); //$NON-NLS-1$
+                    }
+                    newChild.setName(attributeName);
+                    newChild.setUuid(UUID.randomUUID());
 
                     // FQN of the parent top object, used as the resolution context
                     // for reference type names.
                     String topObjectFqn = ((IBmObject) parent).bmGetTopObject().bmGetFqn();
 
                     // Apply optional type, qualifiers and flags.
-                    applyType(newAttribute, typeSpec, version, bmEngine, topObjectFqn, tx);
-                    applyFlags(newAttribute, indexing, fillChecking, multiLineSet, multiLine);
+                    applyType(newChild, typeSpec, version, bmEngine, topObjectFqn, tx);
+                    applyFlags(newChild, indexing, fillChecking, multiLineSet, multiLine);
+                    applyDimensionFlags(newChild, masterSet, master, mainFilterSet, mainFilter);
 
-                    addAttribute(parent, newAttribute);
+                    addChild(parent, kind, newChild);
                     return null;
                 }
             });
@@ -337,15 +410,17 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to add attribute: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        String kindLabel = describeKind(kind);
         ToolResult result = ToolResult.success()
             .put("parentFqn", normalizedParentFqn) //$NON-NLS-1$
+            .put("kind", kindLabel) //$NON-NLS-1$
             .put("attributeName", attributeName); //$NON-NLS-1$
         if (typeSpec != null)
         {
             result.put("type", describeTypeSpec(typeSpec)); //$NON-NLS-1$
         }
         return result
-            .put("message", "Attribute '" + attributeName + "' added successfully to " + normalizedParentFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            .put("message", kindLabel + " '" + attributeName + "' added successfully to " + normalizedParentFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + ". Run get_metadata_details to verify the type and get_project_errors to verify.") //$NON-NLS-1$
             .toJson();
     }
@@ -522,14 +597,21 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
     {
         if (indexing != null)
         {
+            // DB-object attributes and register dimensions both expose indexing,
+            // through different interfaces (DbObjectAttribute / RegisterDimension).
             if (attribute instanceof DbObjectAttribute)
             {
                 ((DbObjectAttribute) attribute).setIndexing(indexing);
             }
+            else if (attribute instanceof RegisterDimension)
+            {
+                ((RegisterDimension) attribute).setIndexing(indexing);
+            }
             else
             {
-                throw new RuntimeException("Indexing is not supported for attribute type: " //$NON-NLS-1$
-                    + attribute.eClass().getName());
+                throw new RuntimeException("Indexing is not supported for: " //$NON-NLS-1$
+                    + attribute.eClass().getName()
+                    + ". It applies to DB-object attributes and register dimensions only."); //$NON-NLS-1$
             }
         }
         if (fillChecking != null && attribute instanceof BasicFeature)
@@ -539,6 +621,41 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         if (multiLineSet && attribute instanceof BasicFeature)
         {
             ((BasicFeature) attribute).setMultiLine(multiLine);
+        }
+    }
+
+    /**
+     * Applies the dimension-specific {@code master} and {@code mainFilter} flags.
+     * Both exist only on {@link InformationRegisterDimension}; callers already
+     * validate that the parent is an {@link InformationRegister} before these are
+     * set, so reaching a non-matching type here is a programming error.
+     *
+     * @param child the freshly created register child
+     * @param masterSet whether the {@code master} flag was provided
+     * @param master the {@code master} value
+     * @param mainFilterSet whether the {@code mainFilter} flag was provided
+     * @param mainFilter the {@code mainFilter} value
+     */
+    private void applyDimensionFlags(MdObject child, boolean masterSet, boolean master,
+        boolean mainFilterSet, boolean mainFilter)
+    {
+        if (!masterSet && !mainFilterSet)
+        {
+            return;
+        }
+        if (!(child instanceof InformationRegisterDimension))
+        {
+            throw new RuntimeException("'master'/'mainFilter' are only supported for " //$NON-NLS-1$
+                + "InformationRegister dimensions, not for: " + child.eClass().getName()); //$NON-NLS-1$
+        }
+        InformationRegisterDimension dim = (InformationRegisterDimension) child;
+        if (masterSet)
+        {
+            dim.setMaster(master);
+        }
+        if (mainFilterSet)
+        {
+            dim.setMainFilter(mainFilter);
         }
     }
 
@@ -625,6 +742,58 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         }
     }
 
+    /**
+     * Parses the optional {@code kind} parameter. Defaults to {@link Kind#ATTRIBUTE}.
+     * Accepts English and Russian names (singular/plural).
+     *
+     * @param value the raw parameter value (may be {@code null}/blank)
+     * @return the resolved kind
+     * @throws IllegalArgumentException when the value is not a recognized kind
+     */
+    private static Kind parseKind(String value)
+    {
+        if (value == null || value.trim().isEmpty())
+        {
+            return Kind.ATTRIBUTE;
+        }
+        String v = value.trim().toLowerCase();
+        switch (v)
+        {
+            case "attribute": //$NON-NLS-1$
+            case "attributes": //$NON-NLS-1$
+            case "реквизит": // Реквизит //$NON-NLS-1$
+            case "реквизиты": // Реквизиты //$NON-NLS-1$
+                return Kind.ATTRIBUTE;
+            case "dimension": //$NON-NLS-1$
+            case "dimensions": //$NON-NLS-1$
+            case "измерение": // Измерение //$NON-NLS-1$
+            case "измерения": // Измерения //$NON-NLS-1$
+                return Kind.DIMENSION;
+            case "resource": //$NON-NLS-1$
+            case "resources": //$NON-NLS-1$
+            case "ресурс": // Ресурс //$NON-NLS-1$
+            case "ресурсы": // Ресурсы //$NON-NLS-1$
+                return Kind.RESOURCE;
+            default:
+                throw new IllegalArgumentException("Invalid 'kind': " + value //$NON-NLS-1$
+                    + ". Expected 'Attribute', 'Dimension' or 'Resource'."); //$NON-NLS-1$
+        }
+    }
+
+    private static String describeKind(Kind kind)
+    {
+        switch (kind)
+        {
+            case DIMENSION:
+                return "Dimension"; //$NON-NLS-1$
+            case RESOURCE:
+                return "Resource"; //$NON-NLS-1$
+            case ATTRIBUTE:
+            default:
+                return "Attribute"; //$NON-NLS-1$
+        }
+    }
+
     private boolean supportsAttributes(MdObject obj)
     {
         return obj instanceof Catalog
@@ -642,19 +811,40 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             || obj instanceof AccountingRegister;
     }
 
+    /**
+     * Returns the EMF collection getter name for the given child kind
+     * ({@code getAttributes}/{@code getDimensions}/{@code getResources}).
+     *
+     * @param kind the child kind
+     * @return the getter method name
+     */
+    private static String collectionGetterName(Kind kind)
+    {
+        switch (kind)
+        {
+            case DIMENSION:
+                return "getDimensions"; //$NON-NLS-1$
+            case RESOURCE:
+                return "getResources"; //$NON-NLS-1$
+            case ATTRIBUTE:
+            default:
+                return "getAttributes"; //$NON-NLS-1$
+        }
+    }
+
     @SuppressWarnings("unchecked")
-    private boolean hasAttribute(MdObject parent, String name)
+    private boolean hasChild(MdObject parent, Kind kind, String name)
     {
         try
         {
-            java.lang.reflect.Method method = parent.getClass().getMethod("getAttributes"); //$NON-NLS-1$
+            java.lang.reflect.Method method = parent.getClass().getMethod(collectionGetterName(kind));
             Object result = method.invoke(parent);
             if (result instanceof EList)
             {
-                EList<? extends MdObject> attrs = (EList<? extends MdObject>) result;
-                for (MdObject attr : attrs)
+                EList<? extends MdObject> children = (EList<? extends MdObject>) result;
+                for (MdObject child : children)
                 {
-                    if (name.equalsIgnoreCase(attr.getName()))
+                    if (name.equalsIgnoreCase(child.getName()))
                     {
                         return true;
                     }
@@ -663,15 +853,54 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         }
         catch (Exception e)
         {
-            // Type may not have getAttributes
+            // Type may not expose this collection.
         }
         return false;
     }
 
-    private MdObject createAttribute(MdObject parent)
+    /**
+     * Creates the EMF child object matching the parent type and the requested
+     * kind. Dimensions/resources are only produced for
+     * {@link InformationRegister} and {@link AccumulationRegister}; for every
+     * other supported parent only {@link Kind#ATTRIBUTE} is valid (the caller
+     * validates this before the transaction).
+     *
+     * @param parent the parent metadata object
+     * @param kind the kind of child to create
+     * @return the new EMF child, or {@code null} when the combination is unsupported
+     */
+    private MdObject createChild(MdObject parent, Kind kind)
     {
         MdClassFactory factory = MdClassFactory.eINSTANCE;
 
+        if (parent instanceof InformationRegister)
+        {
+            switch (kind)
+            {
+                case DIMENSION:
+                    return factory.createInformationRegisterDimension();
+                case RESOURCE:
+                    return factory.createInformationRegisterResource();
+                case ATTRIBUTE:
+                default:
+                    return factory.createInformationRegisterAttribute();
+            }
+        }
+        if (parent instanceof AccumulationRegister)
+        {
+            switch (kind)
+            {
+                case DIMENSION:
+                    return factory.createAccumulationRegisterDimension();
+                case RESOURCE:
+                    return factory.createAccumulationRegisterResource();
+                case ATTRIBUTE:
+                default:
+                    return factory.createAccumulationRegisterAttribute();
+            }
+        }
+
+        // Non-register or attribute-only parents: only attributes are valid here.
         if (parent instanceof Catalog)
         {
             return factory.createCatalogAttribute();
@@ -712,14 +941,6 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         {
             return factory.createReportAttribute();
         }
-        if (parent instanceof InformationRegister)
-        {
-            return factory.createInformationRegisterAttribute();
-        }
-        if (parent instanceof AccumulationRegister)
-        {
-            return factory.createAccumulationRegisterAttribute();
-        }
         if (parent instanceof AccountingRegister)
         {
             return factory.createAccountingRegisterAttribute();
@@ -728,24 +949,26 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
     }
 
     @SuppressWarnings("unchecked")
-    private void addAttribute(MdObject parent, MdObject attribute)
+    private void addChild(MdObject parent, Kind kind, MdObject child)
     {
+        String getter = collectionGetterName(kind);
         try
         {
-            java.lang.reflect.Method method = parent.getClass().getMethod("getAttributes"); //$NON-NLS-1$
+            java.lang.reflect.Method method = parent.getClass().getMethod(getter);
             Object result = method.invoke(parent);
             if (result instanceof EList)
             {
-                ((EList<MdObject>) result).add(attribute);
+                ((EList<MdObject>) result).add(child);
             }
             else
             {
-                throw new RuntimeException("getAttributes() did not return EList"); //$NON-NLS-1$
+                throw new RuntimeException(getter + "() did not return EList"); //$NON-NLS-1$
             }
         }
         catch (ReflectiveOperationException e)
         {
-            throw new RuntimeException("Failed to add attribute via reflection", e); //$NON-NLS-1$
+            throw new RuntimeException("Failed to add " + describeKind(kind) //$NON-NLS-1$
+                + " via reflection", e); //$NON-NLS-1$
         }
     }
 }
