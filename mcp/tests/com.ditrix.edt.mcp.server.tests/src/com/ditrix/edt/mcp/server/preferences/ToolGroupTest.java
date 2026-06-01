@@ -191,6 +191,7 @@ public class ToolGroupTest
         assertTrue(tools.contains("delete_metadata_object"));
         assertTrue(tools.contains("add_metadata_attribute"));
         assertTrue(tools.contains("create_metadata_object"));
-        assertEquals(4, tools.size());
+        assertTrue(tools.contains("set_object_property"));
+        assertEquals(5, tools.size());
     }
 }

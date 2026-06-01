@@ -58,7 +58,7 @@ public enum ToolGroup
     REFACTORING("refactoring", "Refactoring", //$NON-NLS-1$ //$NON-NLS-2$
         "Metadata create, rename, delete, and attribute management", //$NON-NLS-1$
         "rename_metadata_object", "delete_metadata_object", "add_metadata_attribute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "create_metadata_object"), //$NON-NLS-1$
+        "create_metadata_object", "set_object_property"), //$NON-NLS-1$ //$NON-NLS-2$
 
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$

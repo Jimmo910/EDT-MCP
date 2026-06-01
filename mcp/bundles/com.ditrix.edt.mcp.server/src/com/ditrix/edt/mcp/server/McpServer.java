@@ -81,6 +81,7 @@ import com.ditrix.edt.mcp.server.tools.impl.DebugYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteMetadataObjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddMetadataAttributeTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataObjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetObjectPropertyTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -265,6 +266,7 @@ public class McpServer
         registry.register(new DeleteMetadataObjectTool());
         registry.register(new AddMetadataAttributeTool());
         registry.register(new CreateMetadataObjectTool());
+        registry.register(new SetObjectPropertyTool());
 
         // LanguageTool translation tools
         registry.register(new GenerateTranslationStringsTool());
