@@ -265,6 +265,7 @@ public class McpServer
         registry.register(new DeleteMetadataObjectTool());
         registry.register(new AddMetadataAttributeTool());
         registry.register(new CreateMetadataObjectTool());
+        registry.register(new SetStyleItemValueTool());
 
         // LanguageTool translation tools
         registry.register(new GenerateTranslationStringsTool());
