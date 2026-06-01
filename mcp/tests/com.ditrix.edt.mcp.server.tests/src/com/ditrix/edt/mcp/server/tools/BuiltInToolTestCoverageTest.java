@@ -46,11 +46,7 @@ public class BuiltInToolTestCoverageTest
         "GetTasksTool", //$NON-NLS-1$
         "GetCheckDescriptionTool", //$NON-NLS-1$
         "GetPlatformDocumentationTool", //$NON-NLS-1$
-        "GetMetadataObjectsTool", //$NON-NLS-1$
         "GetMetadataDetailsTool", //$NON-NLS-1$
-        "GetSubsystemContentTool", //$NON-NLS-1$
-        "GetTagsTool", //$NON-NLS-1$
-        "GetObjectsByTagsTool", //$NON-NLS-1$
         "UpdateDatabaseTool", //$NON-NLS-1$
         "ListConfigurationsTool", //$NON-NLS-1$
         "ListModulesTool", //$NON-NLS-1$
