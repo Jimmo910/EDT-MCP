@@ -12,11 +12,16 @@ import java.util.UUID;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.emf.common.util.EList;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.InternalEObject;
 
+import com._1c.g5.v8.bm.core.BmUriUtil;
+import com._1c.g5.v8.bm.core.IBmEngine;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
+import com._1c.g5.v8.dt.core.naming.ISymbolicNameService;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -26,6 +31,7 @@ import com._1c.g5.v8.dt.mcore.McoreFactory;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.NumberQualifiers;
 import com._1c.g5.v8.dt.mcore.StringQualifiers;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.metadata.common.FillChecking;
@@ -48,8 +54,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Report;
 import com._1c.g5.v8.dt.metadata.mdclass.Task;
-import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.Version;
+import com._1c.g5.wiring.ServiceAccess;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -70,10 +76,13 @@ import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
  * <p>
  * Type items (platform types such as {@code String}/{@code Number}/{@code Date}/
  * {@code Boolean} and reference types such as {@code CatalogRef.Products}) are
- * resolved into {@link TypeItem} proxies via the platform type registry
- * ({@link IEObjectProvider.Registry}) for the project's platform
- * {@link Version}. This is the same mechanism EDT itself uses to materialize
- * type proxies by name; the proxies are resolved lazily by the BM resource set.
+ * resolved into {@link TypeItem} proxies through
+ * {@link ISymbolicNameService#convertSymbolicNameToUri}, scoped to the project's
+ * own {@link IBmEngine}. This is the same project-scoped mechanism EDT uses when
+ * it imports a configuration from XML: platform type names resolve against the
+ * platform type registry, while reference type names (e.g. {@code CatalogRef.X})
+ * resolve against the metadata objects of the <em>current project</em>. The
+ * proxies are then resolved lazily by the BM resource set.
  */
 public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
 {
@@ -275,7 +284,10 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         }
         long parentBmId = ((IBmObject) parentObject).bmGetId();
 
-        // Execute write task
+        // Execute write task. The project BM engine is needed to resolve
+        // reference type names (e.g. CatalogRef.X) against this project's
+        // metadata objects.
+        final IBmEngine bmEngine = bmModel.getEngine();
         final String normalizedParentFqn = parentFqn;
         try
         {
@@ -306,8 +318,12 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                     newAttribute.setName(attributeName);
                     newAttribute.setUuid(UUID.randomUUID());
 
+                    // FQN of the parent top object, used as the resolution context
+                    // for reference type names.
+                    String topObjectFqn = ((IBmObject) parent).bmGetTopObject().bmGetFqn();
+
                     // Apply optional type, qualifiers and flags.
-                    applyType(newAttribute, typeSpec, version);
+                    applyType(newAttribute, typeSpec, version, bmEngine, topObjectFqn, tx);
                     applyFlags(newAttribute, indexing, fillChecking, multiLineSet, multiLine);
 
                     addAttribute(parent, newAttribute);
@@ -340,11 +356,19 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
      * is {@code null} (the attribute keeps its factory default type).
      * <p>
      * Each type item name is resolved into a {@link TypeItem} proxy through the
-     * platform type registry - the same path EDT uses internally. String,
-     * Number and Date qualifiers are attached when at least one item of the
-     * corresponding kind carries them.
+     * project-scoped {@link ISymbolicNameService} - the same path EDT uses when
+     * importing a configuration from XML. String, Number and Date qualifiers are
+     * attached when at least one item of the corresponding kind carries them.
+     *
+     * @param attribute the attribute being configured
+     * @param spec the parsed type specification (may be {@code null})
+     * @param version the project platform version
+     * @param engine the project BM engine (resolution scope for reference types)
+     * @param contextTopObjectFqn FQN of the attribute's top object
+     * @param tx the active BM transaction (used to verify referenced objects exist)
      */
-    private void applyType(MdObject attribute, AttributeTypeSpec spec, Version version)
+    private void applyType(MdObject attribute, AttributeTypeSpec spec, Version version, IBmEngine engine,
+        String contextTopObjectFqn, IBmTransaction tx)
     {
         if (spec == null)
         {
@@ -366,7 +390,7 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
 
         for (AttributeTypeSpec.Item item : spec.getItems())
         {
-            TypeItem typeItem = resolveTypeItem(item.name, version);
+            TypeItem typeItem = resolveTypeItem(item.name, version, attribute, engine, contextTopObjectFqn, tx);
             typeItems.add(typeItem);
 
             if (item.isString() && hasStringQualifiers(item))
@@ -418,34 +442,79 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
     }
 
     /**
-     * Resolves a type name (platform type like {@code String} or reference type
-     * like {@code CatalogRef.Products}) into a {@link TypeItem} proxy via the
-     * platform {@link IEObjectProvider.Registry}. The proxy is resolved lazily
-     * by the BM resource set when the model is read or persisted.
+     * Resolves a type name (a platform type like {@code String} or a reference
+     * type like {@code CatalogRef.Products}) into a {@link TypeItem} proxy.
+     * <p>
+     * Resolution is delegated to the project-scoped {@link ISymbolicNameService},
+     * called with the {@code types} reference of {@link TypeDescription} as the
+     * context feature and the project {@link IBmEngine}. This is the exact
+     * mechanism EDT uses when it materializes a {@code <Type>} element while
+     * importing a configuration from XML:
+     * <ul>
+     * <li>platform type names ({@code String}, {@code Number}, {@code Boolean},
+     *     {@code Date}, ...) resolve against the platform type registry;</li>
+     * <li>reference type names ({@code CatalogRef.X}, {@code DocumentRef.X},
+     *     {@code EnumRef.X}, ...) resolve against the metadata objects of
+     *     <em>this</em> project.</li>
+     * </ul>
+     * The returned proxy carries the resolved URI and is resolved lazily by the
+     * BM resource set when the model is read or persisted.
+     * <p>
+     * When the name cannot be resolved the service yields an {@code unresolved:/}
+     * URI; this method detects that and fails loudly rather than silently
+     * producing a dangling type.
+     *
+     * @param typeName the verbatim type name to resolve
+     * @param version the project platform version
+     * @param contextObject the object the type is being set on (resolution context)
+     * @param engine the project BM engine (resolution scope for reference types)
+     * @param contextTopObjectFqn FQN of the context object's top object
+     * @param tx the active BM transaction (used to verify referenced objects exist)
+     * @return a resolved {@link TypeItem} proxy
      */
-    private TypeItem resolveTypeItem(String typeName, Version version)
+    private TypeItem resolveTypeItem(String typeName, Version version, MdObject contextObject, IBmEngine engine,
+        String contextTopObjectFqn, IBmTransaction tx)
     {
-        IEObjectProvider provider =
-            IEObjectProvider.Registry.INSTANCE.get(McorePackage.Literals.TYPE_ITEM, version);
-        if (provider == null)
+        ISymbolicNameService symbolicNameService = ServiceAccess.get(ISymbolicNameService.class);
+        if (symbolicNameService == null)
         {
-            throw new RuntimeException("No type provider available for the project platform version"); //$NON-NLS-1$
+            throw new RuntimeException("ISymbolicNameService not available; cannot resolve type: " + typeName); //$NON-NLS-1$
         }
-        try
+
+        URI uri = symbolicNameService.convertSymbolicNameToUri(typeName, contextObject,
+            McorePackage.Literals.TYPE_DESCRIPTION__TYPES, contextTopObjectFqn, engine, version);
+        if (uri == null || "unresolved".equals(uri.scheme())) //$NON-NLS-1$
         {
-            TypeItem typeItem = provider.createProxy(typeName);
-            if (typeItem == null)
+            throw new RuntimeException(unknownTypeMessage(typeName));
+        }
+
+        // For a reference type the URI points at a metadata object of this
+        // project (e.g. bm://.../Catalog.Products#/producedTypes/refType/type).
+        // The symbolic-name service builds that URI from the name without
+        // checking the target exists, so a typo would yield a dangling type.
+        // Verify the referenced top object is actually present in the project
+        // and fail loudly otherwise. Platform type URIs are not BM URIs and are
+        // left untouched.
+        if (BmUriUtil.isBmUri(uri))
+        {
+            String referencedTopObjectFqn = BmUriUtil.extractTopObjectFqn(uri);
+            if (referencedTopObjectFqn != null && tx.getTopObjectByFqn(referencedTopObjectFqn) == null)
             {
-                throw new RuntimeException("Could not resolve type: " + typeName); //$NON-NLS-1$
+                throw new RuntimeException(unknownTypeMessage(typeName));
             }
-            return typeItem;
         }
-        catch (IllegalArgumentException e)
-        {
-            throw new RuntimeException("Unknown type name: " + typeName //$NON-NLS-1$
-                + ". Use a platform type (String, Number, Boolean, Date) or a reference type " //$NON-NLS-1$
-                + "(e.g. CatalogRef.Products, DocumentRef.SalesOrder, EnumRef.ProductKinds)."); //$NON-NLS-1$
-        }
+
+        Type typeItem = McoreFactory.eINSTANCE.createType();
+        ((InternalEObject) typeItem).eSetProxyURI(uri);
+        return typeItem;
+    }
+
+    private static String unknownTypeMessage(String typeName)
+    {
+        return "Unknown type name: " + typeName //$NON-NLS-1$
+            + ". Use a platform type (String, Number, Boolean, Date) or a reference type to an " //$NON-NLS-1$
+            + "object that already exists in this project " //$NON-NLS-1$
+            + "(e.g. CatalogRef.Products, DocumentRef.SalesOrder, EnumRef.ProductKinds)."; //$NON-NLS-1$
     }
 
     private void applyFlags(MdObject attribute, Indexing indexing, FillChecking fillChecking,
