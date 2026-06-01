@@ -6,7 +6,8 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
-import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
@@ -48,10 +49,66 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
 {
     public static final String NAME = "create_metadata_object"; //$NON-NLS-1$
 
-    /** Canonical English singular type names supported for creation in this version. */
-    private static final Set<String> SUPPORTED_TYPES = new LinkedHashSet<>(Arrays.asList(
-        "Catalog", "Document", "InformationRegister", "AccumulationRegister", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "Enum", "CommonModule", "Report", "DataProcessor")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    /**
+     * Canonical English singular type names that are <em>not</em> supported for
+     * creation by this tool, each mapped to the reason it is excluded.
+     * <p>
+     * The supported set is derived generically from {@link MetadataTypeUtils}
+     * (every type it knows how to map to a Configuration collection) minus the
+     * entries below. A type is excluded when it cannot be produced by the plain
+     * {@code factory.create(eClass) -> attachTopObject -> add to collection ->
+     * fillDefaultReferences} chain, because it needs external/binary content, a
+     * dedicated import wizard, or configuration-level handling that a blank
+     * default object would leave broken. Excluded types still resolve to a clear,
+     * actionable error instead of silently creating an invalid object.
+     */
+    private static final Map<String, String> UNSUPPORTED_TYPES;
+    static
+    {
+        Map<String, String> unsupported = new LinkedHashMap<>();
+        unsupported.put("Language", //$NON-NLS-1$
+            "configuration-level object that requires a language code and changes the NLS of the whole configuration"); //$NON-NLS-1$
+        unsupported.put("WSReference", //$NON-NLS-1$
+            "must be imported from a WSDL location and cannot be created as a blank object"); //$NON-NLS-1$
+        unsupported.put("XDTOPackage", //$NON-NLS-1$
+            "requires XDTO model content (namespace, types) rather than a blank default object"); //$NON-NLS-1$
+        unsupported.put("ExternalDataSource", //$NON-NLS-1$
+            "requires a database connection and table definitions to be valid"); //$NON-NLS-1$
+        unsupported.put("Interface", //$NON-NLS-1$
+            "deprecated 8.2 ordinary-application object; not present in modern configurations"); //$NON-NLS-1$
+        unsupported.put("Style", //$NON-NLS-1$
+            "deprecated 8.2 ordinary-application object; create a StyleItem instead"); //$NON-NLS-1$
+        unsupported.put("Bot", //$NON-NLS-1$
+            "edition-specific object; the Configuration collection may be absent in this platform version"); //$NON-NLS-1$
+        unsupported.put("WebSocketClient", //$NON-NLS-1$
+            "edition-specific object; the Configuration collection may be absent in this platform version"); //$NON-NLS-1$
+        unsupported.put("IntegrationService", //$NON-NLS-1$
+            "requires integration channel content; the Configuration collection may be absent in this platform version"); //$NON-NLS-1$
+        UNSUPPORTED_TYPES = Collections.unmodifiableMap(unsupported);
+    }
+
+    /**
+     * Canonical English singular type names supported for creation, computed as
+     * all types known to {@link MetadataTypeUtils} (that map to a Configuration
+     * collection) minus {@link #UNSUPPORTED_TYPES}. Order follows
+     * {@link MetadataTypeUtils#getAllEnglishSingularNames()}.
+     */
+    private static final Set<String> SUPPORTED_TYPES;
+    static
+    {
+        Set<String> supported = new LinkedHashSet<>();
+        for (String type : MetadataTypeUtils.getAllEnglishSingularNames())
+        {
+            // A type can only be created here if it maps to a Configuration
+            // containment collection and is not explicitly excluded.
+            if (!UNSUPPORTED_TYPES.containsKey(type)
+                && MetadataTypeUtils.getConfigReferenceName(type) != null)
+            {
+                supported.add(type);
+            }
+        }
+        SUPPORTED_TYPES = Collections.unmodifiableSet(supported);
+    }
 
     /** Comma-separated list for prose/error messages: {@code "Catalog, Document, …"}. */
     private static final String SUPPORTED_TYPES_LIST = String.join(", ", SUPPORTED_TYPES); //$NON-NLS-1$
@@ -141,6 +198,13 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
         }
         if (!SUPPORTED_TYPES.contains(canonicalType))
         {
+            String reason = UNSUPPORTED_TYPES.get(canonicalType);
+            if (reason != null)
+            {
+                return ToolResult.error("Metadata type '" + canonicalType //$NON-NLS-1$
+                    + "' is not supported for creation: " + reason + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "Supported: " + SUPPORTED_TYPES_LIST + ".").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             return ToolResult.error("Metadata type '" + canonicalType + "' is not supported for creation. " + //$NON-NLS-1$ //$NON-NLS-2$
                 "Supported: " + SUPPORTED_TYPES_LIST + ".").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
         }
