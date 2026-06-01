@@ -130,6 +130,13 @@ public final class ToolParameterSettings
                     + "reporting timeout (or escalating to force-kill when force=true)", //$NON-NLS-1$
                 10, 1, 120)));
 
+        map.put("update_database", Collections.singletonList( //$NON-NLS-1$
+            new ParameterDef("timeoutSeconds", "Update timeout (sec)", //$NON-NLS-1$ //$NON-NLS-2$
+                "How long to wait for an infobase update to finish before reporting a timeout. " //$NON-NLS-1$
+                    + "Guards against an unbounded hang when the infobase is held by a busy 1С " //$NON-NLS-1$
+                    + "session.", //$NON-NLS-1$
+                120, 5, 1800)));
+
         TOOL_PARAMETERS = Collections.unmodifiableMap(map);
     }
 
