@@ -17,10 +17,7 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.form.model.Form;
-import com._1c.g5.v8.dt.form.model.FormAttribute;
-import com._1c.g5.v8.dt.form.model.FormCommand;
-import com._1c.g5.v8.dt.form.model.FormItem;
-import com._1c.g5.v8.dt.form.model.FormItemContainer;
+import com._1c.g5.v8.dt.form.service.FormIdentifierService;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -181,43 +178,57 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
     }
 
     /**
-     * Computes the next free element {@code id} for a form. Element ids must be
-     * unique within a single form across items, attributes and commands.
+     * Computes the next free <b>element</b> {@code id} for a form.
+     * <p>
+     * Form ids live in three independent spaces: form <em>elements</em>
+     * ({@link com._1c.g5.v8.dt.form.model.FormItem} and every subtype –
+     * fields, groups, buttons, context menus, extended tooltips,
+     * {@code autoCommandBar} buttons, additions, …), form
+     * <em>attributes</em> and form <em>commands</em>. A new id must be unique
+     * only within its own space; the spaces are never merged.
+     * <p>
+     * This delegates to EDT's own {@link FormIdentifierService} – the same
+     * allocator the form editor uses. It scans the <em>entire</em> form
+     * containment tree (via {@code EcoreUtil.getAllContents}), not just the
+     * top-level {@code getItems()} collection, so nested elements that are held
+     * through dedicated references rather than {@code getItems()} (context
+     * menus, extended tooltips, {@code autoCommandBar} buttons, …) are counted.
+     * It also keeps a per-transaction running counter, so several elements
+     * created within one transaction receive distinct ids even before they are
+     * attached to the tree.
      *
      * @param form the content form
-     * @return a positive id greater than every existing one
+     * @return a positive element id greater than every existing element id
      */
     protected int nextItemId(Form form)
     {
-        int max = 0;
-        max = Math.max(max, maxItemId(form));
-        for (FormAttribute attr : form.getAttributes())
-        {
-            max = Math.max(max, attr.getId());
-        }
-        for (FormCommand cmd : form.getFormCommands())
-        {
-            max = Math.max(max, cmd.getId());
-        }
-        return max + 1;
+        return FormIdentifierService.INSTANCE.getNextItemId(form);
     }
 
-    private int maxItemId(FormItemContainer container)
+    /**
+     * Computes the next free <b>attribute</b> {@code id} for a form. This is a
+     * separate id space from form elements and commands; see
+     * {@link #nextItemId(Form)}.
+     *
+     * @param form the content form
+     * @return a positive attribute id greater than every existing attribute id
+     */
+    protected int nextAttributeId(Form form)
     {
-        int max = 0;
-        for (FormItem item : container.getItems())
-        {
-            // autoCommandBar uses the service id -1; ignore negatives.
-            if (item.getId() > max)
-            {
-                max = item.getId();
-            }
-            if (item instanceof FormItemContainer)
-            {
-                max = Math.max(max, maxItemId((FormItemContainer)item));
-            }
-        }
-        return max;
+        return FormIdentifierService.INSTANCE.getNextAttributeId(form);
+    }
+
+    /**
+     * Computes the next free <b>command</b> {@code id} for a form. This is a
+     * separate id space from form elements and attributes; see
+     * {@link #nextItemId(Form)}.
+     *
+     * @param form the content form
+     * @return a positive command id greater than every existing command id
+     */
+    protected int nextCommandId(Form form)
+    {
+        return FormIdentifierService.INSTANCE.getNextCommandId(form);
     }
 
     /**
