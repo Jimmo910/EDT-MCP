@@ -55,6 +55,7 @@ import com.ditrix.edt.mcp.server.tools.impl.ListConfigurationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListProjectsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CleanProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.RevalidateObjectsTool;
+import com.ditrix.edt.mcp.server.tools.impl.RefreshModelTool;
 import com.ditrix.edt.mcp.server.tools.impl.ExportConfigurationToXmlTool;
 import com.ditrix.edt.mcp.server.tools.impl.ImportConfigurationFromXmlTool;
 import com.ditrix.edt.mcp.server.tools.impl.GenerateTranslationStringsTool;
@@ -214,6 +215,7 @@ public class McpServer
         registry.register(new GetConfigurationPropertiesTool());
         registry.register(new CleanProjectTool());
         registry.register(new RevalidateObjectsTool());
+        registry.register(new RefreshModelTool());
         registry.register(new ExportConfigurationToXmlTool());
         registry.register(new ImportConfigurationFromXmlTool());
         registry.register(new GetProblemSummaryTool());
