@@ -193,7 +193,8 @@ public class ToolGroupTest
         assertTrue(tools.contains("create_metadata_object"));
         assertTrue(tools.contains("set_register_property"));
         assertTrue(tools.contains("set_style_item_value"));
-        assertEquals(6, tools.size());
+        assertTrue(tools.contains("set_object_property"));
+        assertEquals(7, tools.size());
     }
 
     @Test
