@@ -205,7 +205,9 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
 
                     FormAttribute attr = FormFactory.eINSTANCE.createFormAttribute();
                     attr.setName(attributeName);
-                    attr.setId(nextItemId(form));
+                    // Attributes have their own id space, separate from form
+                    // elements and commands.
+                    attr.setId(nextAttributeId(form));
                     attr.setMain(mainFlag);
 
                     if (typeSpecFinal != null)

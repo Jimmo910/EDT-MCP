@@ -134,7 +134,9 @@ public class AddFormCommandTool extends AbstractFormWriteTool
 
                     FormCommand command = FormFactory.eINSTANCE.createFormCommand();
                     command.setName(commandName);
-                    command.setId(nextItemId(form));
+                    // Commands have their own id space, separate from form
+                    // elements and attributes.
+                    command.setId(nextCommandId(form));
                     form.getFormCommands().add(command);
                     return null;
                 }
