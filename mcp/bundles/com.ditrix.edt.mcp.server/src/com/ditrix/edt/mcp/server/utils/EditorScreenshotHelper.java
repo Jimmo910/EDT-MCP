@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Base64;
+import java.util.function.BooleanSupplier;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -20,12 +21,15 @@ import org.eclipse.swt.graphics.ImageLoader;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.ide.IDE;
 import org.eclipse.ui.part.FileEditorInput;
+
+import com._1c.g5.v8.dt.ui.util.ContentUtil;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
@@ -41,12 +45,18 @@ public final class EditorScreenshotHelper
     private static final String FORM_EDITOR_ID = "com._1c.g5.v8.dt.form.ui.formEditor"; //$NON-NLS-1$
     private static final String FORM_MAIN_PAGE_ID = "editors.form.pages.main"; //$NON-NLS-1$
     private static final String WYSIWYG_VIEWER_FIELD = "wysiwygViewer"; //$NON-NLS-1$
+    private static final String FORM_CONTROLS_CREATED_FIELD = "formControlsCreated"; //$NON-NLS-1$
     private static final String WYSIWYG_REPRESENTATION_FIELD = "wysiwygRepresentation"; //$NON-NLS-1$
     private static final String FORM_IMAGE_METHOD = "getFormImageData"; //$NON-NLS-1$
     private static final String GET_CONTROL_METHOD = "getControl"; //$NON-NLS-1$
     private static final String REFRESH_METHOD = "refresh"; //$NON-NLS-1$
+    private static final String REBUILD_METHOD = "rebuild"; //$NON-NLS-1$
     private static final int WYSIWYG_WAIT_RETRIES = 15;
     private static final int WYSIWYG_WAIT_INTERVAL_MS = 500;
+    private static final int RENDER_WAIT_TIMEOUT_MS = 8000;
+    private static final int RENDER_WAIT_POLL_INTERVAL_MS = 200;
+    private static final int EDITOR_INPUT_RESOLVE_RETRIES = 20;
+    private static final int EDITOR_INPUT_RESOLVE_INTERVAL_MS = 250;
 
     private EditorScreenshotHelper()
     {
@@ -186,16 +196,33 @@ public final class EditorScreenshotHelper
             return ToolResult.error("No active workbench page").toJson(); //$NON-NLS-1$
         }
 
+        // Resolve the typed DT editor input (model + feature) BEFORE opening. Opening the form
+        // editor with a raw FileEditorInput goes through DtGranularEditor's bridge init, which
+        // calls ContentUtil.createGranularEditorInput(file); if the form model is not yet
+        // resolvable from the BM model that bridge throws a PartInitException during async part
+        // rendering and the editor is left half-initialized (no WYSIWYG viewer). Resolving the
+        // granular input here lets us (a) wait until the model is available and (b) open with the
+        // already-resolved input, and (c) report a precise error instead of a misleading one.
+        IEditorInput editorInput = resolveGranularEditorInput(formFile);
+        if (editorInput == null)
+        {
+            return ToolResult.error(
+                "Could not resolve the form model for: " + formPath + ". " + //$NON-NLS-1$ //$NON-NLS-2$
+                "The project may still be loading or building its model; " + //$NON-NLS-1$
+                "wait for the project to finish loading and try again.").toJson(); //$NON-NLS-1$
+        }
+
         try
         {
-            // Close existing editor so we apply current render mode
+            // Close existing editor so we apply current render mode. The form editor matching
+            // strategy recognizes a FileEditorInput for an already-open granular editor.
             IEditorPart existingEditor = page.findEditor(new FileEditorInput(formFile));
             if (existingEditor != null)
             {
                 page.closeEditor(existingEditor, false);
             }
 
-            IEditorPart editorPart = IDE.openEditor(page, formFile, FORM_EDITOR_ID, true);
+            IEditorPart editorPart = IDE.openEditor(page, editorInput, FORM_EDITOR_ID, true);
             if (editorPart == null)
             {
                 return ToolResult.error("Could not open form editor for: " + formPath).toJson(); //$NON-NLS-1$
@@ -209,6 +236,44 @@ public final class EditorScreenshotHelper
             Activator.logError("Failed to open form editor for: " + formPath, e); //$NON-NLS-1$
             return ToolResult.error("Failed to open form editor: " + e.getMessage()).toJson(); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Resolves the EDT granular editor input ({@code IDtEditorInput}) for a form file, retrying
+     * while the project's BM model is still loading.
+     * <p>
+     * {@link ContentUtil#createGranularEditorInput(IFile)} returns {@code null} when the form's
+     * top object cannot be resolved from the BM model yet (e.g. the project is still being built
+     * after EDT startup). Right after startup this is transient, so we poll a few times, pumping
+     * the SWT event loop between attempts. Must be called on the UI thread.
+     *
+     * @param formFile the form {@code Form.form} file
+     * @return the resolved editor input, or {@code null} if it never became available
+     */
+    private static IEditorInput resolveGranularEditorInput(IFile formFile)
+    {
+        Display display = Display.getCurrent();
+        for (int i = 0; i < EDITOR_INPUT_RESOLVE_RETRIES; i++)
+        {
+            try
+            {
+                IEditorInput input = ContentUtil.createGranularEditorInput(formFile);
+                if (input != null)
+                {
+                    return input;
+                }
+            }
+            catch (Exception e)
+            {
+                // Model resolution can fail transiently while the project loads; keep retrying.
+                Activator.logWarning("Form model not resolvable yet: " + e.getMessage()); //$NON-NLS-1$
+            }
+
+            processEvents(display);
+            sleep(EDITOR_INPUT_RESOLVE_INTERVAL_MS);
+            processEvents(display);
+        }
+        return null;
     }
 
     /**
@@ -250,14 +315,18 @@ public final class EditorScreenshotHelper
 
             try
             {
+                // The WYSIWYG page (FormEditorPage, id "editors.form.pages.main") builds its
+                // controls only once it becomes the active page of the multi-page form editor,
+                // and its wysiwygViewer is then created asynchronously (createPageControls schedules
+                // it via getMappingRootAsync + Display.asyncExec, setting formControlsCreated=true
+                // when done). Re-activate the main page each iteration so its createPartControl runs,
+                // then accept the page only once the viewer actually exists.
+                activateActiveFormMainPage();
+
                 Object page = getActiveFormEditorPage();
-                if (page != null)
+                if (page != null && isWysiwygPageReady(page))
                 {
-                    Object viewer = ReflectionUtils.getFieldValue(page, WYSIWYG_VIEWER_FIELD);
-                    if (viewer != null)
-                    {
-                        return page;
-                    }
+                    return page;
                 }
             }
             catch (Exception e)
@@ -269,15 +338,62 @@ public final class EditorScreenshotHelper
             processEvents(display);
         }
 
-        // Final attempt
+        // Final attempt: return the page only if its WYSIWYG viewer is actually available.
         try
         {
-            return getActiveFormEditorPage();
+            Object page = getActiveFormEditorPage();
+            return (page != null && isWysiwygPageReady(page)) ? page : null;
         }
         catch (Exception e)
         {
             Activator.logError("Failed to get form editor page after waiting", e); //$NON-NLS-1$
             return null;
+        }
+    }
+
+    /**
+     * Reports whether the form editor WYSIWYG page has finished building its controls, i.e. the
+     * {@code wysiwygViewer} field is populated. The page sets {@code formControlsCreated} to
+     * {@code true} only after the asynchronous control creation (which assigns the viewer)
+     * completes, so it is used as a confirming signal when present.
+     *
+     * @param formEditorPage the {@code FormEditorPage} instance
+     * @return {@code true} when the WYSIWYG viewer is available
+     */
+    private static boolean isWysiwygPageReady(Object formEditorPage)
+    {
+        try
+        {
+            Object viewer = ReflectionUtils.getFieldValue(formEditorPage, WYSIWYG_VIEWER_FIELD);
+            if (viewer == null)
+            {
+                return false;
+            }
+            Object controlsCreated = ReflectionUtils.getFieldValue(formEditorPage, FORM_CONTROLS_CREATED_FIELD);
+            // If the flag field is missing in this EDT version, fall back to viewer presence only.
+            return !(controlsCreated instanceof Boolean) || ((Boolean)controlsCreated).booleanValue();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Activates the WYSIWYG (main) page of the currently active form editor, if any.
+     * Triggers lazy creation of the page controls. Must be called on the UI thread.
+     */
+    private static void activateActiveFormMainPage()
+    {
+        IWorkbenchPage page = getWorkbenchPage();
+        if (page == null)
+        {
+            return;
+        }
+        IEditorPart editorPart = page.getActiveEditor();
+        if (editorPart != null)
+        {
+            activateFormMainPage(editorPart);
         }
     }
 
@@ -308,29 +424,24 @@ public final class EditorScreenshotHelper
             return null;
         }
 
-        // Trigger rebuild to get up-to-date image
-        try
-        {
-            Method rebuildMethod = representation.getClass().getDeclaredMethod("rebuild", boolean.class); //$NON-NLS-1$
-            rebuildMethod.setAccessible(true);
-            rebuildMethod.invoke(representation, true);
+        // Trigger rebuild so the native render produces an up-to-date image, then read it.
+        rebuildRepresentation(representation);
+        return readFormImageData(representation);
+    }
 
-            Display display = Display.getCurrent();
-            if (display != null)
-            {
-                for (int i = 0; i < 5; i++)
-                {
-                    processEvents(display);
-                    sleep(200);
-                }
-            }
-        }
-        catch (Exception e)
+    /**
+     * Reads the currently rendered form image from the representation without triggering a
+     * rebuild. Returns {@code null} when the native render has not produced an image yet.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @return image data, or {@code null} if not available
+     */
+    public static ImageData readFormImageData(Object representation)
+    {
+        if (representation == null)
         {
-            Activator.logWarning("Could not call rebuild: " + e.getMessage()); //$NON-NLS-1$
+            return null;
         }
-
-        // Get the image data
         try
         {
             Method method = representation.getClass().getDeclaredMethod(FORM_IMAGE_METHOD);
@@ -345,7 +456,10 @@ public final class EditorScreenshotHelper
         {
             Activator.logWarning("Method " + FORM_IMAGE_METHOD + " not found"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not read form image data: " + e.getMessage()); //$NON-NLS-1$
+        }
         return null;
     }
 
@@ -411,6 +525,136 @@ public final class EditorScreenshotHelper
         catch (Exception e)
         {
             Activator.logWarning("Failed to refresh WYSIWYG viewer: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    // ==================== Render readiness ====================
+
+    /**
+     * Returns the {@code FormWysiwygRepresentation} backing the given viewer, or {@code null}.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @return the representation object, or {@code null} if not available
+     */
+    public static Object getRepresentation(Object wysiwygViewer)
+    {
+        try
+        {
+            return ReflectionUtils.getFieldValue(wysiwygViewer, WYSIWYG_REPRESENTATION_FIELD);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Triggers a full rebuild of the WYSIWYG representation so the native layout/render
+     * pipeline recomputes element bounds and the form image. Pumps a few UI cycles so the
+     * asynchronous native render can deliver its result.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     */
+    public static void rebuildRepresentation(Object representation)
+    {
+        if (representation == null)
+        {
+            return;
+        }
+        try
+        {
+            Method rebuildMethod = representation.getClass().getDeclaredMethod(REBUILD_METHOD, boolean.class);
+            rebuildMethod.setAccessible(true);
+            rebuildMethod.invoke(representation, true);
+
+            Display display = Display.getCurrent();
+            for (int i = 0; i < 5; i++)
+            {
+                processEvents(display);
+                sleep(RENDER_WAIT_POLL_INTERVAL_MS);
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not rebuild WYSIWYG representation: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Waits until the form WYSIWYG layout has actually finished rendering.
+     * <p>
+     * The EDT form layout is produced by an asynchronous, event-driven native render
+     * ({@code NativeRenderService}); right after a form is opened or its structure changes,
+     * the first attempt to read the layout or the image returns nothing because rendering has
+     * not completed yet. This method triggers a rebuild and then polls the supplied readiness
+     * predicate, pumping the SWT event loop between polls, until the predicate is satisfied or
+     * the timeout elapses.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @param renderedCheck predicate that returns {@code true} once the rendered content
+     *            (calculated bounds or form image) is available
+     * @return {@code true} if the form rendered within the timeout, {@code false} otherwise
+     */
+    public static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck)
+    {
+        return waitUntilRendered(wysiwygViewer, renderedCheck, RENDER_WAIT_TIMEOUT_MS);
+    }
+
+    /**
+     * Same as {@link #waitUntilRendered(Object, BooleanSupplier)} but with an explicit timeout.
+     * Package-visible so tests can exercise the polling loop quickly.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @param renderedCheck predicate that returns {@code true} once the rendered content is available
+     * @param timeoutMs maximum time to wait, in milliseconds
+     * @return {@code true} if the form rendered within the timeout, {@code false} otherwise
+     */
+    static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck, int timeoutMs)
+    {
+        Object representation = getRepresentation(wysiwygViewer);
+        Display display = Display.getCurrent();
+
+        if (safeCheck(renderedCheck))
+        {
+            return true;
+        }
+
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        boolean rebuilt = false;
+        while (System.currentTimeMillis() < deadline)
+        {
+            if (!rebuilt && representation != null)
+            {
+                rebuildRepresentation(representation);
+                rebuilt = true;
+            }
+
+            processEvents(display);
+            if (safeCheck(renderedCheck))
+            {
+                return true;
+            }
+            sleep(RENDER_WAIT_POLL_INTERVAL_MS);
+            processEvents(display);
+            if (safeCheck(renderedCheck))
+            {
+                return true;
+            }
+        }
+
+        return safeCheck(renderedCheck);
+    }
+
+    private static boolean safeCheck(BooleanSupplier renderedCheck)
+    {
+        try
+        {
+            return renderedCheck.getAsBoolean();
+        }
+        catch (Exception e)
+        {
+            // A transient failure while the model is still being built is treated as "not ready".
+            return false;
         }
     }
 
