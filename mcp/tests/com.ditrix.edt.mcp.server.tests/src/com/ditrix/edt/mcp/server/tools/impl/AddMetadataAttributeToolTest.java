@@ -71,4 +71,50 @@ public class AddMetadataAttributeToolTest
         assertTrue("parentFqn must be required", tail.contains("\"parentFqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("attributeName must be required", tail.contains("\"attributeName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testInputSchemaContainsOptionalTypeParameters()
+    {
+        String schema = new AddMetadataAttributeTool().getInputSchema();
+        assertTrue(schema.contains("\"type\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"indexing\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"fillChecking\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"multiLine\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testInputSchemaContainsRegisterKindParameters()
+    {
+        // S3: register child kind plus dimension-only flags.
+        String schema = new AddMetadataAttributeTool().getInputSchema();
+        assertTrue(schema.contains("\"kind\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"master\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"mainFilter\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOptionalParametersAreNotRequired()
+    {
+        // Backward compatibility: the new type/qualifier/flag parameters must
+        // stay optional so existing callers keep working unchanged.
+        String schema = new AddMetadataAttributeTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String requiredTail = schema.substring(requiredIdx);
+        assertFalse("type must NOT be required", requiredTail.contains("\"type\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("indexing must NOT be required", requiredTail.contains("\"indexing\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("fillChecking must NOT be required", requiredTail.contains("\"fillChecking\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("multiLine must NOT be required", requiredTail.contains("\"multiLine\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("kind must NOT be required", requiredTail.contains("\"kind\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("master must NOT be required", requiredTail.contains("\"master\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("mainFilter must NOT be required", requiredTail.contains("\"mainFilter\"")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testDescriptionMentionsRegisterKinds()
+    {
+        String desc = new AddMetadataAttributeTool().getDescription();
+        assertTrue("description should mention Dimension", desc.contains("Dimension")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description should mention Resource", desc.contains("Resource")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
 }

@@ -21,7 +21,7 @@ public enum ToolGroup
     CORE("core", "Core / Project", //$NON-NLS-1$ //$NON-NLS-2$
         "Essential project, configuration, and XML export/import tools", //$NON-NLS-1$
         "get_edt_version", "list_projects", "get_configuration_properties", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "clean_project", "revalidate_objects", "get_check_description", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "clean_project", "revalidate_objects", "refresh_model", "get_check_description", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         "export_configuration_to_xml", "import_configuration_from_xml"), //$NON-NLS-1$ //$NON-NLS-2$
 
     PROBLEMS("problems", "Errors & Problems", //$NON-NLS-1$ //$NON-NLS-2$
@@ -56,9 +56,17 @@ public enum ToolGroup
         "get_form_screenshot", "validate_query"), //$NON-NLS-1$ //$NON-NLS-2$
 
     REFACTORING("refactoring", "Refactoring", //$NON-NLS-1$ //$NON-NLS-2$
-        "Metadata create, rename, delete, and attribute management", //$NON-NLS-1$
+        "Metadata create, rename, delete, attribute, register, style item and object property management", //$NON-NLS-1$
         "rename_metadata_object", "delete_metadata_object", "add_metadata_attribute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "create_metadata_object"), //$NON-NLS-1$
+        "create_metadata_object", "set_register_property", "set_style_item_value", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "set_object_property"), //$NON-NLS-1$
+
+    FORMS("forms", "Managed Forms", //$NON-NLS-1$ //$NON-NLS-2$
+        "Managed form authoring: create forms and edit their structure " //$NON-NLS-1$
+        + "(attributes, items, commands, command handlers)", //$NON-NLS-1$
+        "create_form", "add_form_attribute", "add_form_item", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "add_form_command", "set_form_command_handler", //$NON-NLS-1$ //$NON-NLS-2$
+        "set_form_event_handler"), //$NON-NLS-1$
 
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$

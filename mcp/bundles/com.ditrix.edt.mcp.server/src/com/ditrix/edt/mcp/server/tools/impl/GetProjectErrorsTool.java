@@ -69,6 +69,9 @@ public class GetProjectErrorsTool implements IMcpTool
     {
         return "Get detailed configuration problems from EDT. " + //$NON-NLS-1$
                "Returns check code, description, object location, severity level (ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL). " + //$NON-NLS-1$
+               "By default (no 'severity' filter) problems of ALL severity levels are returned, " + //$NON-NLS-1$
+               "including MINOR and TRIVIAL, so nothing is hidden. " + //$NON-NLS-1$
+               "Pass 'severity' to restrict the result to a single level. " + //$NON-NLS-1$
                "Can filter by specific objects using FQN (e.g. 'Document.SalesOrder', 'Catalog.Products'). " + //$NON-NLS-1$
                "Russian type names are also supported (e.g. 'Документ.ПриходнаяНакладная', 'Справочник.Номенклатура')."; //$NON-NLS-1$
     }
@@ -78,7 +81,7 @@ public class GetProjectErrorsTool implements IMcpTool
     {
         return JsonSchemaBuilder.object()
             .stringProperty("projectName", "Filter by project name (optional)") //$NON-NLS-1$ //$NON-NLS-2$
-            .stringProperty("severity", "Filter by severity: ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL (optional)") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("severity", "Filter by a single severity level: ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL. Optional; when omitted, problems of ALL levels (including MINOR and TRIVIAL) are returned.") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("checkId", "Filter by check ID substring. Matches either the symbolic check id (e.g. 'ql-temp-table-index') or the short UID (e.g. 'SU23') (optional)") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty("objects", "Filter by object FQNs (e.g. ['Document.SalesOrder', 'Catalog.Products']). Russian type names supported (e.g. 'Документ.ПродажаТоваров'). Returns errors only from these objects.") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("limit", "Maximum number of results (default: 100, max: 1000)") //$NON-NLS-1$ //$NON-NLS-2$
@@ -155,7 +158,8 @@ public class GetProjectErrorsTool implements IMcpTool
      * Gets project errors with filters using EDT IMarkerManager.
      * 
      * @param projectName filter by project name (null for all)
-     * @param severity filter by severity (ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL)
+     * @param severity restrict to a single severity level (ERRORS, BLOCKER, CRITICAL, MAJOR,
+     *            MINOR, TRIVIAL); {@code null} or empty returns problems of ALL levels
      * @param checkId filter by check ID substring
      * @param objects filter by object FQNs (empty list for all objects)
      * @param limit maximum number of results
@@ -177,7 +181,12 @@ public class GetProjectErrorsTool implements IMcpTool
             
             IWorkspace workspace = ResourcesPlugin.getWorkspace();
             
-            // Parse severity filter
+            // Parse the optional severity filter. When no severity is supplied the filter stays
+            // null, which makes buildIfMatches() keep markers of ALL levels (ERRORS..TRIVIAL) -
+            // this is the default so the caller never silently misses MINOR/TRIVIAL problems.
+            // An explicit but invalid value is reported instead of being silently ignored,
+            // otherwise a typo (e.g. "ERROR" or "WARNING") would return everything and look like
+            // a successful narrow filter.
             MarkerSeverity severityFilter = null;
             if (severity != null && !severity.isEmpty())
             {
@@ -187,7 +196,9 @@ public class GetProjectErrorsTool implements IMcpTool
                 }
                 catch (IllegalArgumentException e)
                 {
-                    // Invalid severity, will show all
+                    return "# Error\n\nUnknown severity: " + severity //$NON-NLS-1$
+                        + ". Valid values are ERRORS, BLOCKER, CRITICAL, MAJOR, MINOR, TRIVIAL. " //$NON-NLS-1$
+                        + "Omit 'severity' to return problems of all levels."; //$NON-NLS-1$
                 }
             }
             final MarkerSeverity finalSeverityFilter = severityFilter;

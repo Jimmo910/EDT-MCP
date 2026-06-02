@@ -164,7 +164,15 @@ public class GetFormScreenshotTool implements IMcpTool
                 EditorScreenshotHelper.refreshViewer(wysiwygViewer);
             }
 
-            // Primary method: extract image from representation
+            // The form layout is produced by an asynchronous native render; on the first call
+            // right after opening (or changing) a form the image is not ready yet. Wait until the
+            // render produces a non-empty image instead of returning an empty/blank result.
+            final Object viewer = wysiwygViewer;
+            Object representation = EditorScreenshotHelper.getRepresentation(viewer);
+            boolean rendered = EditorScreenshotHelper.waitUntilRendered(viewer,
+                () -> EditorScreenshotHelper.readFormImageData(representation) != null);
+
+            // Primary method: extract image from representation (rebuild + read).
             ImageData imageData = EditorScreenshotHelper.extractFormImageData(wysiwygViewer);
 
             // Fallback: capture control via print
@@ -175,6 +183,13 @@ public class GetFormScreenshotTool implements IMcpTool
 
             if (imageData == null || imageData.width <= 0 || imageData.height <= 0)
             {
+                if (!rendered)
+                {
+                    return CaptureResult.error(ToolResult.error(
+                        "Form did not finish rendering in time, so no image could be captured. " + //$NON-NLS-1$
+                        "Ensure EDT runs with buffered native render " + //$NON-NLS-1$
+                        "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson()); //$NON-NLS-1$
+                }
                 return CaptureResult.error(ToolResult.error("Form image data is not available").toJson()); //$NON-NLS-1$
             }
 

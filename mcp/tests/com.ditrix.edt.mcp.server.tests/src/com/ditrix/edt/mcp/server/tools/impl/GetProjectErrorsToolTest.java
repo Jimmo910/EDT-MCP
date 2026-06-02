@@ -44,6 +44,65 @@ import com.ditrix.edt.mcp.server.tools.impl.GetProjectErrorsTool.ErrorInfo;
  */
 public class GetProjectErrorsToolTest
 {
+    // ========== tool metadata: name / description / schema (Bitrix #19803) ==========
+
+    @Test
+    public void testNameMatchesConstant()
+    {
+        assertEquals("get_project_errors", new GetProjectErrorsTool().getName()); //$NON-NLS-1$
+        assertEquals(GetProjectErrorsTool.NAME, new GetProjectErrorsTool().getName());
+    }
+
+    @Test
+    public void testDescriptionDocumentsAllLevelsDefault()
+    {
+        // The description must make it explicit that omitting 'severity' returns ALL levels,
+        // so callers do not wrongly conclude "0 errors" while MINOR/TRIVIAL problems exist.
+        String description = new GetProjectErrorsTool().getDescription();
+        assertNotNull(description);
+        assertTrue(description.contains("ALL severity levels")); //$NON-NLS-1$
+        assertTrue(description.contains("MINOR")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testSchemaSeverityDocumentsAllLevelsDefault()
+    {
+        // The input schema must declare that severity is a single-level filter and that, when
+        // omitted, problems of all levels are returned.
+        String schema = new GetProjectErrorsTool().getInputSchema();
+        assertNotNull(schema);
+        assertTrue(schema.contains("\"severity\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("ALL levels")); //$NON-NLS-1$
+    }
+
+    // ========== default severity (no filter) keeps every level (Bitrix #19803) ==========
+
+    @Test
+    public void testNullSeverityFilterKeepsMinorMarker()
+    {
+        // No severity filter must keep a MINOR problem (the level the bug used to hide).
+        Marker marker = marker(MarkerSeverity.MINOR, "SU23", "msg", "Proj"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        when(marker.getObjectPresentation()).thenReturn("Catalog.Foo"); //$NON-NLS-1$
+
+        ErrorInfo error = GetProjectErrorsTool.buildIfMatches(marker, null, null,
+            Collections.emptySet(), null, new int[]{0}, new int[]{0});
+
+        assertNotNull(error);
+    }
+
+    @Test
+    public void testNullSeverityFilterKeepsTrivialMarker()
+    {
+        // No severity filter must also keep the lowest TRIVIAL level.
+        Marker marker = marker(MarkerSeverity.TRIVIAL, "SU23", "msg", "Proj"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        when(marker.getObjectPresentation()).thenReturn("Catalog.Foo"); //$NON-NLS-1$
+
+        ErrorInfo error = GetProjectErrorsTool.buildIfMatches(marker, null, null,
+            Collections.emptySet(), null, new int[]{0}, new int[]{0});
+
+        assertNotNull(error);
+    }
+
     // ========== checkIdMatches (pure) ==========
 
     @Test

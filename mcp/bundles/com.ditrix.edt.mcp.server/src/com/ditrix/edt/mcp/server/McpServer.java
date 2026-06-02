@@ -23,6 +23,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormAttributeTool;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormCommandTool;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormItemTool;
+import com.ditrix.edt.mcp.server.tools.impl.CreateFormTool;
+import com.ditrix.edt.mcp.server.tools.impl.MoveFormItemTool;
+import com.ditrix.edt.mcp.server.tools.impl.RemoveFormItemTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetFormCommandHandlerTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetFormEventHandlerTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetBookmarksTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool;
 import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
@@ -49,6 +57,7 @@ import com.ditrix.edt.mcp.server.tools.impl.ListConfigurationsTool;
 import com.ditrix.edt.mcp.server.tools.impl.ListProjectsTool;
 import com.ditrix.edt.mcp.server.tools.impl.CleanProjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.RevalidateObjectsTool;
+import com.ditrix.edt.mcp.server.tools.impl.RefreshModelTool;
 import com.ditrix.edt.mcp.server.tools.impl.ExportConfigurationToXmlTool;
 import com.ditrix.edt.mcp.server.tools.impl.ImportConfigurationFromXmlTool;
 import com.ditrix.edt.mcp.server.tools.impl.GenerateTranslationStringsTool;
@@ -81,6 +90,9 @@ import com.ditrix.edt.mcp.server.tools.impl.DebugYaxunitTestsTool;
 import com.ditrix.edt.mcp.server.tools.impl.DeleteMetadataObjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddMetadataAttributeTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataObjectTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetRegisterPropertyTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetStyleItemValueTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetObjectPropertyTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -205,6 +217,7 @@ public class McpServer
         registry.register(new GetConfigurationPropertiesTool());
         registry.register(new CleanProjectTool());
         registry.register(new RevalidateObjectsTool());
+        registry.register(new RefreshModelTool());
         registry.register(new ExportConfigurationToXmlTool());
         registry.register(new ImportConfigurationFromXmlTool());
         registry.register(new GetProblemSummaryTool());
@@ -265,6 +278,19 @@ public class McpServer
         registry.register(new DeleteMetadataObjectTool());
         registry.register(new AddMetadataAttributeTool());
         registry.register(new CreateMetadataObjectTool());
+        registry.register(new SetRegisterPropertyTool());
+        registry.register(new SetStyleItemValueTool());
+        registry.register(new SetObjectPropertyTool());
+
+        // Managed form authoring tools
+        registry.register(new CreateFormTool());
+        registry.register(new AddFormAttributeTool());
+        registry.register(new AddFormItemTool());
+        registry.register(new AddFormCommandTool());
+        registry.register(new SetFormCommandHandlerTool());
+        registry.register(new SetFormEventHandlerTool());
+        registry.register(new RemoveFormItemTool());
+        registry.register(new MoveFormItemTool());
 
         // LanguageTool translation tools
         registry.register(new GenerateTranslationStringsTool());
