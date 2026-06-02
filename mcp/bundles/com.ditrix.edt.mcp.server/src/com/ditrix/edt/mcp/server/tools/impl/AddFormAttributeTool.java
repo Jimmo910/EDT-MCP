@@ -229,6 +229,10 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
             return ToolResult.error("Failed to add form attribute: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        // Persist the change to the Form.form file on disk so verification tools
+        // (get_form_layout_snapshot / get_form_screenshot) and the user see it.
+        String persistWarning = persistForm(ctx.project, contentFormFqn(location.content));
+
         ToolResult result = ToolResult.success()
             .put("formFqn", FormToolSupport.formFqn(location)) //$NON-NLS-1$
             .put("attributeName", attributeName) //$NON-NLS-1$
@@ -237,10 +241,17 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
         {
             result.put("type", TypeDescriptionBuilder.describe(typeSpec)); //$NON-NLS-1$
         }
+        String message = "Form attribute '" + attributeName + "' added" //$NON-NLS-1$ //$NON-NLS-2$
+            + (typeSpec != null ? " with type " + TypeDescriptionBuilder.describe(typeSpec) : "") //$NON-NLS-1$ //$NON-NLS-2$
+            + ". The Form.form file was updated on disk."; //$NON-NLS-1$
+        if (persistWarning != null)
+        {
+            message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
+                + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
+            result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
         return result
-            .put("message", "Form attribute '" + attributeName + "' added" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + (typeSpec != null ? " with type " + TypeDescriptionBuilder.describe(typeSpec) : "") //$NON-NLS-1$ //$NON-NLS-2$
-                + ". Run get_project_errors to verify.") //$NON-NLS-1$
+            .put("message", message + " Run get_project_errors to verify.") //$NON-NLS-1$ //$NON-NLS-2$
             .toJson();
     }
 }

@@ -94,6 +94,23 @@ public class Activator extends AbstractUIPlugin
     public void start(BundleContext context) throws Exception
     {
         super.start(context);
+
+        // Self-enable EDT's buffered native form renderer so the form WYSIWYG
+        // screenshot/snapshot tools produce real pixels and element bounds. The
+        // flag is read once via Boolean.getBoolean("nativeFormBufferedLayoutRender")
+        // in the static init of NativeRenderService / the HippoLayoutService.INSTANCE
+        // constructor, both in LAZY bundles (form.layout / form.presentation) that
+        // class-load only on the FIRST form render — which happens AFTER workbench
+        // startup. Setting the property here, the earliest plugin code, guarantees
+        // it is true before that first render. On Windows the flag defaults OFF, so
+        // without this get_form_screenshot returns a blank grey canvas and
+        // get_form_layout_snapshot returns no bounds. Only set when undefined, so an
+        // explicit user -DnativeFormBufferedLayoutRender=false is still respected.
+        if (System.getProperty("nativeFormBufferedLayoutRender") == null) //$NON-NLS-1$
+        {
+            System.setProperty("nativeFormBufferedLayoutRender", "true"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         plugin = this;
         mcpServer = new McpServer();
 

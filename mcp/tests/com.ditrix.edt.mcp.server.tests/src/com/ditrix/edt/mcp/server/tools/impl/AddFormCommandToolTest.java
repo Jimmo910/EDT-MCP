@@ -69,4 +69,13 @@ public class AddFormCommandToolTest
         assertTrue("formFqn must be required", tail.contains("\"formFqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("commandName must be required", tail.contains("\"commandName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testExtendsFormWriteToolForDiskPersistence()
+    {
+        // The tool must inherit AbstractFormWriteTool.persistForm so the change is
+        // flushed to the Form.form file after the BM transaction commits.
+        assertTrue("add_form_command must extend AbstractFormWriteTool to reuse persistForm", //$NON-NLS-1$
+            new AddFormCommandTool() instanceof AbstractFormWriteTool);
+    }
 }

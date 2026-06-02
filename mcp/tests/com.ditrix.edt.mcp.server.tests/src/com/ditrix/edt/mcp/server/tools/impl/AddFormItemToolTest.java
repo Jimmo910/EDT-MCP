@@ -73,4 +73,13 @@ public class AddFormItemToolTest
         assertTrue("itemKind must be required", tail.contains("\"itemKind\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("itemName must be required", tail.contains("\"itemName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testExtendsFormWriteToolForDiskPersistence()
+    {
+        // The tool must inherit AbstractFormWriteTool.persistForm so the change is
+        // flushed to the Form.form file after the BM transaction commits.
+        assertTrue("add_form_item must extend AbstractFormWriteTool to reuse persistForm", //$NON-NLS-1$
+            new AddFormItemTool() instanceof AbstractFormWriteTool);
+    }
 }

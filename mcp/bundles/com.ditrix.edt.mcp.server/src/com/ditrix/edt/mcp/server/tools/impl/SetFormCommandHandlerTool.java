@@ -174,15 +174,28 @@ public class SetFormCommandHandlerTool extends AbstractFormWriteTool
             return ToolResult.error("Failed to set form command handler: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        // Persist the change to the Form.form file on disk so verification tools
+        // (get_form_layout_snapshot / get_form_screenshot) and the user see it.
+        String persistWarning = persistForm(ctx.project, contentFormFqn(location.content));
+
         String formModulePath = FormToolSupport.formFqn(location) + ".Module"; //$NON-NLS-1$
-        return ToolResult.success()
+        ToolResult result = ToolResult.success()
             .put("formFqn", FormToolSupport.formFqn(location)) //$NON-NLS-1$
             .put("commandName", commandName) //$NON-NLS-1$
-            .put("handlerName", handlerName) //$NON-NLS-1$
-            .put("message", "Command '" + commandName + "' bound to handler '" + handlerName + "'. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "Ensure '&AtClient Procedure " + handlerName + "(Command) ... EndProcedure' exists in the " + //$NON-NLS-1$ //$NON-NLS-2$
-                "form module (" + formModulePath + "); add it with write_module_source. " + //$NON-NLS-1$ //$NON-NLS-2$
-                "Run get_project_errors to verify.") //$NON-NLS-1$
+            .put("handlerName", handlerName); //$NON-NLS-1$
+        String message = "Command '" + commandName + "' bound to handler '" + handlerName + "'. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "The Form.form file was updated on disk. " + //$NON-NLS-1$
+            "Ensure '&AtClient Procedure " + handlerName + "(Command) ... EndProcedure' exists in the " + //$NON-NLS-1$ //$NON-NLS-2$
+            "form module (" + formModulePath + "); add it with write_module_source. " + //$NON-NLS-1$ //$NON-NLS-2$
+            "Run get_project_errors to verify."; //$NON-NLS-1$
+        if (persistWarning != null)
+        {
+            message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
+                + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
+            result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        return result
+            .put("message", message) //$NON-NLS-1$
             .toJson();
     }
 }

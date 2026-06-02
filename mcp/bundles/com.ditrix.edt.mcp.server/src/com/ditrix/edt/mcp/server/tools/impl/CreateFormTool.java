@@ -9,6 +9,7 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -245,6 +246,10 @@ public class CreateFormTool extends AbstractFormWriteTool
         final long ownerBmId = bmIdOf(owner);
         final String formFqn = normalizedOwnerFqn + "." + FORM_SEGMENT + "." + formName; //$NON-NLS-1$ //$NON-NLS-2$
 
+        // Capture the content-form top-object FQN generated inside the transaction
+        // so the newly created Form.form can be flushed to disk after commit.
+        final AtomicReference<String> contentFqnRef = new AtomicReference<>();
+
         try
         {
             bmModel.execute(new AbstractBmTask<Void>("CreateForm") //$NON-NLS-1$
@@ -304,6 +309,7 @@ public class CreateFormTool extends AbstractFormWriteTool
                             "Could not generate the content-form FQN for: " + formFqn); //$NON-NLS-1$
                     }
                     tx.attachTopObject((IBmObject)content, contentFqn);
+                    contentFqnRef.set(contentFqn);
 
                     // (6) Fill default references / usePurposes as the wizard does.
                     factory.fillDefaultReferences(mdForm);
@@ -323,14 +329,31 @@ public class CreateFormTool extends AbstractFormWriteTool
             return ToolResult.error("Failed to create form: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        // Persist the newly created content form to its Form.form file on disk so it
+        // appears immediately and verification tools (get_form_layout_snapshot /
+        // get_form_screenshot) and the user see it. The FQN is the content form's own
+        // top-object FQN generated inside the transaction (e.g.
+        // "Catalog.Products.Form.ItemForm.Form"), the same FQN it was attached under,
+        // so it is resolvable post-commit.
+        String persistWarning = persistForm(project, contentFqnRef.get());
+
+        ToolResult result = ToolResult.success()
             .put("formFqn", formFqn) //$NON-NLS-1$
             .put("ownerFqn", normalizedOwnerFqn) //$NON-NLS-1$
             .put("formName", formName) //$NON-NLS-1$
-            .put("setAsDefault", setAsDefault) //$NON-NLS-1$
-            .put("message", "Form '" + formFqn + "' created. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "Add structure with add_form_attribute / add_form_item / add_form_command. " + //$NON-NLS-1$
-                "Run get_project_errors to verify; get_form_layout_snapshot to inspect.") //$NON-NLS-1$
+            .put("setAsDefault", setAsDefault); //$NON-NLS-1$
+        String message = "Form '" + formFqn + "' created. " + //$NON-NLS-1$ //$NON-NLS-2$
+            "The Form.form file was written to disk. " + //$NON-NLS-1$
+            "Add structure with add_form_attribute / add_form_item / add_form_command. " + //$NON-NLS-1$
+            "Run get_project_errors to verify; get_form_layout_snapshot to inspect."; //$NON-NLS-1$
+        if (persistWarning != null)
+        {
+            message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
+                + "); the form is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
+            result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        return result
+            .put("message", message) //$NON-NLS-1$
             .toJson();
     }
 

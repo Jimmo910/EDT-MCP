@@ -7,10 +7,15 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.lang.reflect.Method;
+import java.util.Collections;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.EList;
 
 import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormCommand;
@@ -19,6 +24,7 @@ import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -224,5 +230,74 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
     protected static long bmIdOf(Object object)
     {
         return ((IBmObject)object).bmGetId();
+    }
+
+    /**
+     * Forces the in-memory BM model change to be written to the workspace
+     * {@code .form} file on disk.
+     * <p>
+     * A {@code bmModel.execute(...)} transaction commits the change into the
+     * in-memory BM model, but the model-to-file serialization runs
+     * asynchronously, so the on-disk {@code Form.form} does not change until that
+     * background export completes. Tools that verify the result by reading the
+     * file from disk ({@code get_form_layout_snapshot}, {@code get_form_screenshot})
+     * would therefore not see the change. This method drives the export
+     * synchronously through {@link IBmModelManager#forceExport(IDtProject, java.util.List)},
+     * the same API EDT uses to flush a top object to its file, using the content
+     * form's own top-object FQN (e.g. {@code Catalog.Products.Form.ItemForm.Form}).
+     *
+     * @param project the workspace project owning the form
+     * @param contentFormFqn the BM top-object FQN of the content form (obtained
+     *            via {@code ((IBmObject) form).bmGetFqn()})
+     * @return {@code null} on success, or a short diagnostic when the export could
+     *         not be performed (the model change is still committed in memory)
+     */
+    protected String persistForm(IProject project, String contentFormFqn)
+    {
+        if (contentFormFqn == null || contentFormFqn.isEmpty())
+        {
+            return "content form FQN is unknown"; //$NON-NLS-1$
+        }
+        IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
+        if (dtProjectManager == null)
+        {
+            return "IDtProjectManager not available"; //$NON-NLS-1$
+        }
+        IDtProject dtProject = dtProjectManager.getDtProject(project);
+        if (dtProject == null)
+        {
+            return "could not resolve DT project"; //$NON-NLS-1$
+        }
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return "IBmModelManager not available"; //$NON-NLS-1$
+        }
+        try
+        {
+            bmModelManager.forceExport(dtProject, Collections.singletonList(contentFormFqn));
+            return null;
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error exporting form to disk: " + contentFormFqn, e); //$NON-NLS-1$
+            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        }
+    }
+
+    /**
+     * Returns the BM top-object FQN of a content {@link Form} (the FQN under which
+     * its {@code Form.form} file is registered), or {@code null} when unavailable.
+     *
+     * @param content the content form
+     * @return the content form's top-object FQN, or {@code null}
+     */
+    protected static String contentFormFqn(Form content)
+    {
+        if (!(content instanceof IBmObject))
+        {
+            return null;
+        }
+        return ((IBmObject)content).bmGetFqn();
     }
 }

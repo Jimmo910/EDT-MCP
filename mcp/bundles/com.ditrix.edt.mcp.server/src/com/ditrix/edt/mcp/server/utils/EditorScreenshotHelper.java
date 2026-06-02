@@ -602,14 +602,15 @@ public final class EditorScreenshotHelper
 
     /**
      * Same as {@link #waitUntilRendered(Object, BooleanSupplier)} but with an explicit timeout.
-     * Package-visible so tests can exercise the polling loop quickly.
+     * Public so callers (and tests) can choose a bounded wait, e.g. the layout-snapshot tool uses a
+     * slightly longer budget than the screenshot tool while still pumping the SWT event loop.
      *
      * @param wysiwygViewer the WYSIWYG viewer instance
      * @param renderedCheck predicate that returns {@code true} once the rendered content is available
      * @param timeoutMs maximum time to wait, in milliseconds
      * @return {@code true} if the form rendered within the timeout, {@code false} otherwise
      */
-    static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck, int timeoutMs)
+    public static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck, int timeoutMs)
     {
         Object representation = getRepresentation(wysiwygViewer);
         Display display = Display.getCurrent();

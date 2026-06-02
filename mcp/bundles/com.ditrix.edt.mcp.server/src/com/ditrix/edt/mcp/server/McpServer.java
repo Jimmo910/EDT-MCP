@@ -27,6 +27,8 @@ import com.ditrix.edt.mcp.server.tools.impl.AddFormAttributeTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddFormCommandTool;
 import com.ditrix.edt.mcp.server.tools.impl.AddFormItemTool;
 import com.ditrix.edt.mcp.server.tools.impl.CreateFormTool;
+import com.ditrix.edt.mcp.server.tools.impl.MoveFormItemTool;
+import com.ditrix.edt.mcp.server.tools.impl.RemoveFormItemTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetFormCommandHandlerTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetFormEventHandlerTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetBookmarksTool;
@@ -287,6 +289,8 @@ public class McpServer
         registry.register(new AddFormCommandTool());
         registry.register(new SetFormCommandHandlerTool());
         registry.register(new SetFormEventHandlerTool());
+        registry.register(new RemoveFormItemTool());
+        registry.register(new MoveFormItemTool());
 
         // LanguageTool translation tools
         registry.register(new GenerateTranslationStringsTool());

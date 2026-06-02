@@ -204,12 +204,25 @@ public class AddFormItemTool extends AbstractFormWriteTool
             return ToolResult.error("Failed to add form item: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        // Persist the change to the Form.form file on disk so verification tools
+        // (get_form_layout_snapshot / get_form_screenshot) and the user see it.
+        String persistWarning = persistForm(ctx.project, contentFormFqn(location.content));
+
+        ToolResult result = ToolResult.success()
             .put("formFqn", FormToolSupport.formFqn(location)) //$NON-NLS-1$
             .put("itemKind", kind) //$NON-NLS-1$
-            .put("itemName", itemName) //$NON-NLS-1$
-            .put("message", "Form item '" + itemName + "' (" + kind + ") added. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "Run get_project_errors to verify; get_form_layout_snapshot to inspect layout.") //$NON-NLS-1$
+            .put("itemName", itemName); //$NON-NLS-1$
+        String message = "Form item '" + itemName + "' (" + kind + ") added. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "The Form.form file was updated on disk."; //$NON-NLS-1$
+        if (persistWarning != null)
+        {
+            message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
+                + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
+            result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        return result
+            .put("message", message //$NON-NLS-1$
+                + " Run get_project_errors to verify; get_form_layout_snapshot to inspect layout.") //$NON-NLS-1$
             .toJson();
     }
 

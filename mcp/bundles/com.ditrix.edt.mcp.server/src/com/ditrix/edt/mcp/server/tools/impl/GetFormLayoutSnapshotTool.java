@@ -3,11 +3,8 @@
  */
 package com.ditrix.edt.mcp.server.tools.impl;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,7 +31,36 @@ import com.ditrix.edt.mcp.server.utils.EditorScreenshotHelper;
 import com.ditrix.edt.mcp.server.utils.ReflectionUtils;
 
 /**
- * Tool to extract calculated WYSIWYG layout data from an EDT form editor.
+ * Tool to extract the structure tree of an EDT form, with best-effort WYSIWYG
+ * element bounds.
+ * <p>
+ * <b>Why structure first, bounds best-effort.</b> EDT renders form layout
+ * through two distinct pipelines:
+ * <ul>
+ * <li>the <i>native render</i> pipeline ({@code NativeRenderService}) produces
+ * an offscreen pixel image plus the overall form size; this is what
+ * {@code get_form_screenshot} reads and it is always on when buffered native
+ * render is enabled; and</li>
+ * <li>a legacy <i>projection</i> pipeline (model / layout / view projections)
+ * that exposes per-element {@code Layout} rectangles and light-control bounds.</li>
+ * </ul>
+ * The projection pipeline is only populated when the form is rebuilt with
+ * {@code NativeRenderService.isNativeRender() == false}: in
+ * {@code FormWysiwygRepresentation}'s rebuild task the
+ * {@code modelProjection.changeRoot(...)} / {@code layoutProjection.changeRoot(...)}
+ * calls live in the {@code else} branch of an {@code if (isNativeRender()) return;}
+ * guard. Because buffered native render (required for the screenshot) implies
+ * native render, those projections are never rooted, so per-element rectangles
+ * are not exposed and the native form data carries only the form-level size. The
+ * previous implementation read those empty projections and hard-failed with
+ * "the form layout did not finish rendering" even though the form was fine.
+ * <p>
+ * This tool therefore returns the form's element <b>structure</b> tree (name,
+ * type, hierarchy and display-affecting properties) read directly from the form
+ * model ({@code com._1c.g5.v8.dt.form.model.Form}), which needs no render and is
+ * always available, and attaches per-element pixel bounds on a best-effort basis
+ * (present only when the projection pipeline happens to be populated, e.g. in
+ * non-native render mode). It never hard-fails on a real form.
  */
 public class GetFormLayoutSnapshotTool implements IMcpTool
 {
@@ -42,44 +68,22 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
 
     private static final String WYSIWYG_VIEWER_FIELD = "wysiwygViewer"; //$NON-NLS-1$
     private static final String WYSIWYG_REPRESENTATION_FIELD = "wysiwygRepresentation"; //$NON-NLS-1$
-    private static final String HIPPO_LAY_FORM_FIELD = "hippoLayForm"; //$NON-NLS-1$
-    private static final String HIPPO_SESSION_FIELD = "hippoSession"; //$NON-NLS-1$
-    private static final String MODEL_PROJECTION_FIELD = "modelProjection"; //$NON-NLS-1$
-    private static final String LAYOUT_PROJECTION_FIELD = "layoutProjection"; //$NON-NLS-1$
-    private static final String VIEW_PROJECTION_FIELD = "viewProjection"; //$NON-NLS-1$
+    private static final String FORM_FIELD = "form"; //$NON-NLS-1$
     private static final String MODE_COMPACT = "compact"; //$NON-NLS-1$
     private static final String MODE_FULL = "full"; //$NON-NLS-1$
+    private static final int RENDER_WAIT_TIMEOUT_MS = 10000;
+
+    /**
+     * Display-affecting properties read from form-model items in compact mode.
+     * These are the properties that change what a user sees on the form. In full
+     * mode every non-containment feature is emitted instead.
+     */
     private static final List<String> DISPLAY_PROPERTY_NAMES = List.of(
-        "visible", "groupVisible", "enabled", "groupEnabled", "readOnly", "groupReadOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "skipOnInput", "defaultControl", "stretchableMode", "gridLeft", "gridTop", "gridWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "gridHeight", "gridHAlign", "gridVAlign", "gridLeftPadding", "gridTopPadding", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "gridRightPadding", "gridBottomPadding", "alignedAreaTopOffset", "width", "height", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "minWidth", "maxWidth", "minHeight", "maxHeight", "backColor", "textColor", "borderColor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
-        "tooltip", "representation", "shape", "pictureLocation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "textHAlign", "hAlign", "vAlign", "wrap", "multiLine", "passwordMode", "choiceButton", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
-        "clearButton", "spinButton", "openButton", "dropListButton", "showAsCard", "buttonImportance", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "markRequiredComplete", "textBreakMode", "scale", "useOutput", "formModelElement"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-    private static final List<String> INSPECTABLE_VALUE_GETTERS = List.of(
-        "getName", "getKind", "getRed", "getGreen", "getBlue", "getAlpha", "getSize", "getHeight", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$ //$NON-NLS-8$
-        "getWidth", "getScale", "getFaceName", "getFontName", "getPictureName", "getUuid", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "getBorderType", "getStyle", "isBold", "isItalic", "isUnderline", "isStrikeout"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-    private static final List<String> HIPPO_LAYOUTER_CATEGORY_NAMES = List.of(
-        "Main", "Title", "AlignedTitle", "ExtTooltip", "CloseBtnImage", "ShowData", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "WidthDependedHeight", "ChangeHeightOnChangeData", "HorStretchPriority", "HorCompressPriority", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "VerCompressPriority", "Spacing", "NoCalcHorContent", "NoCalcVerContent", "AlwaysVerticalAlign", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "Align", "Primary", "AutoChangeVAlign", "AutoChangeRowsCount", "ContentStretchableMode", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "ContentIndepended", "BehaviorIcon", "MasterColumn", "SlaveColumn", "HasSingleElement", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "Layered", "LinkToAnchor", "FullScreen", "Anchor", "Sticky", "Splitter", "SlaveChangeVAlign", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
-        "NoHorStretchable", "NoVerStretchable", "SlaveVisibility", "AmpersandIsData", "PostGeneratorSizesInDLU", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-        "MobileLeftCaption", "MobileRightCaption", "MobileAutoCloseButton", "MobileSpecialRightAlign", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "MobileNoMobileTransformation", "MobileSeparatedColumn", "MobileSkippedColumns", "MobileTableGroupData", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "ContainMobileSeparatedColumns", "MarkRequired", "CheckboxOrRadioButtonLabel", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "SelectedItemsActionsPanelGroup", "SelectedItemsActionsPanelInGridGroup", "SelectedItemsActionsPanelInMoxelGroup", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "SelectedItemsActionsPanelButton", "SelectedItemsActionsPanelLabelButton", "SelectedItemsActionsPanelCommandBar", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "SelectedItemsActionsPanelInGridCommandBar", "SelectedItemsActionsPanelInMoxelCommandBar", //$NON-NLS-1$ //$NON-NLS-2$
-        "RowActionsPanelGroup", "RowActionsPanelCommandBar", "HierarchyPanelMenuGroup", "CollapsibleGroupTitle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        "GroupTitle", "TopCommandBar", "SearchControl", "BottomCommandBar", "CreateButton", "FABCommandBar", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
-        "CollapsibleGroupCollapseButton", "EditInCommandBar", "Last"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        "visible", "userVisible", "enabled", "readOnly", "skipOnInput", "defaultItem", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        "title", "titleLocation", "titleHeight", "dataPath", "type", "kind", "viewMode", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$ //$NON-NLS-7$
+        "group", "groupHorizontalAlign", "groupVerticalAlign", "showTitle", "showInHeader", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        "representation", "width", "height", "autoMaxWidth", "autoMaxHeight", "maxWidth", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+        "maxHeight", "horizontalStretch", "verticalStretch", "horizontalAlign", "displayImportance"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
 
     @Override
     public String getName()
@@ -90,8 +94,13 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Return a YAML snapshot of the active form WYSIWYG layout: calculated bounds, " + //$NON-NLS-1$
-            "element types, and display-affecting properties. Can open and activate a form automatically."; //$NON-NLS-1$
+        return "Return a YAML snapshot of a form's element STRUCTURE tree: element name, type, hierarchy " + //$NON-NLS-1$
+            "and display-affecting properties (visible/enabled/title/dataPath/group/...), read from the form " + //$NON-NLS-1$
+            "model. Per-element pixel bounds are attached best-effort: they are present only when EDT runs the " + //$NON-NLS-1$
+            "legacy projection layout pipeline (non-native render mode); under the default buffered native " + //$NON-NLS-1$
+            "render the per-element projection bounds are not exposed, so bounds are omitted while the structure " + //$NON-NLS-1$
+            "is still returned. Use get_form_screenshot for a pixel-accurate visual. Opens/activates the form " + //$NON-NLS-1$
+            "automatically when formPath is given."; //$NON-NLS-1$
     }
 
     @Override
@@ -105,10 +114,10 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
                 "Format: 'MetadataType.ObjectName.Forms.FormName' or 'CommonForm.FormName'. " + //$NON-NLS-1$
                 "Examples: 'Catalog.Products.Forms.ItemForm', 'Document.SalesOrder.Forms.DocumentForm', " + //$NON-NLS-1$
                 "'CommonForm.MyForm'. If not specified, uses the currently active form editor.") //$NON-NLS-1$
-            .booleanProperty("refresh", "Force WYSIWYG refresh before snapshot (default: true)") //$NON-NLS-1$ //$NON-NLS-2$
-            .stringProperty("mode", "Output mode: 'compact' (default) or 'full'. Compact returns only " + //$NON-NLS-1$ //$NON-NLS-2$
-                "visual elements with positive bounds and selected display properties. Full returns all layout nodes " + //$NON-NLS-1$
-                "and all non-containment properties.") //$NON-NLS-1$
+            .booleanProperty("refresh", "Force WYSIWYG refresh before snapshot (default: true). " + //$NON-NLS-1$ //$NON-NLS-2$
+                "Only affects best-effort bounds; the structure tree is read regardless.") //$NON-NLS-1$
+            .stringProperty("mode", "Output mode: 'compact' (default) or 'full'. Compact returns the element " + //$NON-NLS-1$ //$NON-NLS-2$
+                "tree with selected display properties. Full returns all non-containment model properties.") //$NON-NLS-1$
             .build();
     }
 
@@ -184,41 +193,35 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
                 return errorYaml("WYSIWYG representation is not available"); //$NON-NLS-1$
             }
 
-            // The form layout is computed by an asynchronous native render. On the first call
-            // right after opening (or changing) a form, the layout has no calculated bounds yet,
-            // which previously produced a misleading empty snapshot. Wait until at least one
-            // element has positive bounds before reading the tree.
-            boolean rendered = EditorScreenshotHelper.waitUntilRendered(wysiwygViewer,
-                () -> hasAnyCalculatedBounds(representation));
+            // Drive the native render so that (a) the form image is available (used for formSize) and
+            // (b) the legacy projection pipeline gets a chance to populate if EDT happens to run in
+            // non-native render mode (then best-effort bounds become available). The structure tree
+            // itself does not need this, so a render that never produces bounds is not an error.
+            EditorScreenshotHelper.waitUntilRendered(wysiwygViewer,
+                () -> EditorScreenshotHelper.readFormImageData(representation) != null
+                    || boundsProbe(representation) != null,
+                RENDER_WAIT_TIMEOUT_MS);
 
-            Object hippoLayForm = ReflectionUtils.getFieldValue(representation, HIPPO_LAY_FORM_FIELD);
-            if (!(hippoLayForm instanceof EObject))
+            // The content form model holds the authoritative element tree. It is read directly from
+            // the representation (a com._1c.g5.v8.dt.form.model.Form) and needs no render to inspect.
+            Object form = ReflectionUtils.getFieldValue(representation, FORM_FIELD);
+            if (!(form instanceof EObject))
             {
-                return errorYaml("WYSIWYG layout model is not available. " + //$NON-NLS-1$
-                    "The form may have failed to render; try again."); //$NON-NLS-1$
+                return errorYaml("Form model is not available from the editor. " + //$NON-NLS-1$
+                    "The form may still be loading; try again."); //$NON-NLS-1$
             }
 
-            Object hippoSession = ReflectionUtils.getFieldValue(representation, HIPPO_SESSION_FIELD);
-            Object modelProjection = ReflectionUtils.getFieldValue(representation, MODEL_PROJECTION_FIELD);
-            Object layoutProjection = ReflectionUtils.getFieldValue(representation, LAYOUT_PROJECTION_FIELD);
-            Object viewProjection = ReflectionUtils.getFieldValue(representation, VIEW_PROJECTION_FIELD);
-
-            List<Map<String, Object>> elements = collectElements((EObject)hippoLayForm, hippoSession,
-                modelProjection, layoutProjection, viewProjection, fullMode, warnings);
-
+            List<Map<String, Object>> elements = collectFormItems((EObject)form, representation, fullMode);
             int elementCount = countElements(elements);
             int elementsWithBounds = countElementsWithBounds(elements);
-            if (elementsWithBounds == 0)
+            boolean boundsAvailable = elementsWithBounds > 0;
+
+            if (!boundsAvailable)
             {
-                // Do not return an empty snapshot as a valid result: it looks like "the form has
-                // no elements" when in fact the WYSIWYG layout never finished rendering.
-                return errorYaml("The form layout did not finish rendering, so no element bounds " + //$NON-NLS-1$
-                    "could be calculated. Ensure EDT runs with buffered native render " + //$NON-NLS-1$
-                    "(VM option -DnativeFormBufferedLayoutRender=true), then retry."); //$NON-NLS-1$
-            }
-            if (!rendered)
-            {
-                warnings.add("Form render readiness check timed out; the snapshot may be incomplete."); //$NON-NLS-1$
+                warnings.add("Per-element bounds are unavailable: EDT is rendering with the buffered native " //$NON-NLS-1$
+                    + "pipeline, which does not expose per-element projection rectangles (only the overall form " //$NON-NLS-1$
+                    + "image). The element structure tree below is complete; use get_form_screenshot for a " //$NON-NLS-1$
+                    + "pixel-accurate visual."); //$NON-NLS-1$
             }
 
             Map<String, Object> formSize = getFormSize(wysiwygViewer, refresh);
@@ -228,10 +231,18 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
             result.put("projectName", projectName); //$NON-NLS-1$
             result.put("formPath", formPath); //$NON-NLS-1$
             result.put("mode", mode); //$NON-NLS-1$
-            result.put("formSize", formSize); //$NON-NLS-1$
+            result.put("formName", getName(form)); //$NON-NLS-1$
+            result.put("formTitle", getStringValue(form, "getTitle")); //$NON-NLS-1$ //$NON-NLS-2$
+            if (formSize != null)
+            {
+                result.put("formSize", formSize); //$NON-NLS-1$
+            }
             result.put("elementCount", elementCount); //$NON-NLS-1$
+            result.put("boundsAvailable", boundsAvailable); //$NON-NLS-1$
             result.put("elementsWithBounds", elementsWithBounds); //$NON-NLS-1$
-            result.put("boundsCoordinateSpace", "form WYSIWYG pixels"); //$NON-NLS-1$ //$NON-NLS-2$
+            result.put("boundsNote", boundsAvailable //$NON-NLS-1$
+                ? "Per-element bounds are pixel rectangles relative to the form WYSIWYG root." //$NON-NLS-1$
+                : "Per-element bounds are best-effort and omitted in buffered native render mode (see warnings)."); //$NON-NLS-1$
             result.put("warnings", warnings); //$NON-NLS-1$
             result.put("elements", elements); //$NON-NLS-1$
             return dumpYaml(result);
@@ -251,6 +262,10 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
     {
         if (formPath != null && !formPath.isEmpty())
         {
+            // Ensure buffered native render is on, matching the screenshot tool, so the form opens and
+            // renders the same way (and the form model becomes resolvable through the editor).
+            EditorScreenshotHelper.ensureBufferedNativeRenderMode();
+
             String openError = EditorScreenshotHelper.openAndActivateForm(projectName, formPath);
             if (openError != null)
             {
@@ -271,53 +286,35 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
     }
 
     /**
-     * Readiness probe used while waiting for the asynchronous native render to finish.
-     * Re-reads the layout model and projections from the representation (a rebuild may replace
-     * them) and reports whether at least one element already has positive calculated bounds.
+     * Best-effort probe used while waiting for a render: returns a non-null marker once the legacy
+     * projection pipeline can resolve a light control for any top-level form item (i.e. bounds are
+     * obtainable), or {@code null} otherwise. Never throws.
      *
      * @param representation the {@code FormWysiwygRepresentation} instance
-     * @return {@code true} once any element has positive bounds, {@code false} otherwise
+     * @return a non-null marker if bounds are obtainable, {@code null} otherwise
      */
-    private boolean hasAnyCalculatedBounds(Object representation)
+    private Object boundsProbe(Object representation)
     {
         try
         {
-            Object hippoLayForm = ReflectionUtils.getFieldValue(representation, HIPPO_LAY_FORM_FIELD);
-            if (!(hippoLayForm instanceof EObject))
+            Object form = ReflectionUtils.getFieldValue(representation, FORM_FIELD);
+            if (!(form instanceof EObject))
             {
-                return false;
+                return null;
             }
-            Object modelProjection = ReflectionUtils.getFieldValue(representation, MODEL_PROJECTION_FIELD);
-            Object layoutProjection = ReflectionUtils.getFieldValue(representation, LAYOUT_PROJECTION_FIELD);
-            Object viewProjection = ReflectionUtils.getFieldValue(representation, VIEW_PROJECTION_FIELD);
-            if (modelProjection == null || (layoutProjection == null && viewProjection == null))
+            for (EObject item : getItems((EObject)form))
             {
-                return false;
+                if (getElementBounds(representation, item) != null)
+                {
+                    return Boolean.TRUE;
+                }
             }
-            return treeHasPositiveBounds((EObject)hippoLayForm, modelProjection, layoutProjection, viewProjection);
+            return null;
         }
         catch (Exception e)
         {
-            return false;
+            return null;
         }
-    }
-
-    private boolean treeHasPositiveBounds(EObject element, Object modelProjection, Object layoutProjection,
-        Object viewProjection)
-    {
-        Object presentation = getProjectedModel(modelProjection, element);
-        if (hasPositiveBounds(getBounds(presentation, layoutProjection, viewProjection)))
-        {
-            return true;
-        }
-        for (EObject child : element.eContents())
-        {
-            if (treeHasPositiveBounds(child, modelProjection, layoutProjection, viewProjection))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     private String normalizeMode(String mode)
@@ -350,164 +347,97 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         return errorJson;
     }
 
-    private List<Map<String, Object>> collectElements(EObject hippoLayForm, Object hippoSession,
-        Object modelProjection, Object layoutProjection, Object viewProjection, boolean fullMode, List<String> warnings)
+    /**
+     * Collects the structure items for the children of a form-model container (the form root or a
+     * group), descending recursively. The container's own item is created by the caller.
+     *
+     * @param container the form-model container ({@code Form} or {@code FormGroup}/{@code FormTable}…)
+     * @param representation the WYSIWYG representation, used for best-effort bounds
+     * @param fullMode whether to emit all non-containment properties
+     * @return the list of child element items
+     */
+    private List<Map<String, Object>> collectFormItems(EObject container, Object representation, boolean fullMode)
     {
-        return collectElementTree(hippoLayForm, hippoSession, modelProjection, layoutProjection, viewProjection,
-            fullMode, warnings);
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (EObject child : getItems(container))
+        {
+            Map<String, Object> item = createElementItem(child, representation, fullMode);
+            List<Map<String, Object>> grandChildren = collectFormItems(child, representation, fullMode);
+            if (!grandChildren.isEmpty())
+            {
+                item.put("children", grandChildren); //$NON-NLS-1$
+            }
+            items.add(item);
+        }
+        return items;
     }
 
-    private List<Map<String, Object>> collectElementTree(EObject element, Object hippoSession, Object modelProjection,
-        Object layoutProjection, Object viewProjection, boolean fullMode, List<String> warnings)
+    private Map<String, Object> createElementItem(EObject element, Object representation, boolean fullMode)
     {
-        List<Map<String, Object>> childItems = new ArrayList<>();
-        for (EObject child : element.eContents())
-        {
-            childItems.addAll(collectElementTree(child, hippoSession, modelProjection, layoutProjection, viewProjection,
-                fullMode, warnings));
-        }
-
-        Map<String, Object> item = createElementItem(element, hippoSession, modelProjection,
-            layoutProjection, viewProjection, fullMode);
-        if (item == null)
-        {
-            return childItems;
-        }
-
-        if (!childItems.isEmpty())
-        {
-            item.put("children", childItems); //$NON-NLS-1$
-        }
-
-        List<Map<String, Object>> result = new ArrayList<>();
-        result.add(item);
-        return result;
-    }
-
-    private Map<String, Object> createElementItem(EObject element, Object hippoSession, Object modelProjection,
-        Object layoutProjection, Object viewProjection, boolean fullMode)
-    {
-        Object formEntity = getOriginalFormEntity(hippoSession, element);
-        Object presentation = getProjectedModel(modelProjection, element);
-        Map<String, Object> bounds = getBounds(presentation, layoutProjection, viewProjection);
-        if (!fullMode && !hasPositiveBounds(bounds))
-        {
-            return null;
-        }
-
         Map<String, Object> item = new LinkedHashMap<>();
-        item.put("layoutType", getEType(element)); //$NON-NLS-1$
-        putIfNotNull(item, "formEntityType", getEType(formEntity)); //$NON-NLS-1$
-        putIfNotNull(item, "name", firstNonBlank(getName(formEntity), getName(element))); //$NON-NLS-1$
-        putIfNotNull(item, "title", firstNonBlank(getStringValue(formEntity, "getTitle"), //$NON-NLS-1$ //$NON-NLS-2$
-            getStringValue(element, "getTitle"))); //$NON-NLS-1$
-        putIfNotNull(item, "formEntity", describeEObject(formEntity)); //$NON-NLS-1$
-        item.put("bounds", bounds); //$NON-NLS-1$
-        item.put("boundsSource", getBoundsSource(presentation, layoutProjection, viewProjection)); //$NON-NLS-1$
+        item.put("type", getEType(element)); //$NON-NLS-1$
+        putIfNotNull(item, "name", getName(element)); //$NON-NLS-1$
+        Object id = invokeNoArg(element, "getId"); //$NON-NLS-1$
+        if (id instanceof Number)
+        {
+            item.put("id", ((Number)id).intValue()); //$NON-NLS-1$
+        }
+        putIfNotNull(item, "title", getStringValue(element, "getTitle")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        Map<String, Object> bounds = getElementBounds(representation, element);
+        if (bounds != null)
+        {
+            item.put("bounds", bounds); //$NON-NLS-1$
+        }
+
         Map<String, Object> properties = collectProperties(element, fullMode);
         if (!properties.isEmpty())
         {
             item.put("properties", properties); //$NON-NLS-1$
         }
-
-        if (formEntity instanceof EObject)
-        {
-            Map<String, Object> entityProperties = collectProperties((EObject)formEntity, fullMode);
-            if (!entityProperties.isEmpty())
-            {
-                item.put("formProperties", entityProperties); //$NON-NLS-1$
-            }
-        }
-
         return item;
     }
 
-    private Object getOriginalFormEntity(Object hippoSession, EObject element)
+    /**
+     * Best-effort per-element pixel bounds via the public representation API:
+     * {@code getRelatedControl(FormVisualEntity)} resolves the light control through the view
+     * projection and {@code getBoundsRelativeWysiwygRoot(ILightControl)} returns its rectangle.
+     * Returns {@code null} when the view projection is not populated (the buffered native render
+     * case), so callers treat bounds as optional.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @param formEntity a form-model item ({@code FormVisualEntity})
+     * @return a bounds map with positive size, or {@code null} when unavailable
+     */
+    private Map<String, Object> getElementBounds(Object representation, Object formEntity)
     {
-        if (hippoSession == null)
+        Object control = invokeOneArg(representation, "getRelatedControl", formEntity); //$NON-NLS-1$
+        if (control == null)
         {
             return null;
         }
-        return invokeOneArg(hippoSession, "getOriginalFormEntity", element); //$NON-NLS-1$
-    }
-
-    private Object getProjectedModel(Object projection, Object domain)
-    {
-        if (projection == null || domain == null)
+        Object rect = invokeOneArg(representation, "getBoundsRelativeWysiwygRoot", control); //$NON-NLS-1$
+        if (!(rect instanceof Rectangle))
         {
             return null;
         }
-        return invokeOneArg(projection, "getModel", domain); //$NON-NLS-1$
-    }
-
-    private Map<String, Object> getBounds(Object presentation, Object layoutProjection, Object viewProjection)
-    {
-        Object layout = getProjectedModel(layoutProjection, presentation);
-        Map<String, Object> bounds = getLayoutBounds(layout);
-        if (bounds != null)
-        {
-            return bounds;
-        }
-
-        Object view = getProjectedModel(viewProjection, presentation);
-        Object controlBounds = invokeNoArg(view, "getBounds"); //$NON-NLS-1$
-        if (controlBounds instanceof Rectangle)
-        {
-            Rectangle rectangle = (Rectangle)controlBounds;
-            return boundsMap(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
-        }
-
-        return null;
-    }
-
-    private String getBoundsSource(Object presentation, Object layoutProjection, Object viewProjection)
-    {
-        Object layout = getProjectedModel(layoutProjection, presentation);
-        if (getLayoutBounds(layout) != null)
-        {
-            return "layoutProjection"; //$NON-NLS-1$
-        }
-
-        Object view = getProjectedModel(viewProjection, presentation);
-        Object controlBounds = invokeNoArg(view, "getBounds"); //$NON-NLS-1$
-        if (controlBounds instanceof Rectangle)
-        {
-            return "viewProjection"; //$NON-NLS-1$
-        }
-
-        return null;
-    }
-
-    private boolean hasPositiveBounds(Map<String, Object> bounds)
-    {
-        if (bounds == null)
-        {
-            return false;
-        }
-        Object width = bounds.get("width"); //$NON-NLS-1$
-        Object height = bounds.get("height"); //$NON-NLS-1$
-        return width instanceof Number && height instanceof Number
-            && ((Number)width).intValue() > 0 && ((Number)height).intValue() > 0;
-    }
-
-    private Map<String, Object> getLayoutBounds(Object layout)
-    {
-        if (layout == null)
+        Rectangle rectangle = (Rectangle)rect;
+        if (rectangle.width <= 0 || rectangle.height <= 0)
         {
             return null;
         }
+        return boundsMap(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+    }
 
-        Object left = invokeNoArg(layout, "getLeft"); //$NON-NLS-1$
-        Object top = invokeNoArg(layout, "getTop"); //$NON-NLS-1$
-        Object width = invokeNoArg(layout, "getWidth"); //$NON-NLS-1$
-        Object height = invokeNoArg(layout, "getHeight"); //$NON-NLS-1$
-        if (left instanceof Number && top instanceof Number && width instanceof Number && height instanceof Number)
+    @SuppressWarnings("unchecked")
+    private List<EObject> getItems(EObject container)
+    {
+        Object items = invokeNoArg(container, "getItems"); //$NON-NLS-1$
+        if (items instanceof List<?>)
         {
-            return boundsMap(((Number)left).intValue(), ((Number)top).intValue(),
-                ((Number)width).intValue(), ((Number)height).intValue());
+            return (List<EObject>)items;
         }
-
-        return null;
+        return List.of();
     }
 
     private Map<String, Object> boundsMap(int left, int top, int width, int height)
@@ -527,18 +457,6 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         Map<String, Object> properties = new LinkedHashMap<>();
         for (EStructuralFeature feature : object.eClass().getEAllStructuralFeatures())
         {
-            if ("categoriesHolder".equals(feature.getName())) //$NON-NLS-1$
-            {
-                if (fullMode)
-                {
-                    Object categories = convertCategoriesHolder(object.eGet(feature, false));
-                    if (categories != null)
-                    {
-                        properties.put("categories", categories); //$NON-NLS-1$
-                    }
-                }
-                continue;
-            }
             if (!fullMode && !DISPLAY_PROPERTY_NAMES.contains(feature.getName()))
             {
                 continue;
@@ -553,8 +471,7 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
             }
 
             Object value = object.eGet(feature, false);
-            Object converted = "border".equals(feature.getName()) //$NON-NLS-1$
-                ? convertBorderValue(value) : convertFeatureValue(value);
+            Object converted = convertFeatureValue(value);
             if (converted != null)
             {
                 properties.put(feature.getName(), converted);
@@ -590,18 +507,21 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         {
             return String.valueOf(value);
         }
-        if (value instanceof String)
-        {
-            Object decoded = decodeObjectHashString((String)value);
-            return decoded != null ? decoded : value;
-        }
         if (value instanceof Number || value instanceof Boolean)
+        {
+            return value;
+        }
+        if (value instanceof String)
         {
             return value;
         }
         if (value instanceof EObject)
         {
             return describeEObject(value);
+        }
+        if (value instanceof org.eclipse.emf.common.util.EMap<?, ?>)
+        {
+            return convertEMap((org.eclipse.emf.common.util.EMap<?, ?>)value);
         }
         if (value instanceof Collection<?>)
         {
@@ -622,213 +542,29 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
             return values.isEmpty() ? null : values;
         }
 
-        Map<String, Object> inspected = describeInspectableValue(value);
-        if (!inspected.isEmpty())
-        {
-            return inspected;
-        }
-
-        return String.valueOf(value);
+        // Data paths and similar value objects expose a meaningful toString().
+        String text = String.valueOf(value);
+        return text.contains("@") ? value.getClass().getSimpleName() : text; //$NON-NLS-1$
     }
 
-    private Object convertCategoriesHolder(Object value)
+    private Object convertEMap(org.eclipse.emf.common.util.EMap<?, ?> map)
     {
-        if (!(value instanceof BitSet))
+        if (map.isEmpty())
         {
             return null;
         }
-        BitSet categoriesHolder = (BitSet)value;
-        if (categoriesHolder.isEmpty())
+        Map<String, Object> converted = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet())
         {
-            return null;
-        }
-
-        List<String> categories = new ArrayList<>();
-        for (int categoryIndex = categoriesHolder.nextSetBit(0); categoryIndex >= 0;
-            categoryIndex = categoriesHolder.nextSetBit(categoryIndex + 1))
-        {
-            categories.add(categoryIndex < HIPPO_LAYOUTER_CATEGORY_NAMES.size()
-                ? HIPPO_LAYOUTER_CATEGORY_NAMES.get(categoryIndex) : "#" + categoryIndex); //$NON-NLS-1$
-        }
-        return categories;
-    }
-
-    private Object convertBorderValue(Object value)
-    {
-        if (value == null)
-        {
-            return "Auto"; //$NON-NLS-1$
-        }
-        if (value instanceof String && decodeObjectHashString((String)value) != null)
-        {
-            return "Auto"; //$NON-NLS-1$
-        }
-        if ("V8Border".equals(value.getClass().getSimpleName())) //$NON-NLS-1$
-        {
-            Object mCoreBorder = getPublicFieldValue(value, "mCoreBorder"); //$NON-NLS-1$
-            if (mCoreBorder == null)
+            Object key = entry.getKey();
+            Object converted2 = convertFeatureValue(entry.getValue());
+            if (converted2 != null)
             {
-                return "Auto"; //$NON-NLS-1$
+                converted.put(key == null || String.valueOf(key).isEmpty() ? "_" : String.valueOf(key), //$NON-NLS-1$
+                    converted2);
             }
         }
-        return convertFeatureValue(value);
-    }
-
-    private Object getPublicFieldValue(Object value, String fieldName)
-    {
-        try
-        {
-            Field field = value.getClass().getField(fieldName);
-            return field.get(value);
-        }
-        catch (ReflectiveOperationException e)
-        {
-            return null;
-        }
-    }
-
-    private Map<String, Object> describeInspectableValue(Object value)
-    {
-        Map<String, Object> description = new LinkedHashMap<>();
-        description.put("type", value.getClass().getSimpleName()); //$NON-NLS-1$
-
-        for (String getterName : INSPECTABLE_VALUE_GETTERS)
-        {
-            Object getterValue = invokeNoArg(value, getterName);
-            Object converted = convertInspectableNestedValue(getterValue, 0);
-            if (converted != null)
-            {
-                description.put(propertyNameFromGetter(getterName), converted);
-            }
-        }
-
-        for (Field field : value.getClass().getFields())
-        {
-            if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic())
-            {
-                continue;
-            }
-            try
-            {
-                Object fieldValue = field.get(value);
-                Object converted = convertInspectableNestedValue(fieldValue, 0);
-                if (converted != null)
-                {
-                    description.put(field.getName(), converted);
-                }
-            }
-            catch (IllegalAccessException e)
-            {
-                // Ignore inaccessible diagnostic fields.
-            }
-        }
-
-        return description;
-    }
-
-    private Object convertInspectableNestedValue(Object value, int depth)
-    {
-        Object simpleValue = convertSimpleValue(value);
-        if (simpleValue != null)
-        {
-            return simpleValue;
-        }
-        if (value instanceof EObject)
-        {
-            return describeEObject(value);
-        }
-        if (value == null)
-        {
-            return null;
-        }
-        if (depth > 0)
-        {
-            return String.valueOf(value);
-        }
-
-        Map<String, Object> description = new LinkedHashMap<>();
-        description.put("type", value.getClass().getSimpleName()); //$NON-NLS-1$
-        for (Field field : value.getClass().getFields())
-        {
-            if (Modifier.isStatic(field.getModifiers()) || field.isSynthetic())
-            {
-                continue;
-            }
-            try
-            {
-                Object converted = convertInspectableNestedValue(field.get(value), depth + 1);
-                if (converted != null)
-                {
-                    description.put(field.getName(), converted);
-                }
-            }
-            catch (IllegalAccessException e)
-            {
-                // Ignore inaccessible diagnostic fields.
-            }
-        }
-        return description;
-    }
-
-    private Object convertSimpleValue(Object value)
-    {
-        if (value == null)
-        {
-            return null;
-        }
-        if (value instanceof Enum<?>)
-        {
-            return String.valueOf(value);
-        }
-        if (value instanceof String || value instanceof Number || value instanceof Boolean)
-        {
-            if (value instanceof String)
-            {
-                Object decoded = decodeObjectHashString((String)value);
-                return decoded != null ? decoded : value;
-            }
-            return value;
-        }
-        return null;
-    }
-
-    private Object decodeObjectHashString(String value)
-    {
-        int atIndex = value.lastIndexOf('@');
-        if (atIndex <= 0 || atIndex == value.length() - 1)
-        {
-            return null;
-        }
-        String hash = value.substring(atIndex + 1);
-        if (!hash.matches("[0-9a-fA-F]+")) //$NON-NLS-1$
-        {
-            return null;
-        }
-
-        String className = value.substring(0, atIndex);
-        int dotIndex = className.lastIndexOf('.');
-        Map<String, Object> description = new LinkedHashMap<>();
-        description.put("type", dotIndex >= 0 ? className.substring(dotIndex + 1) : className); //$NON-NLS-1$
-        return description;
-    }
-
-    private String propertyNameFromGetter(String getterName)
-    {
-        String name = getterName;
-        if (name.startsWith("get")) //$NON-NLS-1$
-        {
-            name = name.substring(3);
-        }
-        else if (name.startsWith("is")) //$NON-NLS-1$
-        {
-            name = name.substring(2);
-        }
-
-        if (name.isEmpty())
-        {
-            return getterName;
-        }
-        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
+        return converted.isEmpty() ? null : converted;
     }
 
     private void putIfNotNull(Map<String, Object> map, String key, Object value)
@@ -853,6 +589,12 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         if (name != null && !name.isBlank())
         {
             description.put("name", name); //$NON-NLS-1$
+        }
+        // Data paths render to a readable string (e.g. "Object.Description").
+        String text = String.valueOf(object);
+        if (!text.contains("@")) //$NON-NLS-1$
+        {
+            description.put("value", text); //$NON-NLS-1$
         }
         Object fqn = invokeNoArg(object, "bmGetFqn"); //$NON-NLS-1$
         if (fqn != null)
@@ -886,7 +628,35 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
     private String getStringValue(Object value, String methodName)
     {
         Object result = invokeNoArg(value, methodName);
-        return result != null ? String.valueOf(result) : null;
+        if (result == null)
+        {
+            return null;
+        }
+        if (result instanceof org.eclipse.emf.common.util.EMap<?, ?>)
+        {
+            return localizedValue((org.eclipse.emf.common.util.EMap<?, ?>)result);
+        }
+        String text = String.valueOf(result);
+        return text.isEmpty() ? null : text;
+    }
+
+    /**
+     * Returns a representative localized value from a {@code locale -> text} EMap (used for the form
+     * {@code title}, which is multilingual). Prefers the first non-blank entry.
+     *
+     * @param map the localized values map
+     * @return the first non-blank value, or {@code null}
+     */
+    private String localizedValue(org.eclipse.emf.common.util.EMap<?, ?> map)
+    {
+        for (Map.Entry<?, ?> entry : map.entrySet())
+        {
+            if (entry.getValue() != null && !String.valueOf(entry.getValue()).isBlank())
+            {
+                return String.valueOf(entry.getValue());
+            }
+        }
+        return null;
     }
 
     private String firstNonBlank(String... values)
@@ -926,18 +696,21 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         }
         try
         {
-            Method method = ReflectionUtils.findMethod(target.getClass(), methodName, Object.class);
-            if (method == null)
+            for (Method method : target.getClass().getMethods())
             {
-                method = target.getClass().getMethod(methodName, Object.class);
+                if (method.getName().equals(methodName) && method.getParameterCount() == 1
+                    && method.getParameterTypes()[0].isInstance(argument))
+                {
+                    method.setAccessible(true);
+                    return method.invoke(target, argument);
+                }
             }
-            method.setAccessible(true);
-            return method.invoke(target, argument);
         }
         catch (Exception e)
         {
             return null;
         }
+        return null;
     }
 
     private Map<String, Object> getFormSize(Object wysiwygViewer, boolean refresh) throws Exception

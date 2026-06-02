@@ -70,4 +70,13 @@ public class CreateFormToolTest
         assertTrue("ownerFqn must be required", tail.contains("\"ownerFqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("formName must be required", tail.contains("\"formName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testExtendsFormWriteToolForDiskPersistence()
+    {
+        // The tool must inherit AbstractFormWriteTool.persistForm so the new
+        // Form.form is flushed to disk after the BM transaction commits.
+        assertTrue("create_form must extend AbstractFormWriteTool to reuse persistForm", //$NON-NLS-1$
+            new CreateFormTool() instanceof AbstractFormWriteTool);
+    }
 }

@@ -71,4 +71,13 @@ public class SetFormCommandHandlerToolTest
         assertTrue("commandName must be required", tail.contains("\"commandName\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("handlerName must be required", tail.contains("\"handlerName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testExtendsFormWriteToolForDiskPersistence()
+    {
+        // The tool must inherit AbstractFormWriteTool.persistForm so the change is
+        // flushed to the Form.form file after the BM transaction commits.
+        assertTrue("set_form_command_handler must extend AbstractFormWriteTool to reuse persistForm", //$NON-NLS-1$
+            new SetFormCommandHandlerTool() instanceof AbstractFormWriteTool);
+    }
 }
