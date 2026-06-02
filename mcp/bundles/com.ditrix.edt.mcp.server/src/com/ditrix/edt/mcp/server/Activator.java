@@ -6,6 +6,8 @@
 
 package com.ditrix.edt.mcp.server;
 
+import java.lang.reflect.Method;
+
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
@@ -693,7 +695,17 @@ public class Activator extends AbstractUIPlugin
         try
         {
             Class<?> formPluginClass = formBundle.loadClass(FORM_PLUGIN_CLASS);
-            Object formPlugin = formPluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
+            // FormPlugin is the non-exported internal class
+            // com._1c.g5.v8.dt.internal.form.FormPlugin. getDefault()/getInjector()
+            // are public methods, but because their DECLARING class is not public to
+            // this bundle, Method.invoke enforces access on the declaring class and
+            // throws IllegalAccessException ("cannot access a member of class ... with
+            // modifiers public") unless the Method is made accessible first. We must
+            // call setAccessible(true) BEFORE invoke on every Method declared on this
+            // internal class.
+            Method getDefaultMethod = formPluginClass.getMethod("getDefault"); //$NON-NLS-1$
+            getDefaultMethod.setAccessible(true);
+            Object formPlugin = getDefaultMethod.invoke(null);
             if (formPlugin == null)
             {
                 lastFormServiceDiagnostic = "FormPlugin.getDefault() is null (form bundle state=" //$NON-NLS-1$
@@ -703,7 +715,12 @@ public class Activator extends AbstractUIPlugin
                 return null;
             }
 
-            Object injectorObj = formPluginClass.getMethod("getInjector").invoke(formPlugin); //$NON-NLS-1$
+            // Same access rule as getDefault() above: getInjector() is declared on the
+            // internal FormPlugin class, so the Method must be made accessible before
+            // invoke to avoid IllegalAccessException on com.google.inject.internal.InjectorImpl.
+            Method getInjectorMethod = formPluginClass.getMethod("getInjector"); //$NON-NLS-1$
+            getInjectorMethod.setAccessible(true);
+            Object injectorObj = getInjectorMethod.invoke(formPlugin);
             if (injectorObj == null)
             {
                 lastFormServiceDiagnostic = "FormPlugin.getInjector() returned null"; //$NON-NLS-1$
