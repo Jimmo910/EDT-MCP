@@ -24,7 +24,10 @@ import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com._1c.g5.v8.dt.form.model.ManagedFormFieldType;
 import com._1c.g5.v8.dt.form.model.ManagedFormGroupType;
+import com._1c.g5.v8.dt.form.model.Visible;
+import com._1c.g5.v8.dt.metadata.mdclass.AdjustableBoolean;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
@@ -43,6 +46,12 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
  * </ul>
  * The item is appended either to the form root or, when {@code parentGroup} is
  * given, to an existing group with that name.
+ * <p>
+ * New items are initialized with the same visibility defaults the EDT form
+ * editor applies through {@code FormObjectFactory} ({@code visible = true},
+ * {@code enabled = true}, {@code userVisible.common = true}). Without these the
+ * element is part of the form tree but is never rendered in the WYSIWYG editor
+ * or at runtime.
  */
 public class AddFormItemTool extends AbstractFormWriteTool
 {
@@ -211,6 +220,9 @@ public class AddFormItemTool extends AbstractFormWriteTool
         field.setId(nextItemId(form));
         field.setType(ManagedFormFieldType.INPUT_FIELD);
         field.setExtInfo(FormFactory.eINSTANCE.createInputFieldExtInfo());
+        // Apply the same rendering defaults the EDT form editor sets via
+        // FormObjectFactory.newFormField; without them the field stays invisible.
+        applyVisibilityDefaults(field);
         if (dataPath != null && !dataPath.isEmpty())
         {
             DataPath path = FormFactory.eINSTANCE.createDataPath();
@@ -233,7 +245,40 @@ public class AddFormItemTool extends AbstractFormWriteTool
         group.setId(nextItemId(form));
         group.setType(ManagedFormGroupType.USUAL_GROUP);
         group.setExtInfo(FormFactory.eINSTANCE.createUsualGroupExtInfo());
+        // Same rendering defaults as FormObjectFactory.newFormGroup; without them
+        // the group (and anything placed in it) is not drawn on the form.
+        applyVisibilityDefaults(group);
         return group;
+    }
+
+    /**
+     * Applies the visibility/availability defaults the EDT form editor sets on a
+     * freshly created form item. Mirrors {@code FormObjectFactory}: {@code visible}
+     * and {@code enabled} become {@code true}, and {@code userVisible} is set to a
+     * fresh {@link AdjustableBoolean} with {@code common = true}. Both
+     * {@link FormField} and {@link FormGroup} implement {@link Visible}.
+     *
+     * @param item the newly created form item (field or group)
+     */
+    private void applyVisibilityDefaults(Visible item)
+    {
+        item.setEnabled(true);
+        item.setVisible(true);
+        item.setUserVisible(createDefaultUserVisible());
+    }
+
+    /**
+     * Builds the default {@code userVisible} value for a form item: an
+     * {@link AdjustableBoolean} that is commonly visible (no per-role overrides),
+     * matching {@code FormObjectFactory.newAdjustableBoolean()}.
+     *
+     * @return a new {@link AdjustableBoolean} with {@code common = true}
+     */
+    private AdjustableBoolean createDefaultUserVisible()
+    {
+        AdjustableBoolean userVisible = MdClassFactory.eINSTANCE.createAdjustableBoolean();
+        userVisible.setCommon(true);
+        return userVisible;
     }
 
     private FormGroup findGroup(FormItemContainer container, String name)
