@@ -21,7 +21,8 @@ import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec.Item;
 
 /**
  * Unit tests for {@link AttributeTypeSpec} - the pure (EDT-runtime independent)
- * parser of the {@code add_metadata_attribute} {@code type} parameter.
+ * parser of the {@code type} parameter shared by {@code add_metadata_attribute}
+ * and {@code add_form_attribute}.
  */
 public class AttributeTypeSpecTest
 {

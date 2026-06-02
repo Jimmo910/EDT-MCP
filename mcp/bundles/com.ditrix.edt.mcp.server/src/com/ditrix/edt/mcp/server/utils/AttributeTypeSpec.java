@@ -10,8 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Pure (EDT-runtime independent) parser for the {@code type} parameter of the
- * {@code add_metadata_attribute} tool.
+ * Pure (EDT-runtime independent) parser for a {@code type} parameter shared by
+ * the {@code add_metadata_attribute} and {@code add_form_attribute} tools.
  * <p>
  * A type specification is a comma-separated list of one or more single type
  * items (a single item means a simple type, several items mean a composite

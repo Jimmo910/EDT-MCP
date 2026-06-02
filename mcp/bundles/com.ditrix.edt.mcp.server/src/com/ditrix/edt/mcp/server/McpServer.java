@@ -23,6 +23,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.ditrix.edt.mcp.server.protocol.McpConstants;
 import com.ditrix.edt.mcp.server.protocol.McpProtocolHandler;
 import com.ditrix.edt.mcp.server.tools.McpToolRegistry;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormAttributeTool;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormCommandTool;
+import com.ditrix.edt.mcp.server.tools.impl.AddFormItemTool;
+import com.ditrix.edt.mcp.server.tools.impl.CreateFormTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetFormCommandHandlerTool;
+import com.ditrix.edt.mcp.server.tools.impl.SetFormEventHandlerTool;
 import com.ditrix.edt.mcp.server.tools.impl.GetBookmarksTool;
 import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool;
 import com.ditrix.edt.mcp.server.tools.impl.FindReferencesTool;
@@ -269,6 +275,14 @@ public class McpServer
         registry.register(new CreateMetadataObjectTool());
         registry.register(new SetRegisterPropertyTool());
         registry.register(new SetStyleItemValueTool());
+
+        // Managed form authoring tools
+        registry.register(new CreateFormTool());
+        registry.register(new AddFormAttributeTool());
+        registry.register(new AddFormItemTool());
+        registry.register(new AddFormCommandTool());
+        registry.register(new SetFormCommandHandlerTool());
+        registry.register(new SetFormEventHandlerTool());
 
         // LanguageTool translation tools
         registry.register(new GenerateTranslationStringsTool());

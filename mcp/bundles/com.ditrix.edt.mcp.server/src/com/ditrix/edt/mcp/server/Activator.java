@@ -7,18 +7,22 @@
 package com.ditrix.edt.mcp.server;
 
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.util.tracker.ServiceTracker;
 
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
+import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.form.service.FormItemInformationService;
 import com._1c.g5.v8.dt.lifecycle.IServicesOrchestrator;
 import com._1c.g5.v8.dt.md.MdPlugin;
 import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
@@ -59,6 +63,7 @@ public class Activator extends AbstractUIPlugin
     private ServiceTracker<IApplicationManager, IApplicationManager> applicationManagerTracker;
     private ServiceTracker<INavigatorContentProviderStateProvider, INavigatorContentProviderStateProvider> navigatorStateProviderTracker;
     private ServiceTracker<IMdRefactoringService, IMdRefactoringService> mdRefactoringServiceTracker;
+    private ServiceTracker<ITopObjectFqnGenerator, ITopObjectFqnGenerator> topObjectFqnGeneratorTracker;
     /**
      * EDT workspace CLI APIs are tracked by String class name and invoked via
      * reflection from the tools, keeping this bundle build-independent of
@@ -141,6 +146,9 @@ public class Activator extends AbstractUIPlugin
         
         mdRefactoringServiceTracker = new ServiceTracker<>(context, IMdRefactoringService.class, null);
         mdRefactoringServiceTracker.open();
+
+        topObjectFqnGeneratorTracker = new ServiceTracker<>(context, ITopObjectFqnGenerator.class, null);
+        topObjectFqnGeneratorTracker.open();
 
         exportConfigurationFilesApiTracker = new ServiceTracker<>(
             context, "com._1c.g5.v8.dt.cli.api.workspace.IExportConfigurationFilesApi", null); //$NON-NLS-1$
@@ -258,6 +266,11 @@ public class Activator extends AbstractUIPlugin
         {
             mdRefactoringServiceTracker.close();
             mdRefactoringServiceTracker = null;
+        }
+        if (topObjectFqnGeneratorTracker != null)
+        {
+            topObjectFqnGeneratorTracker.close();
+            topObjectFqnGeneratorTracker = null;
         }
         if (exportConfigurationFilesApiTracker != null)
         {
@@ -536,6 +549,29 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
+     * Returns the {@link ITopObjectFqnGenerator} service used to compute the
+     * canonical BM top-object FQN for external-property objects (e.g. the
+     * content {@code Form} referenced by a {@code BasicForm}).
+     * <p>
+     * This is the same generator EDT's own form infrastructure uses (see
+     * {@code com._1c.g5.v8.dt.form.service.common.impl.ExtInfoManagementService}).
+     * Using it guarantees the content form is attached under the FQN the BM
+     * namespace/store layer expects, so the object resolves on subsequent
+     * lookups instead of failing with "No store with '&lt;id&gt;' is assigned
+     * to namespace".
+     *
+     * @return the top-object FQN generator, or {@code null} if not available
+     */
+    public ITopObjectFqnGenerator getTopObjectFqnGenerator()
+    {
+        if (topObjectFqnGeneratorTracker == null)
+        {
+            return null;
+        }
+        return topObjectFqnGeneratorTracker.getService();
+    }
+
+    /**
      * Returns the IModelObjectFactory used to create metadata (mdclass) objects
      * with EDT default content (the same factory the "New" wizards use).
      * <p>
@@ -569,6 +605,222 @@ public class Activator extends AbstractUIPlugin
             logError("Failed to obtain MD IModelObjectFactory from MdPlugin injector", e); //$NON-NLS-1$
         }
         return null;
+    }
+
+    /** Symbolic name of the EDT form bundle that owns the form Guice injector. */
+    private static final String FORM_BUNDLE_ID = "com._1c.g5.v8.dt.form"; //$NON-NLS-1$
+
+    /** Internal (non-exported) class that exposes the form bundle Guice injector. */
+    private static final String FORM_PLUGIN_CLASS = "com._1c.g5.v8.dt.internal.form.FormPlugin"; //$NON-NLS-1$
+
+    /**
+     * Public, exported service class that lives in the form bundle. Loading it
+     * <em>through the form bundle</em> triggers the bundle's lazy activation
+     * ({@code Bundle-ActivationPolicy: lazy}), so {@code FormPlugin.getDefault()}
+     * stops returning {@code null}.
+     */
+    private static final String FORM_SERVICE_CLASS =
+        "com._1c.g5.v8.dt.form.service.FormItemInformationService"; //$NON-NLS-1$
+
+    /**
+     * Human-readable reason the last {@link #getFormItemInformationService()}
+     * call returned {@code null}. Surfaced verbatim by the form event tool so a
+     * repeated failure shows the exact failing step rather than a generic
+     * "service not available". {@code null} after a successful lookup.
+     */
+    private volatile String lastFormServiceDiagnostic;
+
+    /**
+     * Returns the diagnostic describing why the most recent
+     * {@link #getFormItemInformationService()} call yielded {@code null}.
+     *
+     * @return the last failure reason, or {@code null} if the last lookup
+     *         succeeded or was never attempted
+     */
+    public String getFormItemInformationServiceDiagnostic()
+    {
+        return lastFormServiceDiagnostic;
+    }
+
+    /**
+     * Returns the {@link FormItemInformationService} the form editor uses to
+     * compute, among other things, the set of events a form item supports
+     * ({@code getAllowedEvents(FormVisualEntity)}).
+     * <p>
+     * The service is <strong>not</strong> registered as an OSGi service (the
+     * form bundle's {@code FormPlugin} registers {@code IFormItemTypeInformationService},
+     * {@code IFormItemManagementService}, … but never {@code FormItemInformationService}),
+     * so a {@code ServiceTracker} cannot reach it. It is a Guice {@code @Singleton}
+     * with an {@code @Inject IRuntimeVersionSupport} field, so a plain
+     * {@code new FormItemInformationService()} yields a half-built instance whose
+     * event lookup NPEs. The fully wired instance must be pulled from the form
+     * bundle's Guice injector via just-in-time binding — the same pattern
+     * {@link #getModelObjectFactory()} uses for the MD factory.
+     * <p>
+     * The injector lives on the non-exported internal class
+     * {@code com._1c.g5.v8.dt.internal.form.FormPlugin}, reached reflectively.
+     * {@code FormPlugin} is a lazy-activation {@link org.eclipse.core.runtime.Plugin}:
+     * its {@code getDefault()} returns {@code null} until the bundle is started,
+     * and the previous implementation failed precisely here when nothing had yet
+     * touched a form in the session. We therefore force activation first — by
+     * loading the public service class through the form bundle (which trips lazy
+     * activation) and, as a fallback, {@code Bundle.start(START_TRANSIENT)} — then
+     * read {@code getDefault().getInjector()} and resolve the singleton. Every
+     * step records {@link #lastFormServiceDiagnostic} so a {@code null} return is
+     * always explained.
+     *
+     * @return the wired form item information service, or {@code null} if the
+     *         form bundle or its injector is not available (see
+     *         {@link #getFormItemInformationServiceDiagnostic()})
+     */
+    public FormItemInformationService getFormItemInformationService()
+    {
+        lastFormServiceDiagnostic = null;
+        Bundle formBundle = Platform.getBundle(FORM_BUNDLE_ID);
+        if (formBundle == null)
+        {
+            lastFormServiceDiagnostic =
+                "form bundle '" + FORM_BUNDLE_ID + "' not found in the running platform"; //$NON-NLS-1$ //$NON-NLS-2$
+            logError(lastFormServiceDiagnostic, null);
+            return null;
+        }
+
+        // Force the lazily-activated form bundle to start so FormPlugin.getDefault()
+        // is populated. Loading an exported class through the bundle is the standard
+        // way to trip lazy activation; start(START_TRANSIENT) is the explicit fallback.
+        String activationProblem = ensureFormBundleActive(formBundle);
+
+        try
+        {
+            Class<?> formPluginClass = formBundle.loadClass(FORM_PLUGIN_CLASS);
+            Object formPlugin = formPluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
+            if (formPlugin == null)
+            {
+                lastFormServiceDiagnostic = "FormPlugin.getDefault() is null (form bundle state=" //$NON-NLS-1$
+                    + bundleStateName(formBundle.getState()) + ")" //$NON-NLS-1$
+                    + (activationProblem != null ? "; activation: " + activationProblem : ""); //$NON-NLS-1$ //$NON-NLS-2$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+
+            Object injectorObj = formPluginClass.getMethod("getInjector").invoke(formPlugin); //$NON-NLS-1$
+            if (injectorObj == null)
+            {
+                lastFormServiceDiagnostic = "FormPlugin.getInjector() returned null"; //$NON-NLS-1$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+            if (!(injectorObj instanceof Injector))
+            {
+                lastFormServiceDiagnostic = "FormPlugin.getInjector() returned a " //$NON-NLS-1$
+                    + injectorObj.getClass().getName() + " not assignable to com.google.inject.Injector " //$NON-NLS-1$
+                    + "(class-space mismatch between this bundle and the form bundle)"; //$NON-NLS-1$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+
+            // Typed call (the bundle imports com.google.inject) — JIT-binds the
+            // @Singleton, wiring its @Inject IRuntimeVersionSupport from OSGi.
+            Injector injector = (Injector)injectorObj;
+            FormItemInformationService service = injector.getInstance(FormItemInformationService.class);
+            if (service == null)
+            {
+                lastFormServiceDiagnostic = "injector.getInstance(FormItemInformationService) returned null"; //$NON-NLS-1$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+            return service;
+        }
+        catch (Throwable e)
+        {
+            // ConfigurationException / ProvisionException from Guice when the
+            // @Inject IRuntimeVersionSupport .toService() binding cannot be
+            // satisfied land here; report the concrete cause.
+            Throwable root = rootCause(e);
+            lastFormServiceDiagnostic = "obtaining FormItemInformationService threw " //$NON-NLS-1$
+                + root.getClass().getName()
+                + (root.getMessage() != null ? ": " + root.getMessage() : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + (activationProblem != null ? " (activation: " + activationProblem + ")" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            logError("Failed to obtain FormItemInformationService from form bundle injector: " //$NON-NLS-1$
+                + lastFormServiceDiagnostic, e);
+            return null;
+        }
+    }
+
+    /**
+     * Ensures the lazily-activated form bundle is started. First loads an
+     * exported class through the bundle (the standard lazy-activation trigger),
+     * then, if the bundle is still not {@code ACTIVE}, calls
+     * {@code start(START_TRANSIENT)} explicitly.
+     *
+     * @param formBundle the form bundle
+     * @return {@code null} on success, otherwise a short description of what
+     *         prevented activation (used only for diagnostics)
+     */
+    private static String ensureFormBundleActive(Bundle formBundle)
+    {
+        try
+        {
+            // Touch an exported class to trip Bundle-ActivationPolicy: lazy.
+            formBundle.loadClass(FORM_SERVICE_CLASS);
+        }
+        catch (Throwable e)
+        {
+            return "loadClass(" + FORM_SERVICE_CLASS + ") failed: " + e; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (formBundle.getState() == Bundle.ACTIVE)
+        {
+            return null;
+        }
+        try
+        {
+            formBundle.start(Bundle.START_TRANSIENT);
+            return null;
+        }
+        catch (Throwable e)
+        {
+            return "start(START_TRANSIENT) failed (state=" //$NON-NLS-1$
+                + bundleStateName(formBundle.getState()) + "): " + e; //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * @param state an OSGi {@link Bundle} state constant
+     * @return a readable name for the state
+     */
+    private static String bundleStateName(int state)
+    {
+        switch (state)
+        {
+        case Bundle.UNINSTALLED:
+            return "UNINSTALLED"; //$NON-NLS-1$
+        case Bundle.INSTALLED:
+            return "INSTALLED"; //$NON-NLS-1$
+        case Bundle.RESOLVED:
+            return "RESOLVED"; //$NON-NLS-1$
+        case Bundle.STARTING:
+            return "STARTING"; //$NON-NLS-1$
+        case Bundle.STOPPING:
+            return "STOPPING"; //$NON-NLS-1$
+        case Bundle.ACTIVE:
+            return "ACTIVE"; //$NON-NLS-1$
+        default:
+            return "0x" + Integer.toHexString(state); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * @param t a throwable
+     * @return the deepest non-null cause (or {@code t} itself)
+     */
+    private static Throwable rootCause(Throwable t)
+    {
+        Throwable current = t;
+        while (current.getCause() != null && current.getCause() != current)
+        {
+            current = current.getCause();
+        }
+        return current;
     }
 
     /**
