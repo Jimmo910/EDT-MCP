@@ -56,9 +56,9 @@ public enum ToolGroup
         "get_form_screenshot", "validate_query"), //$NON-NLS-1$ //$NON-NLS-2$
 
     REFACTORING("refactoring", "Refactoring", //$NON-NLS-1$ //$NON-NLS-2$
-        "Metadata create, rename, delete, attribute, and register property management", //$NON-NLS-1$
+        "Metadata create, rename, delete, attribute, register and style item property management", //$NON-NLS-1$
         "rename_metadata_object", "delete_metadata_object", "add_metadata_attribute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "create_metadata_object", "set_register_property"), //$NON-NLS-1$ //$NON-NLS-2$
+        "create_metadata_object", "set_register_property", "set_style_item_value"), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$

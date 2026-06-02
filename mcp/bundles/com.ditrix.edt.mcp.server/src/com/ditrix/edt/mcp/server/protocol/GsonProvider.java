@@ -15,8 +15,17 @@ import com.google.gson.GsonBuilder;
  */
 public final class GsonProvider
 {
-    /** Shared Gson instance - thread-safe for serialization/deserialization */
-    private static final Gson GSON = new GsonBuilder().create();
+    /**
+     * Shared Gson instance - thread-safe for serialization/deserialization.
+     * <p>
+     * HTML escaping is disabled so that characters such as the apostrophe
+     * ({@code '}), {@code <}, {@code >}, {@code &} and {@code =} are emitted
+     * literally instead of as {@code \\uXXXX} escapes. This keeps tool
+     * descriptions, JSON-Schema hints (e.g. {@code 'Subsystem'}) and error
+     * messages human-readable in the MCP payload; all of these are still valid
+     * JSON either way, but the literal form is what clients and tests expect.
+     */
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     
     private GsonProvider()
     {
