@@ -7,6 +7,7 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Base64;
+import java.util.function.BooleanSupplier;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -45,8 +46,11 @@ public final class EditorScreenshotHelper
     private static final String FORM_IMAGE_METHOD = "getFormImageData"; //$NON-NLS-1$
     private static final String GET_CONTROL_METHOD = "getControl"; //$NON-NLS-1$
     private static final String REFRESH_METHOD = "refresh"; //$NON-NLS-1$
+    private static final String REBUILD_METHOD = "rebuild"; //$NON-NLS-1$
     private static final int WYSIWYG_WAIT_RETRIES = 15;
     private static final int WYSIWYG_WAIT_INTERVAL_MS = 500;
+    private static final int RENDER_WAIT_TIMEOUT_MS = 8000;
+    private static final int RENDER_WAIT_POLL_INTERVAL_MS = 200;
 
     private EditorScreenshotHelper()
     {
@@ -308,29 +312,24 @@ public final class EditorScreenshotHelper
             return null;
         }
 
-        // Trigger rebuild to get up-to-date image
-        try
-        {
-            Method rebuildMethod = representation.getClass().getDeclaredMethod("rebuild", boolean.class); //$NON-NLS-1$
-            rebuildMethod.setAccessible(true);
-            rebuildMethod.invoke(representation, true);
+        // Trigger rebuild so the native render produces an up-to-date image, then read it.
+        rebuildRepresentation(representation);
+        return readFormImageData(representation);
+    }
 
-            Display display = Display.getCurrent();
-            if (display != null)
-            {
-                for (int i = 0; i < 5; i++)
-                {
-                    processEvents(display);
-                    sleep(200);
-                }
-            }
-        }
-        catch (Exception e)
+    /**
+     * Reads the currently rendered form image from the representation without triggering a
+     * rebuild. Returns {@code null} when the native render has not produced an image yet.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @return image data, or {@code null} if not available
+     */
+    public static ImageData readFormImageData(Object representation)
+    {
+        if (representation == null)
         {
-            Activator.logWarning("Could not call rebuild: " + e.getMessage()); //$NON-NLS-1$
+            return null;
         }
-
-        // Get the image data
         try
         {
             Method method = representation.getClass().getDeclaredMethod(FORM_IMAGE_METHOD);
@@ -345,7 +344,10 @@ public final class EditorScreenshotHelper
         {
             Activator.logWarning("Method " + FORM_IMAGE_METHOD + " not found"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not read form image data: " + e.getMessage()); //$NON-NLS-1$
+        }
         return null;
     }
 
@@ -411,6 +413,136 @@ public final class EditorScreenshotHelper
         catch (Exception e)
         {
             Activator.logWarning("Failed to refresh WYSIWYG viewer: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    // ==================== Render readiness ====================
+
+    /**
+     * Returns the {@code FormWysiwygRepresentation} backing the given viewer, or {@code null}.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @return the representation object, or {@code null} if not available
+     */
+    public static Object getRepresentation(Object wysiwygViewer)
+    {
+        try
+        {
+            return ReflectionUtils.getFieldValue(wysiwygViewer, WYSIWYG_REPRESENTATION_FIELD);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Triggers a full rebuild of the WYSIWYG representation so the native layout/render
+     * pipeline recomputes element bounds and the form image. Pumps a few UI cycles so the
+     * asynchronous native render can deliver its result.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     */
+    public static void rebuildRepresentation(Object representation)
+    {
+        if (representation == null)
+        {
+            return;
+        }
+        try
+        {
+            Method rebuildMethod = representation.getClass().getDeclaredMethod(REBUILD_METHOD, boolean.class);
+            rebuildMethod.setAccessible(true);
+            rebuildMethod.invoke(representation, true);
+
+            Display display = Display.getCurrent();
+            for (int i = 0; i < 5; i++)
+            {
+                processEvents(display);
+                sleep(RENDER_WAIT_POLL_INTERVAL_MS);
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not rebuild WYSIWYG representation: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Waits until the form WYSIWYG layout has actually finished rendering.
+     * <p>
+     * The EDT form layout is produced by an asynchronous, event-driven native render
+     * ({@code NativeRenderService}); right after a form is opened or its structure changes,
+     * the first attempt to read the layout or the image returns nothing because rendering has
+     * not completed yet. This method triggers a rebuild and then polls the supplied readiness
+     * predicate, pumping the SWT event loop between polls, until the predicate is satisfied or
+     * the timeout elapses.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @param renderedCheck predicate that returns {@code true} once the rendered content
+     *            (calculated bounds or form image) is available
+     * @return {@code true} if the form rendered within the timeout, {@code false} otherwise
+     */
+    public static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck)
+    {
+        return waitUntilRendered(wysiwygViewer, renderedCheck, RENDER_WAIT_TIMEOUT_MS);
+    }
+
+    /**
+     * Same as {@link #waitUntilRendered(Object, BooleanSupplier)} but with an explicit timeout.
+     * Package-visible so tests can exercise the polling loop quickly.
+     *
+     * @param wysiwygViewer the WYSIWYG viewer instance
+     * @param renderedCheck predicate that returns {@code true} once the rendered content is available
+     * @param timeoutMs maximum time to wait, in milliseconds
+     * @return {@code true} if the form rendered within the timeout, {@code false} otherwise
+     */
+    static boolean waitUntilRendered(Object wysiwygViewer, BooleanSupplier renderedCheck, int timeoutMs)
+    {
+        Object representation = getRepresentation(wysiwygViewer);
+        Display display = Display.getCurrent();
+
+        if (safeCheck(renderedCheck))
+        {
+            return true;
+        }
+
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        boolean rebuilt = false;
+        while (System.currentTimeMillis() < deadline)
+        {
+            if (!rebuilt && representation != null)
+            {
+                rebuildRepresentation(representation);
+                rebuilt = true;
+            }
+
+            processEvents(display);
+            if (safeCheck(renderedCheck))
+            {
+                return true;
+            }
+            sleep(RENDER_WAIT_POLL_INTERVAL_MS);
+            processEvents(display);
+            if (safeCheck(renderedCheck))
+            {
+                return true;
+            }
+        }
+
+        return safeCheck(renderedCheck);
+    }
+
+    private static boolean safeCheck(BooleanSupplier renderedCheck)
+    {
+        try
+        {
+            return renderedCheck.getAsBoolean();
+        }
+        catch (Exception e)
+        {
+            // A transient failure while the model is still being built is treated as "not ready".
+            return false;
         }
     }
 

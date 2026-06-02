@@ -184,10 +184,18 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
                 return errorYaml("WYSIWYG representation is not available"); //$NON-NLS-1$
             }
 
+            // The form layout is computed by an asynchronous native render. On the first call
+            // right after opening (or changing) a form, the layout has no calculated bounds yet,
+            // which previously produced a misleading empty snapshot. Wait until at least one
+            // element has positive bounds before reading the tree.
+            boolean rendered = EditorScreenshotHelper.waitUntilRendered(wysiwygViewer,
+                () -> hasAnyCalculatedBounds(representation));
+
             Object hippoLayForm = ReflectionUtils.getFieldValue(representation, HIPPO_LAY_FORM_FIELD);
             if (!(hippoLayForm instanceof EObject))
             {
-                return errorYaml("WYSIWYG layout model is not available"); //$NON-NLS-1$
+                return errorYaml("WYSIWYG layout model is not available. " + //$NON-NLS-1$
+                    "The form may have failed to render; try again."); //$NON-NLS-1$
             }
 
             Object hippoSession = ReflectionUtils.getFieldValue(representation, HIPPO_SESSION_FIELD);
@@ -202,7 +210,15 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
             int elementsWithBounds = countElementsWithBounds(elements);
             if (elementsWithBounds == 0)
             {
-                warnings.add("No calculated element bounds were found. The form may not be fully rendered yet."); //$NON-NLS-1$
+                // Do not return an empty snapshot as a valid result: it looks like "the form has
+                // no elements" when in fact the WYSIWYG layout never finished rendering.
+                return errorYaml("The form layout did not finish rendering, so no element bounds " + //$NON-NLS-1$
+                    "could be calculated. Ensure EDT runs with buffered native render " + //$NON-NLS-1$
+                    "(VM option -DnativeFormBufferedLayoutRender=true), then retry."); //$NON-NLS-1$
+            }
+            if (!rendered)
+            {
+                warnings.add("Form render readiness check timed out; the snapshot may be incomplete."); //$NON-NLS-1$
             }
 
             Map<String, Object> formSize = getFormSize(wysiwygViewer, refresh);
@@ -252,6 +268,56 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
         }
 
         return EditorScreenshotHelper.getActiveFormEditorPage();
+    }
+
+    /**
+     * Readiness probe used while waiting for the asynchronous native render to finish.
+     * Re-reads the layout model and projections from the representation (a rebuild may replace
+     * them) and reports whether at least one element already has positive calculated bounds.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @return {@code true} once any element has positive bounds, {@code false} otherwise
+     */
+    private boolean hasAnyCalculatedBounds(Object representation)
+    {
+        try
+        {
+            Object hippoLayForm = ReflectionUtils.getFieldValue(representation, HIPPO_LAY_FORM_FIELD);
+            if (!(hippoLayForm instanceof EObject))
+            {
+                return false;
+            }
+            Object modelProjection = ReflectionUtils.getFieldValue(representation, MODEL_PROJECTION_FIELD);
+            Object layoutProjection = ReflectionUtils.getFieldValue(representation, LAYOUT_PROJECTION_FIELD);
+            Object viewProjection = ReflectionUtils.getFieldValue(representation, VIEW_PROJECTION_FIELD);
+            if (modelProjection == null || (layoutProjection == null && viewProjection == null))
+            {
+                return false;
+            }
+            return treeHasPositiveBounds((EObject)hippoLayForm, modelProjection, layoutProjection, viewProjection);
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private boolean treeHasPositiveBounds(EObject element, Object modelProjection, Object layoutProjection,
+        Object viewProjection)
+    {
+        Object presentation = getProjectedModel(modelProjection, element);
+        if (hasPositiveBounds(getBounds(presentation, layoutProjection, viewProjection)))
+        {
+            return true;
+        }
+        for (EObject child : element.eContents())
+        {
+            if (treeHasPositiveBounds(child, modelProjection, layoutProjection, viewProjection))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String normalizeMode(String mode)
