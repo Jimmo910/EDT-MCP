@@ -10,27 +10,39 @@ import java.util.Map;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 
+import com._1c.g5.v8.bm.core.IBmEngine;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormFactory;
+import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
+import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 
 /**
  * Tool to add a form attribute ({@link FormAttribute}) to a managed form.
  * <p>
  * The attribute is created with a name, a unique id and (optionally) the
- * {@code main} flag. The value type is intentionally left unset: building a
- * valid mcore {@code TypeDescription} requires the type registry and is the
- * single most version-fragile area of the form model, so it is delegated to the
- * form editor. An untyped attribute is a valid model state.
+ * {@code main} flag. When a {@code type} is given, this tool builds the value
+ * {@link TypeDescription} (including composite types and String/Number/Date
+ * qualifiers) and assigns it through {@link FormAttribute#setValueType}. The
+ * type is resolved with the same project-scoped mechanism the
+ * {@code add_metadata_attribute} tool uses (see {@link TypeDescriptionBuilder}):
+ * platform types resolve against the platform type registry, reference types
+ * (e.g. {@code CatalogRef.Products}) against this project's metadata objects.
+ * Without {@code type} the attribute stays untyped, which is a valid
+ * intermediate model state (backward compatible).
  */
 public class AddFormAttributeTool extends AbstractFormWriteTool
 {
@@ -47,8 +59,13 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
     {
         return "Add a form attribute (data source) to a managed form. " + //$NON-NLS-1$
                "Creates a FormAttribute with a unique id and optional 'main' flag. " + //$NON-NLS-1$
-               "The value type is not set by this tool (set it in the form editor); an untyped " + //$NON-NLS-1$
-               "attribute is a valid intermediate state. " + //$NON-NLS-1$
+               "Optionally sets the attribute value type. The 'type' parameter accepts platform types " + //$NON-NLS-1$
+               "(String, Number, Boolean, Date) with qualifiers, and reference types " + //$NON-NLS-1$
+               "(CatalogRef.<Name>, DocumentRef.<Name>, EnumRef.<Name>, ...). " + //$NON-NLS-1$
+               "A comma-separated list produces a composite type. " + //$NON-NLS-1$
+               "Examples: 'String(50)', 'Number(15,2)', 'Date(DateTime)', 'CatalogRef.Products', " + //$NON-NLS-1$
+               "'String(10), CatalogRef.Products'. When 'type' is omitted the attribute stays untyped " + //$NON-NLS-1$
+               "(a valid intermediate state). " + //$NON-NLS-1$
                "formFqn format: 'OwnerType.OwnerName.Form.FormName' (e.g. 'Catalog.Products.Form.ItemForm'). " + //$NON-NLS-1$
                "Russian type names are also supported."; //$NON-NLS-1$
     }
@@ -64,6 +81,13 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
                 "(e.g. 'Catalog.Products.Form.ItemForm'). Russian names supported.", true) //$NON-NLS-1$
             .stringProperty("attributeName", //$NON-NLS-1$
                 "Name for the new form attribute (required). Must be a valid 1C identifier.", true) //$NON-NLS-1$
+            .stringProperty("type", //$NON-NLS-1$
+                "Optional value type. A single type or a comma-separated list for a composite type. " + //$NON-NLS-1$
+                "Platform types support qualifiers: 'String', 'String(50)', 'String(50,fixed)', " + //$NON-NLS-1$
+                "'Number(15,2)', 'Number(15,2,nonnegative)', 'Date(Date|Time|DateTime)', 'Boolean'. " + //$NON-NLS-1$
+                "Reference types: 'CatalogRef.<Name>', 'DocumentRef.<Name>', 'EnumRef.<Name>', etc. " + //$NON-NLS-1$
+                "Composite example: 'String(10), CatalogRef.Products'.", //$NON-NLS-1$
+                false)
             .booleanProperty("main", //$NON-NLS-1$
                 "When true, marks the attribute as the form's main attribute (default: false).") //$NON-NLS-1$
             .build();
@@ -95,6 +119,23 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
             return ToolResult.error("Invalid attributeName '" + attributeName + "'.").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
+        // Optional type. Parse and validate BEFORE any transaction.
+        String typeSpecRaw = JsonUtils.extractStringArgument(params, "type"); //$NON-NLS-1$
+        AttributeTypeSpec typeSpec = null;
+        if (typeSpecRaw != null && !typeSpecRaw.trim().isEmpty())
+        {
+            try
+            {
+                typeSpec = AttributeTypeSpec.parse(typeSpecRaw);
+            }
+            catch (IllegalArgumentException e)
+            {
+                return ToolResult.error("Invalid 'type': " + e.getMessage() + ". " + //$NON-NLS-1$ //$NON-NLS-2$
+                    "Examples: 'String(50)', 'Number(15,2)', 'Date(DateTime)', 'CatalogRef.Products', " + //$NON-NLS-1$
+                    "'String(10), CatalogRef.Products'.").toJson(); //$NON-NLS-1$
+            }
+        }
+
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
         {
@@ -120,8 +161,28 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
             return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
         }
 
+        // Resolve the platform version (needed for type proxy resolution).
+        Version version = null;
+        if (typeSpec != null)
+        {
+            IV8ProjectManager v8ProjectManager = Activator.getDefault().getV8ProjectManager();
+            if (v8ProjectManager == null)
+            {
+                return ToolResult.error("IV8ProjectManager not available").toJson(); //$NON-NLS-1$
+            }
+            IV8Project v8Project = v8ProjectManager.getProject(ctx.project);
+            if (v8Project == null)
+            {
+                return ToolResult.error("Could not resolve V8 project for: " + projectName).toJson(); //$NON-NLS-1$
+            }
+            version = v8Project.getVersion();
+        }
+
         final long formBmId = bmIdOf(location.content);
         final boolean mainFlag = main;
+        final AttributeTypeSpec typeSpecFinal = typeSpec;
+        final Version versionFinal = version;
+        final IBmEngine bmEngine = bmModel.getEngine();
         try
         {
             bmModel.execute(new AbstractBmTask<Void>("AddFormAttribute") //$NON-NLS-1$
@@ -146,6 +207,17 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
                     attr.setName(attributeName);
                     attr.setId(nextItemId(form));
                     attr.setMain(mainFlag);
+
+                    if (typeSpecFinal != null)
+                    {
+                        // The form is the resolution context; reference type
+                        // names resolve against this project's metadata objects.
+                        String contextFqn = TypeDescriptionBuilder.topObjectFqnOf(form);
+                        TypeDescription typeDescription = TypeDescriptionBuilder.build(
+                            typeSpecFinal, versionFinal, form, bmEngine, contextFqn, tx);
+                        attr.setValueType(typeDescription);
+                    }
+
                     form.getAttributes().add(attr);
                     return null;
                 }
@@ -157,12 +229,18 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
             return ToolResult.error("Failed to add form attribute: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        ToolResult result = ToolResult.success()
             .put("formFqn", FormToolSupport.formFqn(location)) //$NON-NLS-1$
             .put("attributeName", attributeName) //$NON-NLS-1$
-            .put("main", main) //$NON-NLS-1$
-            .put("message", "Form attribute '" + attributeName + "' added. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "Set its value type in the form editor. Run get_project_errors to verify.") //$NON-NLS-1$
+            .put("main", main); //$NON-NLS-1$
+        if (typeSpec != null)
+        {
+            result.put("type", TypeDescriptionBuilder.describe(typeSpec)); //$NON-NLS-1$
+        }
+        return result
+            .put("message", "Form attribute '" + attributeName + "' added" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (typeSpec != null ? " with type " + TypeDescriptionBuilder.describe(typeSpec) : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Run get_project_errors to verify.") //$NON-NLS-1$
             .toJson();
     }
 }

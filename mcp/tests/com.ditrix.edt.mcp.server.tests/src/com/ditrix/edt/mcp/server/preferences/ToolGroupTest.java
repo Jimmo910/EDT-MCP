@@ -203,7 +203,9 @@ public class ToolGroupTest
         assertTrue(tools.contains("add_form_item"));
         assertTrue(tools.contains("add_form_command"));
         assertTrue(tools.contains("set_form_command_handler"));
-        assertEquals(5, tools.size());
+        assertTrue(tools.contains("set_form_event_handler"));
+        assertEquals(6, tools.size());
         assertEquals(ToolGroup.FORMS, ToolGroup.getGroupForTool("create_form"));
+        assertEquals(ToolGroup.FORMS, ToolGroup.getGroupForTool("set_form_event_handler"));
     }
 }

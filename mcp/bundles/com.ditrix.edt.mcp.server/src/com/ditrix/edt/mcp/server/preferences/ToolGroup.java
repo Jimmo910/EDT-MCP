@@ -64,7 +64,8 @@ public enum ToolGroup
         "Managed form authoring: create forms and edit their structure " //$NON-NLS-1$
         + "(attributes, items, commands, command handlers)", //$NON-NLS-1$
         "create_form", "add_form_attribute", "add_form_item", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        "add_form_command", "set_form_command_handler"), //$NON-NLS-1$ //$NON-NLS-2$
+        "add_form_command", "set_form_command_handler", //$NON-NLS-1$ //$NON-NLS-2$
+        "set_form_event_handler"), //$NON-NLS-1$
 
     TRANSLATION("translation", "Translation (LanguageTool)", //$NON-NLS-1$ //$NON-NLS-2$
         "LanguageTool: translation strings generation, configuration sync, project info", //$NON-NLS-1$

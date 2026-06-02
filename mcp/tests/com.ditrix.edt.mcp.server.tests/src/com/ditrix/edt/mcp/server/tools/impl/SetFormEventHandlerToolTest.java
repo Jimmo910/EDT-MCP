@@ -16,34 +16,34 @@ import org.junit.Test;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 
 /**
- * Lightweight tests for {@link AddFormAttributeTool}: tool metadata and JSON
- * schema. The {@code execute()} path requires a live workbench and BM model, so
- * it is covered by the E2E suite instead.
+ * Lightweight tests for {@link SetFormEventHandlerTool}: tool metadata and JSON
+ * schema. The {@code execute()} path requires a live workbench, the form bundle
+ * Guice injector and a BM model, so it is covered by the E2E suite instead.
  */
-public class AddFormAttributeToolTest
+public class SetFormEventHandlerToolTest
 {
     @Test
     public void testName()
     {
-        assertEquals("add_form_attribute", new AddFormAttributeTool().getName()); //$NON-NLS-1$
+        assertEquals("set_form_event_handler", new SetFormEventHandlerTool().getName()); //$NON-NLS-1$
     }
 
     @Test
     public void testNameConstant()
     {
-        assertEquals(AddFormAttributeTool.NAME, new AddFormAttributeTool().getName());
+        assertEquals(SetFormEventHandlerTool.NAME, new SetFormEventHandlerTool().getName());
     }
 
     @Test
     public void testResponseType()
     {
-        assertEquals(ResponseType.JSON, new AddFormAttributeTool().getResponseType());
+        assertEquals(ResponseType.JSON, new SetFormEventHandlerTool().getResponseType());
     }
 
     @Test
     public void testDescriptionNotEmpty()
     {
-        String desc = new AddFormAttributeTool().getDescription();
+        String desc = new SetFormEventHandlerTool().getDescription();
         assertNotNull(desc);
         assertFalse(desc.isEmpty());
     }
@@ -51,36 +51,37 @@ public class AddFormAttributeToolTest
     @Test
     public void testInputSchemaContainsAllParameters()
     {
-        String schema = new AddFormAttributeTool().getInputSchema();
+        String schema = new SetFormEventHandlerTool().getInputSchema();
         assertNotNull(schema);
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"formFqn\"")); //$NON-NLS-1$
-        assertTrue(schema.contains("\"attributeName\"")); //$NON-NLS-1$
-        assertTrue(schema.contains("\"type\"")); //$NON-NLS-1$
-        assertTrue(schema.contains("\"main\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"itemName\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"event\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"handlerName\"")); //$NON-NLS-1$
     }
 
     @Test
     public void testRequiredParameters()
     {
-        String schema = new AddFormAttributeTool().getInputSchema();
+        String schema = new SetFormEventHandlerTool().getInputSchema();
         int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
         assertTrue("schema must declare required array", requiredIdx >= 0); //$NON-NLS-1$
         String tail = schema.substring(requiredIdx);
         assertTrue("projectName must be required", tail.contains("\"projectName\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("formFqn must be required", tail.contains("\"formFqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
-        assertTrue("attributeName must be required", tail.contains("\"attributeName\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("event must be required", tail.contains("\"event\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("handlerName must be required", tail.contains("\"handlerName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
-    public void testTypeParameterIsOptional()
+    public void testItemNameIsOptional()
     {
-        // 'type' is optional (an untyped attribute is valid), so it must NOT
-        // appear in the required array.
-        String schema = new AddFormAttributeTool().getInputSchema();
+        // itemName is optional (omitting it targets a form-level event), so it
+        // must NOT appear in the required array.
+        String schema = new SetFormEventHandlerTool().getInputSchema();
         int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
         assertTrue(requiredIdx >= 0);
         String tail = schema.substring(requiredIdx);
-        assertFalse("type must be optional", tail.contains("\"type\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("itemName must be optional", tail.contains("\"itemName\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }
