@@ -14,6 +14,7 @@ import org.osgi.util.tracker.ServiceTracker;
 
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
+import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
@@ -59,6 +60,7 @@ public class Activator extends AbstractUIPlugin
     private ServiceTracker<IApplicationManager, IApplicationManager> applicationManagerTracker;
     private ServiceTracker<INavigatorContentProviderStateProvider, INavigatorContentProviderStateProvider> navigatorStateProviderTracker;
     private ServiceTracker<IMdRefactoringService, IMdRefactoringService> mdRefactoringServiceTracker;
+    private ServiceTracker<ITopObjectFqnGenerator, ITopObjectFqnGenerator> topObjectFqnGeneratorTracker;
     /**
      * EDT workspace CLI APIs are tracked by String class name and invoked via
      * reflection from the tools, keeping this bundle build-independent of
@@ -141,6 +143,9 @@ public class Activator extends AbstractUIPlugin
         
         mdRefactoringServiceTracker = new ServiceTracker<>(context, IMdRefactoringService.class, null);
         mdRefactoringServiceTracker.open();
+
+        topObjectFqnGeneratorTracker = new ServiceTracker<>(context, ITopObjectFqnGenerator.class, null);
+        topObjectFqnGeneratorTracker.open();
 
         exportConfigurationFilesApiTracker = new ServiceTracker<>(
             context, "com._1c.g5.v8.dt.cli.api.workspace.IExportConfigurationFilesApi", null); //$NON-NLS-1$
@@ -258,6 +263,11 @@ public class Activator extends AbstractUIPlugin
         {
             mdRefactoringServiceTracker.close();
             mdRefactoringServiceTracker = null;
+        }
+        if (topObjectFqnGeneratorTracker != null)
+        {
+            topObjectFqnGeneratorTracker.close();
+            topObjectFqnGeneratorTracker = null;
         }
         if (exportConfigurationFilesApiTracker != null)
         {
@@ -533,6 +543,29 @@ public class Activator extends AbstractUIPlugin
             return null;
         }
         return mdRefactoringServiceTracker.getService();
+    }
+
+    /**
+     * Returns the {@link ITopObjectFqnGenerator} service used to compute the
+     * canonical BM top-object FQN for external-property objects (e.g. the
+     * content {@code Form} referenced by a {@code BasicForm}).
+     * <p>
+     * This is the same generator EDT's own form infrastructure uses (see
+     * {@code com._1c.g5.v8.dt.form.service.common.impl.ExtInfoManagementService}).
+     * Using it guarantees the content form is attached under the FQN the BM
+     * namespace/store layer expects, so the object resolves on subsequent
+     * lookups instead of failing with "No store with '&lt;id&gt;' is assigned
+     * to namespace".
+     *
+     * @return the top-object FQN generator, or {@code null} if not available
+     */
+    public ITopObjectFqnGenerator getTopObjectFqnGenerator()
+    {
+        if (topObjectFqnGeneratorTracker == null)
+        {
+            return null;
+        }
+        return topObjectFqnGeneratorTracker.getService();
     }
 
     /**

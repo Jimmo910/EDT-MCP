@@ -63,9 +63,9 @@ public class ToolGroupTest
     }
 
     @Test
-    public void testNineGroups()
+    public void testGroupCount()
     {
-        assertEquals("Should have 9 tool groups", 9, ToolGroup.values().length);
+        assertEquals("Should have 10 tool groups", 10, ToolGroup.values().length);
     }
 
     // === Tool membership ===
@@ -192,5 +192,18 @@ public class ToolGroupTest
         assertTrue(tools.contains("add_metadata_attribute"));
         assertTrue(tools.contains("create_metadata_object"));
         assertEquals(4, tools.size());
+    }
+
+    @Test
+    public void testFormsGroupContents()
+    {
+        List<String> tools = ToolGroup.FORMS.getToolNames();
+        assertTrue(tools.contains("create_form"));
+        assertTrue(tools.contains("add_form_attribute"));
+        assertTrue(tools.contains("add_form_item"));
+        assertTrue(tools.contains("add_form_command"));
+        assertTrue(tools.contains("set_form_command_handler"));
+        assertEquals(5, tools.size());
+        assertEquals(ToolGroup.FORMS, ToolGroup.getGroupForTool("create_form"));
     }
 }
