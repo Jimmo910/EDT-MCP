@@ -94,6 +94,8 @@ public class MoveFormItemTool extends AbstractFormWriteTool
             .stringProperty("position", //$NON-NLS-1$
                 "Optional position in the destination container: an integer index (0-based), " + //$NON-NLS-1$
                 "'first', 'last', 'before:<siblingName>' or 'after:<siblingName>'. " + //$NON-NLS-1$
+                "An integer index is interpreted against the container as you currently see it " + //$NON-NLS-1$
+                "(reordering within the same container is not off-by-one). " + //$NON-NLS-1$
                 "When omitted, a moved item is appended to the end of the target group.") //$NON-NLS-1$
             .build();
     }
@@ -213,7 +215,8 @@ public class MoveFormItemTool extends AbstractFormWriteTool
      */
     private String moveItem(Form form, String itemName, String targetGroup, String position, String mdFormName)
     {
-        FormItem item = findItem(form, itemName);
+        // Fail on an ambiguous item name instead of silently moving the first match.
+        FormItem item = FormToolSupport.findUniqueItem(form, itemName);
         if (item == null)
         {
             throw new RuntimeException("Form item not found: '" + itemName //$NON-NLS-1$
@@ -233,7 +236,8 @@ public class MoveFormItemTool extends AbstractFormWriteTool
         boolean reparent = targetGroup != null && !targetGroup.isEmpty();
         if (reparent && !targetGroup.equalsIgnoreCase(mdFormName))
         {
-            FormGroup group = findGroup(form, targetGroup);
+            // Fail on an ambiguous target-group name instead of picking the first.
+            FormGroup group = FormToolSupport.findUniqueGroup(form, targetGroup);
             if (group == null)
             {
                 throw new RuntimeException("Target group not found: '" + targetGroup //$NON-NLS-1$
@@ -262,10 +266,26 @@ public class MoveFormItemTool extends AbstractFormWriteTool
 
         EList<FormItem> destItems = destContainer.getItems();
 
+        // Capture the item's original index in the destination list BEFORE the
+        // removal. For an integer position that targets the same container, the
+        // index the caller gives is relative to the list they observed (which still
+        // contained the moved item); removing the item first shifts every later
+        // slot left by one, so a downward integer move would land one slot short.
+        // We compensate below. 'before:'/'after:' resolve against a sibling name and
+        // are unaffected, so they stay as-is.
+        boolean sameContainer = destContainer == sourceContainer;
+        int originalIndex = sameContainer ? destItems.indexOf(item) : -1;
+
         // Remove from the source list first (it may be the same list).
         sourceContainer.getItems().remove(item);
 
         int index = resolvePosition(position, destItems, itemName);
+        if (sameContainer && isIntegerPosition(position) && originalIndex >= 0 && index > originalIndex)
+        {
+            // Requested an absolute slot below the item's original slot: account for
+            // the one-element left shift caused by removing the item first.
+            index--;
+        }
         if (index < 0 || index > destItems.size())
         {
             index = destItems.size();
@@ -273,6 +293,30 @@ public class MoveFormItemTool extends AbstractFormWriteTool
         destItems.add(index, item);
 
         return destLabel + " at index " + index; //$NON-NLS-1$
+    }
+
+    /**
+     * Returns {@code true} when a position spec is a plain integer index (not
+     * {@code first}/{@code last}/{@code before:}/{@code after:} and not blank).
+     * Only integer positions are affected by the remove-before-insert shift.
+     *
+     * @param position the position spec
+     * @return {@code true} when it parses as a non-negative integer
+     */
+    private static boolean isIntegerPosition(String position)
+    {
+        if (position == null || position.isEmpty())
+        {
+            return false;
+        }
+        try
+        {
+            return Integer.parseInt(position.trim()) >= 0;
+        }
+        catch (NumberFormatException e)
+        {
+            return false;
+        }
     }
 
     private String sameContainerLabel(FormItemContainer container, Form form)
@@ -380,45 +424,5 @@ public class MoveFormItemTool extends AbstractFormWriteTool
             parent = parent.eContainer();
         }
         return false;
-    }
-
-    private static FormItem findItem(FormItemContainer container, String name)
-    {
-        for (FormItem item : container.getItems())
-        {
-            if (name.equalsIgnoreCase(item.getName()))
-            {
-                return item;
-            }
-            if (item instanceof FormItemContainer)
-            {
-                FormItem nested = findItem((FormItemContainer)item, name);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static FormGroup findGroup(FormItemContainer container, String name)
-    {
-        for (FormItem item : container.getItems())
-        {
-            if (item instanceof FormGroup)
-            {
-                if (name.equalsIgnoreCase(item.getName()))
-                {
-                    return (FormGroup)item;
-                }
-                FormGroup nested = findGroup((FormGroup)item, name);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-        }
-        return null;
     }
 }

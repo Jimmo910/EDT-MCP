@@ -7,15 +7,11 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.lang.reflect.Method;
-import java.util.Collections;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.EList;
 
 import com._1c.g5.v8.bm.core.IBmObject;
-import com._1c.g5.v8.dt.core.platform.IBmModelManager;
-import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.service.FormIdentifierService;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
@@ -45,8 +41,18 @@ import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
  */
 public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
 {
-    /** The fixed FQN segment that separates an object owner from its forms. */
+    /** The canonical FQN segment that separates an object owner from its forms. */
     protected static final String FORM_SEGMENT = "Form"; //$NON-NLS-1$
+
+    /**
+     * The alternative (plural) FQN segment accepted on input. The on-disk layout
+     * uses a {@code Forms/} directory, so callers often write
+     * {@code Catalog.Products.Forms.ItemForm}; this is treated as equivalent to
+     * the canonical singular {@code .Form.} separator. See
+     * {@link com.ditrix.edt.mcp.server.utils.MetadataPathResolver}, which accepts
+     * both separators on the screenshot/snapshot path for the same reason.
+     */
+    protected static final String FORM_SEGMENT_PLURAL = "Forms"; //$NON-NLS-1$
 
     /**
      * Resolved form location: the MD-form, its owner and the content
@@ -65,7 +71,9 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
     /**
      * Resolves a form by its FQN. The FQN format is
      * {@code <OwnerType>.<OwnerName>.Form.<FormName>}, e.g.
-     * {@code Catalog.Products.Form.ItemForm}. Russian type names are accepted.
+     * {@code Catalog.Products.Form.ItemForm}. The plural separator
+     * {@code .Forms.} (e.g. {@code Catalog.Products.Forms.ItemForm}) is also
+     * accepted as an equivalent. Russian type names are accepted.
      *
      * @param config the configuration root
      * @param formFqn the form FQN (already trimmed, may use Russian type names)
@@ -78,8 +86,11 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
 
         String normalized = MetadataTypeUtils.normalizeFqn(formFqn);
         // Expected: Type.Owner.Form.FormName -> split into owner FQN and form name.
+        // Both the canonical singular separator ('Form') and the plural one
+        // ('Forms', mirroring the on-disk Forms/ directory) are accepted so the
+        // same FQN works here and on the screenshot/snapshot path.
         String[] parts = normalized.split("\\."); //$NON-NLS-1$
-        if (parts.length < 4 || !FORM_SEGMENT.equalsIgnoreCase(parts[parts.length - 2]))
+        if (parts.length < 4 || !isFormSeparator(parts[parts.length - 2]))
         {
             return location;
         }
@@ -111,6 +122,19 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
         location.mdForm = mdForm;
         location.content = contentOf(mdForm);
         return location;
+    }
+
+    /**
+     * Returns {@code true} when an FQN segment is a recognized owner/forms
+     * separator: the canonical singular {@code Form} or the plural {@code Forms}
+     * (both case-insensitive). The two are interchangeable on input.
+     *
+     * @param segment the FQN segment between the owner name and the form name
+     * @return {@code true} when it is a valid form separator
+     */
+    protected static boolean isFormSeparator(String segment)
+    {
+        return FORM_SEGMENT.equalsIgnoreCase(segment) || FORM_SEGMENT_PLURAL.equalsIgnoreCase(segment);
     }
 
     /**
@@ -245,17 +269,23 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
 
     /**
      * Forces the in-memory BM model change to be written to the workspace
-     * {@code .form} file on disk.
+     * {@code .form} file on disk <b>and</b> refreshes stale validation markers for
+     * the changed form.
      * <p>
      * A {@code bmModel.execute(...)} transaction commits the change into the
      * in-memory BM model, but the model-to-file serialization runs
      * asynchronously, so the on-disk {@code Form.form} does not change until that
      * background export completes. Tools that verify the result by reading the
      * file from disk ({@code get_form_layout_snapshot}, {@code get_form_screenshot})
-     * would therefore not see the change. This method drives the export
-     * synchronously through {@link IBmModelManager#forceExport(IDtProject, java.util.List)},
-     * the same API EDT uses to flush a top object to its file, using the content
-     * form's own top-object FQN (e.g. {@code Catalog.Products.Form.ItemForm.Form}).
+     * would therefore not see the change. Likewise the validation markers attached
+     * to the form are not recomputed by the commit, so {@code get_project_errors}
+     * can keep reporting stale problems even though the tools advise the caller to
+     * "run get_project_errors to verify".
+     * <p>
+     * This delegates to {@link AbstractMetadataWriteTool#persistAndRevalidate}, the
+     * same export+revalidate path the metadata write tools use, so a form edit and a
+     * metadata edit refresh their markers identically. The content form's own
+     * top-object FQN is used (e.g. {@code Catalog.Products.Form.ItemForm.Form}).
      *
      * @param project the workspace project owning the form
      * @param contentFormFqn the BM top-object FQN of the content form (obtained
@@ -269,31 +299,9 @@ public abstract class AbstractFormWriteTool extends AbstractMetadataWriteTool
         {
             return "content form FQN is unknown"; //$NON-NLS-1$
         }
-        IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
-        if (dtProjectManager == null)
-        {
-            return "IDtProjectManager not available"; //$NON-NLS-1$
-        }
-        IDtProject dtProject = dtProjectManager.getDtProject(project);
-        if (dtProject == null)
-        {
-            return "could not resolve DT project"; //$NON-NLS-1$
-        }
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return "IBmModelManager not available"; //$NON-NLS-1$
-        }
-        try
-        {
-            bmModelManager.forceExport(dtProject, Collections.singletonList(contentFormFqn));
-            return null;
-        }
-        catch (Exception e)
-        {
-            Activator.logError("Error exporting form to disk: " + contentFormFqn, e); //$NON-NLS-1$
-            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-        }
+        // Export the Form.form to disk and revalidate it so get_project_errors is
+        // not stale - the same treatment metadata tools give their .mdo files.
+        return persistAndRevalidate(project, contentFormFqn);
     }
 
     /**

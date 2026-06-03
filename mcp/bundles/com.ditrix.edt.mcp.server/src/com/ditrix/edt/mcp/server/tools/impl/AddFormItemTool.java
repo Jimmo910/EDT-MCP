@@ -191,7 +191,9 @@ public class AddFormItemTool extends AbstractFormWriteTool
                     FormItemContainer container = form;
                     if (parentGroupFinal != null && !parentGroupFinal.isEmpty())
                     {
-                        FormGroup group = findGroup(form, parentGroupFinal);
+                        // Fail on an ambiguous parent-group name instead of silently
+                        // picking the first match.
+                        FormGroup group = FormToolSupport.findUniqueGroup(form, parentGroupFinal);
                         if (group == null)
                         {
                             throw new RuntimeException("Parent group not found: " + parentGroupFinal); //$NON-NLS-1$
@@ -310,26 +312,6 @@ public class AddFormItemTool extends AbstractFormWriteTool
         AdjustableBoolean userVisible = MdClassFactory.eINSTANCE.createAdjustableBoolean();
         userVisible.setCommon(true);
         return userVisible;
-    }
-
-    private FormGroup findGroup(FormItemContainer container, String name)
-    {
-        for (FormItem item : container.getItems())
-        {
-            if (item instanceof FormGroup)
-            {
-                if (name.equalsIgnoreCase(item.getName()))
-                {
-                    return (FormGroup)item;
-                }
-                FormGroup nested = findGroup((FormGroup)item, name);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-        }
-        return null;
     }
 
     private boolean itemNameExists(FormItemContainer container, String name)

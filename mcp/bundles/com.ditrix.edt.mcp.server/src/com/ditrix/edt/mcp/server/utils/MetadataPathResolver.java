@@ -25,9 +25,17 @@ public final class MetadataPathResolver
      * <ul>
      *   <li>{@code "Catalog.Products.Forms.ItemForm"} &rarr;
      *       {@code "src/Catalogs/Products/Forms/ItemForm/Form.form"}</li>
+     *   <li>{@code "Catalog.Products.Form.ItemForm"} (singular separator) &rarr;
+     *       {@code "src/Catalogs/Products/Forms/ItemForm/Form.form"}</li>
      *   <li>{@code "CommonForm.MyForm"} &rarr;
      *       {@code "src/CommonForms/MyForm/Form.form"}</li>
      * </ul>
+     *
+     * <p>The owner/forms separator may be written either as the singular
+     * {@code Form} (used by the form-write tools) or the plural {@code Forms}
+     * (mirroring the on-disk {@code Forms/} directory); both are accepted so a
+     * form FQN is interchangeable between the write tools and the
+     * screenshot/snapshot tools.
      *
      * <p>Russian type names are also supported (e.g. "Справочник.Товары.Forms.ФормаЭлемента").
      *
@@ -61,7 +69,12 @@ public final class MetadataPathResolver
             String formsKeyword = parts[2];
             String formName = parts[3];
 
-            if (!"forms".equalsIgnoreCase(formsKeyword)) //$NON-NLS-1$
+            // Accept both the singular 'Form' separator (used by the form-write
+            // tools, e.g. 'Catalog.Products.Form.ItemForm') and the plural 'Forms'
+            // separator (which mirrors the on-disk 'Forms/' directory). The two
+            // must be interchangeable everywhere so an FQN that worked with
+            // add_form_item is also accepted by get_form_screenshot / snapshot.
+            if (!"forms".equalsIgnoreCase(formsKeyword) && !"form".equalsIgnoreCase(formsKeyword)) //$NON-NLS-1$ //$NON-NLS-2$
             {
                 return null;
             }

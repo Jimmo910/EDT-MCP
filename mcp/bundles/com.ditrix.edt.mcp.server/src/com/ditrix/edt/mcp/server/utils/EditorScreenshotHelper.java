@@ -465,9 +465,18 @@ public final class EditorScreenshotHelper
 
     /**
      * Fallback capture method: captures the WYSIWYG control image via {@code Control.print()}.
+     * <p>
+     * {@code Control.print()} only produces a faithful image when the control is actually
+     * shown on screen: for a control that is hidden, behind another editor tab, or on a
+     * non-active editor it yields a blank or partial image while still reporting positive
+     * dimensions, which would be reported as a successful (but empty) screenshot. To avoid
+     * that false positive, this returns {@code null} unless the control is genuinely visible
+     * and on top (its top-level shell is the display's active shell), so the caller falls
+     * back to the explicit "form layout did not finish rendering" error instead.
      *
      * @param wysiwygViewer the WYSIWYG viewer instance
-     * @return image data, or {@code null} if the control is not available or has invalid bounds
+     * @return image data, or {@code null} if the control is unavailable, has invalid bounds,
+     *         or is not visible/on top
      */
     public static ImageData captureControlImageData(Object wysiwygViewer) throws Exception
     {
@@ -479,6 +488,15 @@ public final class EditorScreenshotHelper
 
         Rectangle bounds = control.getBounds();
         if (bounds.width <= 0 || bounds.height <= 0)
+        {
+            return null;
+        }
+
+        // Gate the print fallback on the control being shown and on top. isVisible() is
+        // true only when the control and all its ancestors are visible (so a control on a
+        // hidden/behind editor is excluded), and we additionally require its shell to be
+        // the active shell so a background window does not yield a blank capture.
+        if (!control.isVisible() || !isOnTop(control))
         {
             return null;
         }
@@ -499,6 +517,24 @@ public final class EditorScreenshotHelper
             gc.dispose();
             image.dispose();
         }
+    }
+
+    /**
+     * Returns {@code true} when the control's top-level shell is the display's active shell,
+     * i.e. the control is on the window currently on top. Used to gate the {@code print()}
+     * fallback so a background/non-active editor does not produce a blank capture.
+     *
+     * @param control the control to test
+     * @return {@code true} when the control's shell is the active shell
+     */
+    private static boolean isOnTop(Control control)
+    {
+        Display display = control.getDisplay();
+        if (display == null)
+        {
+            return false;
+        }
+        return control.getShell() == display.getActiveShell();
     }
 
     /**
