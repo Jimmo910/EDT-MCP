@@ -419,11 +419,20 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to add attribute: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        // Editing a child re-exports the owner's whole .mdo, so flush and revalidate
+        // the OWNER top object (the Catalog/Document/Register that owns the child).
+        String persistError = persistAndRevalidate(project, topObjectFqnOf(parentObject));
+
         String kindLabel = describeKind(kind);
         ToolResult result = ToolResult.success()
             .put("parentFqn", normalizedParentFqn) //$NON-NLS-1$
             .put("kind", kindLabel) //$NON-NLS-1$
             .put("attributeName", attributeName); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", kindLabel + " added to the in-memory model but the export to the " //$NON-NLS-1$ //$NON-NLS-2$
+                + "owner's .mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
         if (typeSpec != null)
         {
             result.put("type", TypeDescriptionBuilder.describe(typeSpec)); //$NON-NLS-1$

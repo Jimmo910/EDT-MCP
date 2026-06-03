@@ -283,9 +283,18 @@ public class SetRegisterPropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to set register properties: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        // Flush the register to its .mdo on disk and refresh stale validation markers.
+        String persistError = persistAndRevalidate(project, topObjectFqnOf(target));
+
+        ToolResult result = ToolResult.success()
             .put("objectFqn", normalizedFqn) //$NON-NLS-1$
-            .put("appliedProperties", applied) //$NON-NLS-1$
+            .put("appliedProperties", applied); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", "Properties set in the in-memory model but the export to the " //$NON-NLS-1$ //$NON-NLS-2$
+                + ".mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
+        return result
             .put("message", "Register properties updated on " + normalizedFqn //$NON-NLS-1$ //$NON-NLS-2$
                 + ". Run get_metadata_details to verify and get_project_errors to confirm.") //$NON-NLS-1$
             .toJson();

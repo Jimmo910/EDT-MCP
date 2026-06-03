@@ -336,10 +336,20 @@ public class SetAttributePropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to set attribute properties: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        // Editing a child re-exports the owner's whole .mdo, so flush and revalidate
+        // the OWNER top object (the Catalog/Document/Register that owns the attribute).
+        String persistError = persistAndRevalidate(project, topObjectFqnOf(owner));
+
+        ToolResult result = ToolResult.success()
             .put("ownerFqn", normalizedOwnerFqn) //$NON-NLS-1$
             .put("attributeName", attributeName) //$NON-NLS-1$
-            .put("appliedProperties", applied) //$NON-NLS-1$
+            .put("appliedProperties", applied); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", "Properties set in the in-memory model but the export to the " //$NON-NLS-1$ //$NON-NLS-2$
+                + "owner's .mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
+        return result
             .put("message", "Updated " + applied.size() + " property(ies) on attribute '" //$NON-NLS-1$ //$NON-NLS-2$
                 + attributeName + "' of " + normalizedOwnerFqn //$NON-NLS-1$
                 + ". Run get_project_errors to verify and get_metadata_details to confirm the new type.") //$NON-NLS-1$
