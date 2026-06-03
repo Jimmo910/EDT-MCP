@@ -20,7 +20,8 @@ import java.util.List;
  * <ul>
  * <li>a platform type, optionally followed by qualifiers in parentheses:
  *     <ul>
- *     <li>{@code String}, {@code String(50)}, {@code String(50,fixed)}</li>
+ *     <li>{@code String}, {@code String(50)}, {@code String(50,fixed)};
+ *         {@code String(0)} means an <b>unlimited</b>-length string</li>
  *     <li>{@code Number}, {@code Number(15,2)}, {@code Number(15,2,nonnegative)}</li>
  *     <li>{@code Date}, {@code Date(Date)}, {@code Date(Time)}, {@code Date(DateTime)}</li>
  *     <li>{@code Boolean}</li>
@@ -50,7 +51,11 @@ public final class AttributeTypeSpec
     {
         /** Verbatim type name to resolve, e.g. {@code "String"} or {@code "CatalogRef.Products"}. */
         public final String name;
-        /** String length (>0) when explicitly given, otherwise {@code null}. */
+        /**
+         * String length (&gt;=0) when explicitly given, otherwise {@code null}.
+         * A length of {@code 0} denotes an <b>unlimited</b>-length string, which is
+         * the standard 1C representation (e.g. a document {@code Comment} attribute).
+         */
         public Integer stringLength;
         /** Fixed-length flag for a string type; {@code null} when not given. */
         public Boolean stringFixed;
@@ -230,11 +235,12 @@ public final class AttributeTypeSpec
             return;
         }
         String[] parts = inside.split(","); //$NON-NLS-1$
-        // part[0] = length
+        // part[0] = length. A length of 0 is valid and means an unlimited-length
+        // string (the standard 1C representation, e.g. a document Comment attribute).
         String lengthStr = parts[0].trim();
         if (!lengthStr.isEmpty())
         {
-            item.stringLength = parsePositiveInt(lengthStr, "String length", raw); //$NON-NLS-1$
+            item.stringLength = parseNonNegativeInt(lengthStr, "String length", raw); //$NON-NLS-1$
         }
         if (parts.length > 1)
         {
@@ -327,16 +333,6 @@ public final class AttributeTypeSpec
                 throw new IllegalArgumentException(
                     "Unknown Date composition '" + inside + "', expected Date, Time or DateTime: " + raw); //$NON-NLS-1$ //$NON-NLS-2$
         }
-    }
-
-    private static int parsePositiveInt(String value, String what, String raw)
-    {
-        int result = parseNonNegativeInt(value, what, raw);
-        if (result == 0)
-        {
-            throw new IllegalArgumentException(what + " must be greater than 0: " + raw); //$NON-NLS-1$
-        }
-        return result;
     }
 
     private static int parseNonNegativeInt(String value, String what, String raw)

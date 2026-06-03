@@ -56,6 +56,36 @@ public class SetRegisterPropertyToolTest
     }
 
     @Test
+    public void testDescriptionMentionsAccountingAndCalculationRegister()
+    {
+        String desc = new SetRegisterPropertyTool().getDescription();
+        assertTrue("description should mention AccountingRegister", //$NON-NLS-1$
+            desc.contains("AccountingRegister")); //$NON-NLS-1$
+        assertTrue("description should mention CalculationRegister", //$NON-NLS-1$
+            desc.contains("CalculationRegister")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDescriptionMentionsNewRegisterProperties()
+    {
+        String desc = new SetRegisterPropertyTool().getDescription();
+        // AccountingRegister properties.
+        assertTrue("description should mention chartOfAccounts", //$NON-NLS-1$
+            desc.contains("chartOfAccounts")); //$NON-NLS-1$
+        assertTrue("description should mention correspondence", //$NON-NLS-1$
+            desc.contains("correspondence")); //$NON-NLS-1$
+        // CalculationRegister properties.
+        assertTrue("description should mention chartOfCalculationTypes", //$NON-NLS-1$
+            desc.contains("chartOfCalculationTypes")); //$NON-NLS-1$
+        assertTrue("description should mention actionPeriod", //$NON-NLS-1$
+            desc.contains("actionPeriod")); //$NON-NLS-1$
+        assertTrue("description should mention basePeriod", //$NON-NLS-1$
+            desc.contains("basePeriod")); //$NON-NLS-1$
+        assertTrue("description should mention schedule", //$NON-NLS-1$
+            desc.contains("schedule")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testInputSchemaContainsAllParameters()
     {
         String schema = new SetRegisterPropertyTool().getInputSchema();

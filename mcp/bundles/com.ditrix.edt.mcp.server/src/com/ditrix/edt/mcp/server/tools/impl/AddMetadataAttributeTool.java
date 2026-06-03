@@ -12,33 +12,22 @@ import java.util.UUID;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.emf.common.util.EList;
-import org.eclipse.emf.common.util.URI;
-import org.eclipse.emf.ecore.InternalEObject;
 
-import com._1c.g5.v8.bm.core.BmUriUtil;
 import com._1c.g5.v8.bm.core.IBmEngine;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
-import com._1c.g5.v8.dt.core.naming.ISymbolicNameService;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
-import com._1c.g5.v8.dt.mcore.DateFractions;
-import com._1c.g5.v8.dt.mcore.DateQualifiers;
-import com._1c.g5.v8.dt.mcore.McoreFactory;
-import com._1c.g5.v8.dt.mcore.McorePackage;
-import com._1c.g5.v8.dt.mcore.NumberQualifiers;
-import com._1c.g5.v8.dt.mcore.StringQualifiers;
-import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
-import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.metadata.common.FillChecking;
 import com._1c.g5.v8.dt.metadata.mdclass.AccountingRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.AccumulationRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BusinessProcess;
+import com._1c.g5.v8.dt.metadata.mdclass.CalculationRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
 import com._1c.g5.v8.dt.metadata.mdclass.ChartOfAccounts;
 import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCalculationTypes;
@@ -57,13 +46,13 @@ import com._1c.g5.v8.dt.metadata.mdclass.RegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.Report;
 import com._1c.g5.v8.dt.metadata.mdclass.Task;
 import com._1c.g5.v8.dt.platform.version.Version;
-import com._1c.g5.wiring.ServiceAccess;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 
 /**
  * Tool to add a new attribute to a metadata object.
@@ -72,19 +61,19 @@ import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
  * parameter) the attribute keeps the EDT factory default type, preserving the
  * original behavior. When a {@code type} is given, this tool builds the
  * {@link TypeDescription} (including composite types and String/Number/Date
- * qualifiers) and assigns it through {@link BasicFeature#setType}. The optional
- * {@code indexing}, {@code fillChecking} and {@code multiLine} flags configure
- * the corresponding attribute properties.
+ * qualifiers) through the shared {@link TypeDescriptionBuilder} and assigns it
+ * through {@link BasicFeature#setType}. The optional {@code indexing},
+ * {@code fillChecking} and {@code multiLine} flags configure the corresponding
+ * attribute properties.
  * <p>
  * Type items (platform types such as {@code String}/{@code Number}/{@code Date}/
  * {@code Boolean} and reference types such as {@code CatalogRef.Products}) are
- * resolved into {@link TypeItem} proxies through
- * {@link ISymbolicNameService#convertSymbolicNameToUri}, scoped to the project's
- * own {@link IBmEngine}. This is the same project-scoped mechanism EDT uses when
- * it imports a configuration from XML: platform type names resolve against the
- * platform type registry, while reference type names (e.g. {@code CatalogRef.X})
- * resolve against the metadata objects of the <em>current project</em>. The
- * proxies are then resolved lazily by the BM resource set.
+ * resolved into {@code TypeItem} proxies through the project-scoped
+ * {@link TypeDescriptionBuilder} - the same mechanism EDT uses when it imports a
+ * configuration from XML: platform type names resolve against the platform type
+ * registry, while reference type names (e.g. {@code CatalogRef.X}) resolve
+ * against the metadata objects of the <em>current project</em>. The proxies are
+ * then resolved lazily by the BM resource set.
  */
 public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
 {
@@ -93,8 +82,10 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
     /**
      * The kind of register child to create. {@link #ATTRIBUTE} is the default and
      * the only kind valid for non-register objects. {@link #DIMENSION} and
-     * {@link #RESOURCE} apply only to {@link InformationRegister} and
-     * {@link AccumulationRegister}.
+     * {@link #RESOURCE} apply to {@link InformationRegister},
+     * {@link AccumulationRegister}, {@link AccountingRegister} and
+     * {@link CalculationRegister} (all four expose dimensions/resources
+     * collections).
      */
     private enum Kind
     {
@@ -113,17 +104,20 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         return "Add a new attribute to a metadata object. " + //$NON-NLS-1$
                "Supports: Catalog, Document, ExchangePlan, ChartOfCharacteristicTypes, " + //$NON-NLS-1$
                "ChartOfAccounts, ChartOfCalculationTypes, BusinessProcess, Task, " + //$NON-NLS-1$
-               "DataProcessor, Report, InformationRegister, AccumulationRegister, AccountingRegister. " + //$NON-NLS-1$
+               "DataProcessor, Report, InformationRegister, AccumulationRegister, AccountingRegister, " + //$NON-NLS-1$
+               "CalculationRegister. " + //$NON-NLS-1$
                "Optionally sets the attribute type, qualifiers and flags. " + //$NON-NLS-1$
                "The 'type' parameter accepts platform types (String, Number, Boolean, Date) " + //$NON-NLS-1$
                "with qualifiers, and reference types (CatalogRef.<Name>, DocumentRef.<Name>, " + //$NON-NLS-1$
                "EnumRef.<Name>, ...). A comma-separated list produces a composite type. " + //$NON-NLS-1$
-               "Examples: 'String(50)', 'String(50,fixed)', 'Number(15,2)', " + //$NON-NLS-1$
+               "Examples: 'String(50)', 'String(0)' (unlimited length), 'String(50,fixed)', " + //$NON-NLS-1$
+               "'Number(15,2)', " + //$NON-NLS-1$
                "'Number(15,2,nonnegative)', 'Date(DateTime)', 'CatalogRef.Products', " + //$NON-NLS-1$
                "'String(10), CatalogRef.Products'. " + //$NON-NLS-1$
                "When 'type' is omitted the attribute keeps the default type (backward compatible). " + //$NON-NLS-1$
-               "For InformationRegister and AccumulationRegister the 'kind' parameter selects " + //$NON-NLS-1$
-               "what to create: 'Attribute' (default), 'Dimension' or 'Resource'. " + //$NON-NLS-1$
+               "For InformationRegister, AccumulationRegister, AccountingRegister and " + //$NON-NLS-1$
+               "CalculationRegister the 'kind' parameter selects what to create: " + //$NON-NLS-1$
+               "'Attribute' (default), 'Dimension' or 'Resource'. " + //$NON-NLS-1$
                "Dimensions accept the 'master', 'mainFilter' (InformationRegister only) and " + //$NON-NLS-1$
                "'indexing' flags. " + //$NON-NLS-1$
                "Russian type and object names are also supported."; //$NON-NLS-1$
@@ -149,7 +143,7 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             .stringProperty("type", //$NON-NLS-1$
                 "Optional attribute type. A single type or a comma-separated " + //$NON-NLS-1$
                 "list for a composite type. Platform types support qualifiers: " + //$NON-NLS-1$
-                "'String', 'String(50)', 'String(50,fixed)', 'Number(15,2)', " + //$NON-NLS-1$
+                "'String', 'String(50)', 'String(0)' (unlimited length), 'String(50,fixed)', 'Number(15,2)', " + //$NON-NLS-1$
                 "'Number(15,2,nonnegative)', 'Date(Date|Time|DateTime)', 'Boolean'. " + //$NON-NLS-1$
                 "Reference types: 'CatalogRef.<Name>', 'DocumentRef.<Name>', " + //$NON-NLS-1$
                 "'EnumRef.<Name>', etc. Composite example: 'String(10), CatalogRef.Products'.", //$NON-NLS-1$
@@ -332,13 +326,16 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         }
 
         // Dimension/Resource are only meaningful for registers that expose those
-        // collections (InformationRegister and AccumulationRegister).
+        // collections (InformationRegister, AccumulationRegister, AccountingRegister
+        // and CalculationRegister).
         boolean isRegisterWithDimensions =
-            parentObject instanceof InformationRegister || parentObject instanceof AccumulationRegister;
+            parentObject instanceof InformationRegister || parentObject instanceof AccumulationRegister
+                || parentObject instanceof AccountingRegister || parentObject instanceof CalculationRegister;
         if (kind != Kind.ATTRIBUTE && !isRegisterWithDimensions)
         {
             return ToolResult.error("kind='" + describeKind(kind) + "' is only valid for " + //$NON-NLS-1$ //$NON-NLS-2$
-                "InformationRegister and AccumulationRegister, not for '" //$NON-NLS-1$
+                "InformationRegister, AccumulationRegister, AccountingRegister and " //$NON-NLS-1$
+                + "CalculationRegister, not for '" //$NON-NLS-1$
                 + parentObject.eClass().getName() + "'. Use kind='Attribute' (the default) instead.").toJson(); //$NON-NLS-1$
         }
         // 'master'/'mainFilter' exist only on InformationRegister dimensions.
@@ -417,7 +414,7 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             .put("attributeName", attributeName); //$NON-NLS-1$
         if (typeSpec != null)
         {
-            result.put("type", describeTypeSpec(typeSpec)); //$NON-NLS-1$
+            result.put("type", TypeDescriptionBuilder.describe(typeSpec)); //$NON-NLS-1$
         }
         return result
             .put("message", kindLabel + " '" + attributeName + "' added successfully to " + normalizedParentFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -430,10 +427,10 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
      * the attribute via {@link BasicFeature#setType}. No-op when {@code spec}
      * is {@code null} (the attribute keeps its factory default type).
      * <p>
-     * Each type item name is resolved into a {@link TypeItem} proxy through the
-     * project-scoped {@link ISymbolicNameService} - the same path EDT uses when
-     * importing a configuration from XML. String, Number and Date qualifiers are
-     * attached when at least one item of the corresponding kind carries them.
+     * Delegates the actual type resolution and qualifier handling to the shared
+     * {@link TypeDescriptionBuilder} (the S2 project-scoped resolver), so this
+     * tool and {@code set_attribute_property}/{@code add_form_attribute} all build
+     * types the same way.
      *
      * @param attribute the attribute being configured
      * @param spec the parsed type specification (may be {@code null})
@@ -455,141 +452,9 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                 "Attribute type '" + attribute.eClass().getName() + "' does not support setting a type"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
-        McoreFactory mcore = McoreFactory.eINSTANCE;
-        TypeDescription typeDescription = mcore.createTypeDescription();
-        EList<TypeItem> typeItems = typeDescription.getTypes();
-
-        StringQualifiers stringQualifiers = null;
-        NumberQualifiers numberQualifiers = null;
-        DateQualifiers dateQualifiers = null;
-
-        for (AttributeTypeSpec.Item item : spec.getItems())
-        {
-            TypeItem typeItem = resolveTypeItem(item.name, version, attribute, engine, contextTopObjectFqn, tx);
-            typeItems.add(typeItem);
-
-            if (item.isString() && hasStringQualifiers(item))
-            {
-                stringQualifiers = mcore.createStringQualifiers();
-                stringQualifiers.setLength(item.stringLength != null ? item.stringLength : 0);
-                if (item.stringFixed != null)
-                {
-                    stringQualifiers.setFixed(item.stringFixed);
-                }
-            }
-            else if (item.isNumber() && hasNumberQualifiers(item))
-            {
-                numberQualifiers = mcore.createNumberQualifiers();
-                if (item.numberPrecision != null)
-                {
-                    numberQualifiers.setPrecision(item.numberPrecision);
-                }
-                if (item.numberScale != null)
-                {
-                    numberQualifiers.setScale(item.numberScale);
-                }
-                if (item.numberNonNegative != null)
-                {
-                    numberQualifiers.setNonNegative(item.numberNonNegative);
-                }
-            }
-            else if (item.isDate() && item.dateFractions != null)
-            {
-                dateQualifiers = mcore.createDateQualifiers();
-                dateQualifiers.setDateFractions(toDateFractions(item.dateFractions));
-            }
-        }
-
-        if (stringQualifiers != null)
-        {
-            typeDescription.setStringQualifiers(stringQualifiers);
-        }
-        if (numberQualifiers != null)
-        {
-            typeDescription.setNumberQualifiers(numberQualifiers);
-        }
-        if (dateQualifiers != null)
-        {
-            typeDescription.setDateQualifiers(dateQualifiers);
-        }
-
+        TypeDescription typeDescription =
+            TypeDescriptionBuilder.build(spec, version, attribute, engine, contextTopObjectFqn, tx);
         ((BasicFeature) attribute).setType(typeDescription);
-    }
-
-    /**
-     * Resolves a type name (a platform type like {@code String} or a reference
-     * type like {@code CatalogRef.Products}) into a {@link TypeItem} proxy.
-     * <p>
-     * Resolution is delegated to the project-scoped {@link ISymbolicNameService},
-     * called with the {@code types} reference of {@link TypeDescription} as the
-     * context feature and the project {@link IBmEngine}. This is the exact
-     * mechanism EDT uses when it materializes a {@code <Type>} element while
-     * importing a configuration from XML:
-     * <ul>
-     * <li>platform type names ({@code String}, {@code Number}, {@code Boolean},
-     *     {@code Date}, ...) resolve against the platform type registry;</li>
-     * <li>reference type names ({@code CatalogRef.X}, {@code DocumentRef.X},
-     *     {@code EnumRef.X}, ...) resolve against the metadata objects of
-     *     <em>this</em> project.</li>
-     * </ul>
-     * The returned proxy carries the resolved URI and is resolved lazily by the
-     * BM resource set when the model is read or persisted.
-     * <p>
-     * When the name cannot be resolved the service yields an {@code unresolved:/}
-     * URI; this method detects that and fails loudly rather than silently
-     * producing a dangling type.
-     *
-     * @param typeName the verbatim type name to resolve
-     * @param version the project platform version
-     * @param contextObject the object the type is being set on (resolution context)
-     * @param engine the project BM engine (resolution scope for reference types)
-     * @param contextTopObjectFqn FQN of the context object's top object
-     * @param tx the active BM transaction (used to verify referenced objects exist)
-     * @return a resolved {@link TypeItem} proxy
-     */
-    private TypeItem resolveTypeItem(String typeName, Version version, MdObject contextObject, IBmEngine engine,
-        String contextTopObjectFqn, IBmTransaction tx)
-    {
-        ISymbolicNameService symbolicNameService = ServiceAccess.get(ISymbolicNameService.class);
-        if (symbolicNameService == null)
-        {
-            throw new RuntimeException("ISymbolicNameService not available; cannot resolve type: " + typeName); //$NON-NLS-1$
-        }
-
-        URI uri = symbolicNameService.convertSymbolicNameToUri(typeName, contextObject,
-            McorePackage.Literals.TYPE_DESCRIPTION__TYPES, contextTopObjectFqn, engine, version);
-        if (uri == null || "unresolved".equals(uri.scheme())) //$NON-NLS-1$
-        {
-            throw new RuntimeException(unknownTypeMessage(typeName));
-        }
-
-        // For a reference type the URI points at a metadata object of this
-        // project (e.g. bm://.../Catalog.Products#/producedTypes/refType/type).
-        // The symbolic-name service builds that URI from the name without
-        // checking the target exists, so a typo would yield a dangling type.
-        // Verify the referenced top object is actually present in the project
-        // and fail loudly otherwise. Platform type URIs are not BM URIs and are
-        // left untouched.
-        if (BmUriUtil.isBmUri(uri))
-        {
-            String referencedTopObjectFqn = BmUriUtil.extractTopObjectFqn(uri);
-            if (referencedTopObjectFqn != null && tx.getTopObjectByFqn(referencedTopObjectFqn) == null)
-            {
-                throw new RuntimeException(unknownTypeMessage(typeName));
-            }
-        }
-
-        Type typeItem = McoreFactory.eINSTANCE.createType();
-        ((InternalEObject) typeItem).eSetProxyURI(uri);
-        return typeItem;
-    }
-
-    private static String unknownTypeMessage(String typeName)
-    {
-        return "Unknown type name: " + typeName //$NON-NLS-1$
-            + ". Use a platform type (String, Number, Boolean, Date) or a reference type to an " //$NON-NLS-1$
-            + "object that already exists in this project " //$NON-NLS-1$
-            + "(e.g. CatalogRef.Products, DocumentRef.SalesOrder, EnumRef.ProductKinds)."; //$NON-NLS-1$
     }
 
     private void applyFlags(MdObject attribute, Indexing indexing, FillChecking fillChecking,
@@ -657,44 +522,6 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         {
             dim.setMainFilter(mainFilter);
         }
-    }
-
-    private static boolean hasStringQualifiers(AttributeTypeSpec.Item item)
-    {
-        return item.stringLength != null || item.stringFixed != null;
-    }
-
-    private static boolean hasNumberQualifiers(AttributeTypeSpec.Item item)
-    {
-        return item.numberPrecision != null || item.numberScale != null || item.numberNonNegative != null;
-    }
-
-    private static DateFractions toDateFractions(AttributeTypeSpec.DateFraction fraction)
-    {
-        switch (fraction)
-        {
-            case DATE:
-                return DateFractions.DATE;
-            case TIME:
-                return DateFractions.TIME;
-            case DATE_TIME:
-            default:
-                return DateFractions.DATE_TIME;
-        }
-    }
-
-    private static String describeTypeSpec(AttributeTypeSpec spec)
-    {
-        StringBuilder sb = new StringBuilder();
-        for (AttributeTypeSpec.Item item : spec.getItems())
-        {
-            if (sb.length() > 0)
-            {
-                sb.append(", "); //$NON-NLS-1$
-            }
-            sb.append(item.name);
-        }
-        return sb.toString();
     }
 
     private static Indexing parseIndexing(String value)
@@ -808,7 +635,8 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             || obj instanceof Report
             || obj instanceof InformationRegister
             || obj instanceof AccumulationRegister
-            || obj instanceof AccountingRegister;
+            || obj instanceof AccountingRegister
+            || obj instanceof CalculationRegister;
     }
 
     /**
@@ -899,6 +727,32 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                     return factory.createAccumulationRegisterAttribute();
             }
         }
+        if (parent instanceof AccountingRegister)
+        {
+            switch (kind)
+            {
+                case DIMENSION:
+                    return factory.createAccountingRegisterDimension();
+                case RESOURCE:
+                    return factory.createAccountingRegisterResource();
+                case ATTRIBUTE:
+                default:
+                    return factory.createAccountingRegisterAttribute();
+            }
+        }
+        if (parent instanceof CalculationRegister)
+        {
+            switch (kind)
+            {
+                case DIMENSION:
+                    return factory.createCalculationRegisterDimension();
+                case RESOURCE:
+                    return factory.createCalculationRegisterResource();
+                case ATTRIBUTE:
+                default:
+                    return factory.createCalculationRegisterAttribute();
+            }
+        }
 
         // Non-register or attribute-only parents: only attributes are valid here.
         if (parent instanceof Catalog)
@@ -940,10 +794,6 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         if (parent instanceof Report)
         {
             return factory.createReportAttribute();
-        }
-        if (parent instanceof AccountingRegister)
-        {
-            return factory.createAccountingRegisterAttribute();
         }
         return null;
     }
