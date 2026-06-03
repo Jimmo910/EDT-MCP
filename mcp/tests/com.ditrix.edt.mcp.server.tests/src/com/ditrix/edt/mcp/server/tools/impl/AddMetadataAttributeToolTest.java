@@ -117,4 +117,16 @@ public class AddMetadataAttributeToolTest
         assertTrue("description should mention Dimension", desc.contains("Dimension")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("description should mention Resource", desc.contains("Resource")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testDescriptionMentionsAccountingAndCalculationRegister()
+    {
+        // S3: Dimension/Resource kinds are now valid for AccountingRegister and
+        // CalculationRegister too, and both must be listed as supported owners.
+        String desc = new AddMetadataAttributeTool().getDescription();
+        assertTrue("description should mention AccountingRegister", //$NON-NLS-1$
+            desc.contains("AccountingRegister")); //$NON-NLS-1$
+        assertTrue("description should mention CalculationRegister", //$NON-NLS-1$
+            desc.contains("CalculationRegister")); //$NON-NLS-1$
+    }
 }

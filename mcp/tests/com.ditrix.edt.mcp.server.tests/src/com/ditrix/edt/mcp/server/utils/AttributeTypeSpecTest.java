@@ -179,10 +179,31 @@ public class AttributeTypeSpecTest
     }
 
     @Test
-    public void testZeroLengthRejected()
+    public void testZeroLengthMeansUnlimitedString()
     {
-        // String length must be positive when given explicitly.
-        assertParseFails("String(0)"); //$NON-NLS-1$
+        // String(0) is the standard 1C representation of an unlimited-length
+        // string (used e.g. for a document Comment attribute). It must parse to
+        // a String item with an explicit length of 0, not be rejected.
+        Item item = AttributeTypeSpec.parse("String(0)").getItems().get(0); //$NON-NLS-1$
+        assertTrue(item.isString());
+        assertEquals(Integer.valueOf(0), item.stringLength);
+        assertNull(item.stringFixed);
+    }
+
+    @Test
+    public void testZeroLengthUnlimitedStringInComposite()
+    {
+        // An unlimited String must also be accepted as part of a composite type.
+        AttributeTypeSpec spec = AttributeTypeSpec.parse("String(0), CatalogRef.Products"); //$NON-NLS-1$
+        assertTrue(spec.isComposite());
+        assertEquals(Integer.valueOf(0), spec.getItems().get(0).stringLength);
+    }
+
+    @Test
+    public void testNegativeStringLengthRejected()
+    {
+        // A negative length is still invalid; only 0 (unlimited) and positives are allowed.
+        assertParseFails("String(-1)"); //$NON-NLS-1$
     }
 
     @Test
