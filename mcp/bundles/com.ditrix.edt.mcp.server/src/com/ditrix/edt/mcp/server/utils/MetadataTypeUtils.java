@@ -164,7 +164,10 @@ public final class MetadataTypeUtils
         WS_REFERENCE("WSReference", "WSReferences", "wsReferences", null, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "WS\u0421\u0441\u044B\u043B\u043A\u0430"), // WSСсылка //$NON-NLS-1$
 
-        XDTO_PACKAGE("XDTOPackage", "XDTOPackages", "xdtoPackages", null, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // The EMF Configuration reference name keeps the leading "xDTO" casing
+        // (getter getXDTOPackages -> feature "xDTOPackages"), so the structural
+        // feature lookup by name only resolves with this exact spelling.
+        XDTO_PACKAGE("XDTOPackage", "XDTOPackages", "xDTOPackages", null, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "\u041F\u0430\u043A\u0435\u0442XDTO"), // ПакетXDTO //$NON-NLS-1$
 
         LANGUAGE("Language", "Languages", "languages", null, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

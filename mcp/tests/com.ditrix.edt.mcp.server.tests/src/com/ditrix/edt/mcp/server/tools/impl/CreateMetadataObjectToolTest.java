@@ -83,25 +83,36 @@ public class CreateMetadataObjectToolTest
     }
 
     @Test
+    public void testDescriptionMentionsNewlySupportedKinds()
+    {
+        // Task #19881: XDTOPackage, IntegrationService, Bot and WebSocketClient are
+        // now supported (the last three only when the platform exposes them, but
+        // they are still advertised) and must appear in the supported list.
+        String desc = new CreateMetadataObjectTool().getDescription();
+        for (String type : new String[] {"XDTOPackage", "IntegrationService", //$NON-NLS-1$ //$NON-NLS-2$
+            "Bot", "WebSocketClient"}) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            assertTrue("description should mention newly supported " + type, desc.contains(type)); //$NON-NLS-1$
+        }
+    }
+
+    @Test
     public void testDescriptionDoesNotMentionExcludedTypes()
     {
-        // Types deliberately excluded because they cannot be created blank by the
-        // plain factory + attachTopObject chain. Style/Interface use word
-        // boundaries so they do not accidentally match StyleItem / interface text.
+        // Types that remain deliberately excluded because they cannot be created
+        // blank by the plain factory + attachTopObject chain.
         String desc = new CreateMetadataObjectTool().getDescription();
-        for (String type : new String[] {"WSReference", "XDTOPackage", //$NON-NLS-1$ //$NON-NLS-2$
-            "ExternalDataSource", "IntegrationService", "WebSocketClient"}) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        for (String type : new String[] {"WSReference", "ExternalDataSource"}) //$NON-NLS-1$ //$NON-NLS-2$
         {
             assertFalse("description must not list excluded type " + type, desc.contains(type)); //$NON-NLS-1$
         }
-        // "Language" / "Style" / "Interface" / "Bot" are excluded too, but those
+        // "Language" / "Style" / "Interface" are excluded too, but those
         // substrings can legitimately appear in prose, so assert against the
         // comma-delimited supported list instead.
         String list = ", " + desc + ","; //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("Language must not be a supported type", list.contains(", Language,")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("Style must not be a supported type", list.contains(", Style,")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("Interface must not be a supported type", list.contains(", Interface,")); //$NON-NLS-1$ //$NON-NLS-2$
-        assertFalse("Bot must not be a supported type", list.contains(", Bot,")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test
@@ -113,6 +124,7 @@ public class CreateMetadataObjectToolTest
         assertTrue("schema should hint 'Subsystem'", schema.contains("'Subsystem'")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("schema should hint 'Role'", schema.contains("'Role'")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("schema should hint 'StyleItem'", schema.contains("'StyleItem'")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema should hint 'XDTOPackage'", schema.contains("'XDTOPackage'")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("schema must not hint excluded 'WSReference'", //$NON-NLS-1$
             schema.contains("'WSReference'")); //$NON-NLS-1$
     }
@@ -128,6 +140,34 @@ public class CreateMetadataObjectToolTest
         assertTrue(schema.contains("\"synonym\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"comment\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"language\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testInputSchemaContainsCommonModuleAndXdtoParameters()
+    {
+        String schema = new CreateMetadataObjectTool().getInputSchema();
+        assertTrue("schema must declare commonModuleKind", //$NON-NLS-1$
+            schema.contains("\"commonModuleKind\"")); //$NON-NLS-1$
+        assertTrue("schema must declare serverCall", schema.contains("\"serverCall\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema must declare privileged", schema.contains("\"privileged\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema must declare returnValuesReuse", //$NON-NLS-1$
+            schema.contains("\"returnValuesReuse\"")); //$NON-NLS-1$
+        assertTrue("schema must declare targetNamespace", //$NON-NLS-1$
+            schema.contains("\"targetNamespace\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCommonModuleKindHintsListTheKinds()
+    {
+        String schema = new CreateMetadataObjectTool().getInputSchema();
+        for (String kind : new String[] {"'Server'", "'ServerCall'", "'ClientManaged'", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "'ClientOrdinary'", "'ClientServer'", "'Global'"}) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            assertTrue("schema should hint commonModuleKind " + kind, schema.contains(kind)); //$NON-NLS-1$
+        }
+        // The default kind is documented in the description too.
+        assertTrue("description should note the default kind 'Server'", //$NON-NLS-1$
+            new CreateMetadataObjectTool().getDescription().contains("'Server'")); //$NON-NLS-1$
     }
 
     @Test
@@ -152,5 +192,9 @@ public class CreateMetadataObjectToolTest
         assertFalse("synonym must not be required", tail.contains("\"synonym\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("comment must not be required", tail.contains("\"comment\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertFalse("language must not be required", tail.contains("\"language\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertFalse("commonModuleKind must not be required", //$NON-NLS-1$
+            tail.contains("\"commonModuleKind\"")); //$NON-NLS-1$
+        assertFalse("targetNamespace must not be required", //$NON-NLS-1$
+            tail.contains("\"targetNamespace\"")); //$NON-NLS-1$
     }
 }
