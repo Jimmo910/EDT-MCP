@@ -45,7 +45,6 @@ import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
 import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
 import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOptionsParameter;
 import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
-import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Posting;
 import com._1c.g5.v8.dt.metadata.mdclass.RealTimePosting;
@@ -251,36 +250,27 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         final Version version = v8Project.getVersion();
         final IBmEngine bmEngine = bmModel.getEngine();
 
-        // Resolve the target object outside the transaction.
-        String normalizedFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
-        String[] parts = normalizedFqn.split("\\.", 2); //$NON-NLS-1$
-        if (parts.length < 2)
+        // Resolve the target object outside the transaction. The object kind is not
+        // constrained here (any MdObject is accepted); the per-type dispatch in
+        // planChanges decides which properties are valid for the resolved kind.
+        ObjectResolution resolution = resolveTopObject(config, objectFqn, null, "Object"); //$NON-NLS-1$
+        if (resolution.hasError())
         {
-            return ToolResult.error("Invalid FQN: " + objectFqn //$NON-NLS-1$
-                + ". Expected 'Type.Name', e.g. 'Document.SalesOrder'.").toJson(); //$NON-NLS-1$
+            return resolution.error;
         }
-        MdObject target = MetadataTypeUtils.findObject(config, parts[0], parts[1]);
-        if (target == null)
-        {
-            return ToolResult.error("Object not found: " + normalizedFqn //$NON-NLS-1$
-                + ". Check the FQN and use get_metadata_objects to list available objects.").toJson(); //$NON-NLS-1$
-        }
-        if (!(target instanceof IBmObject))
-        {
-            return ToolResult.error("Target object is not a BM object: " + normalizedFqn).toJson(); //$NON-NLS-1$
-        }
+        String normalizedFqn = resolution.normalizedFqn;
+        MdObject target = resolution.object;
 
         // Resolve the language for localized properties (only needed when one is set).
         final String localizedLanguage;
         if (containsLocalizedProperty(properties))
         {
-            localizedLanguage = resolveLanguage(config, language);
-            if (localizedLanguage == null)
+            LanguageResolution langResolution = resolveLanguage(config, language);
+            if (langResolution.hasError())
             {
-                return ToolResult.error("Cannot determine a language code for the localized " //$NON-NLS-1$
-                    + "properties (synonym/presentations) in this configuration. Specify " //$NON-NLS-1$
-                    + "'language' explicitly (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+                return ToolResult.error(langResolution.error).toJson();
             }
+            localizedLanguage = langResolution.code;
         }
         else
         {
@@ -1259,37 +1249,6 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return null;
         }
         return MetadataTypeUtils.findObject(config, parts[0], parts[1]);
-    }
-
-    // --- Language resolution ---------------------------------------------
-
-    /**
-     * Resolves the language code for localized properties. Mirrors the logic in
-     * {@code CreateMetadataObjectTool}: an explicit {@code language} wins,
-     * otherwise the configuration default language code, otherwise the first
-     * configured language code.
-     */
-    private static String resolveLanguage(Configuration config, String language)
-    {
-        if (language != null && !language.isEmpty())
-        {
-            return language;
-        }
-        Language defaultLanguage = config.getDefaultLanguage();
-        if (defaultLanguage != null
-            && defaultLanguage.getLanguageCode() != null
-            && !defaultLanguage.getLanguageCode().isEmpty())
-        {
-            return defaultLanguage.getLanguageCode();
-        }
-        for (Language lang : config.getLanguages())
-        {
-            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
-            {
-                return lang.getLanguageCode();
-            }
-        }
-        return null;
     }
 
     // --- Value parsing helpers -------------------------------------------

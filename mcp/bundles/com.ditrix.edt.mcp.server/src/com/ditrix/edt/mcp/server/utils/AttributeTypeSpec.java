@@ -193,7 +193,7 @@ public final class AttributeTypeSpec
             {
                 throw new IllegalArgumentException("Empty type item"); //$NON-NLS-1$
             }
-            return new Item(raw);
+            return new Item(canonicalizePrimitive(raw));
         }
 
         if (!raw.endsWith(")")) //$NON-NLS-1$
@@ -206,7 +206,7 @@ public final class AttributeTypeSpec
             throw new IllegalArgumentException("Type item has qualifiers but no type name: " + raw); //$NON-NLS-1$
         }
         String inside = raw.substring(paren + 1, raw.length() - 1).trim();
-        Item item = new Item(name);
+        Item item = new Item(canonicalizePrimitive(name));
 
         if (item.isString())
         {
@@ -226,6 +226,43 @@ public final class AttributeTypeSpec
                 "Qualifiers are only supported for String, Number and Date, not for: " + name); //$NON-NLS-1$
         }
         return item;
+    }
+
+    /**
+     * Canonicalizes a platform primitive type name to its proper casing so it can
+     * be resolved by the case-sensitive {@code ISymbolicNameService}.
+     * <p>
+     * The {@code type} parameter is parsed case-insensitively (so {@code number(15,2)}
+     * and {@code string(50)} are accepted), but the resolver later passes the name
+     * verbatim and the platform type registry is case-sensitive, so {@code number}
+     * would fail to resolve. This maps the recognized primitive kinds
+     * ({@code String}, {@code Number}, {@code Date}, {@code Boolean}) to their
+     * canonical form. Any other name (reference types such as {@code CatalogRef.X}
+     * and unrecognized names) is returned unchanged.
+     *
+     * @param name the verbatim type name
+     * @return the canonical primitive name, or {@code name} unchanged when it is not
+     *         a recognized platform primitive
+     */
+    private static String canonicalizePrimitive(String name)
+    {
+        if ("String".equalsIgnoreCase(name)) //$NON-NLS-1$
+        {
+            return "String"; //$NON-NLS-1$
+        }
+        if ("Number".equalsIgnoreCase(name)) //$NON-NLS-1$
+        {
+            return "Number"; //$NON-NLS-1$
+        }
+        if ("Date".equalsIgnoreCase(name)) //$NON-NLS-1$
+        {
+            return "Date"; //$NON-NLS-1$
+        }
+        if ("Boolean".equalsIgnoreCase(name)) //$NON-NLS-1$
+        {
+            return "Boolean"; //$NON-NLS-1$
+        }
+        return name;
     }
 
     private static void parseStringQualifiers(Item item, String inside, String raw)

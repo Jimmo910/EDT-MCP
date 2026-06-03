@@ -22,6 +22,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
+import com.ditrix.edt.mcp.server.Activator;
 
 /**
  * Base class for metadata formatters with common utility methods.
@@ -279,8 +280,7 @@ public abstract class AbstractMetadataFormatter implements IMetadataFormatter
         catch (Exception e)
         {
             // Log error but don't fail the entire formatting
-            System.err.println("Error formatting StandardAttributes: " + e.getMessage()); //$NON-NLS-1$
-            e.printStackTrace();
+            Activator.logError("Error formatting StandardAttributes", e); //$NON-NLS-1$
         }
     }
     

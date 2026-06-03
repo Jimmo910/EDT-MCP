@@ -12,6 +12,13 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 
+import com._1c.g5.v8.dt.mcore.AutoColor;
+import com._1c.g5.v8.dt.mcore.Color;
+import com._1c.g5.v8.dt.mcore.ColorDef;
+import com._1c.g5.v8.dt.mcore.ColorValue;
+import com._1c.g5.v8.dt.mcore.Font;
+import com._1c.g5.v8.dt.mcore.FontDef;
+import com._1c.g5.v8.dt.mcore.FontValue;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
@@ -20,6 +27,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.CharacteristicsDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.DbObjectAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.StandardAttribute;
+import com._1c.g5.v8.dt.metadata.mdclass.StyleItem;
+import com.ditrix.edt.mcp.server.Activator;
 
 /**
  * Universal metadata formatter that can format any MdObject type
@@ -86,10 +95,130 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter
             formatStandardAttributes(sb, mdObject, language);
         }
         
+        // Render the single-valued StyleItem value (Color/Font). It is a containment
+        // reference but not a collection, so neither formatContainmentCollections
+        // (isMany only) nor formatAllDynamicProperties (skips containment refs) shows
+        // it; without this branch the value set by set_style_item_value is invisible.
+        if (mdObject instanceof StyleItem)
+        {
+            formatStyleItemValue(sb, (StyleItem) mdObject);
+        }
+
         // Format containment collections (attributes, tabular sections, forms, commands, etc.)
         formatContainmentCollections(sb, mdObject, full, language);
-        
+
         return sb.toString();
+    }
+
+    /**
+     * Renders the {@link StyleItem} value (a {@link ColorValue} or {@link FontValue})
+     * as a small Property/Value table, so the color or font assigned by
+     * {@code set_style_item_value} is visible in get_metadata_details.
+     */
+    private void formatStyleItemValue(StringBuilder sb, StyleItem styleItem)
+    {
+        addSectionHeader(sb, "Value"); //$NON-NLS-1$
+        startTable(sb, "Property", "Value"); //$NON-NLS-1$ //$NON-NLS-2$
+        addPropertyRow(sb, "Style Type", formatEnum(styleItem.getType())); //$NON-NLS-1$
+
+        Object value = styleItem.getValue();
+        if (value instanceof ColorValue)
+        {
+            addPropertyRow(sb, "Color", formatColor(((ColorValue) value).getValue())); //$NON-NLS-1$
+        }
+        else if (value instanceof FontValue)
+        {
+            addPropertyRow(sb, "Font", formatFont(((FontValue) value).getValue())); //$NON-NLS-1$
+        }
+        else
+        {
+            addPropertyRow(sb, "Value", DASH); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Formats a {@link Color} (an {@link AutoColor} or an explicit {@link ColorDef})
+     * to a readable string. {@code AutoColor} extends {@code ColorDef}, so it must be
+     * checked first.
+     */
+    private String formatColor(Color color)
+    {
+        if (color == null)
+        {
+            return DASH;
+        }
+        if (color instanceof AutoColor)
+        {
+            return "Auto"; //$NON-NLS-1$
+        }
+        if (color instanceof ColorDef)
+        {
+            ColorDef def = (ColorDef) color;
+            return "RGB(" + def.getRed() + ", " + def.getGreen() + ", " + def.getBlue() + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        }
+        return color.eClass().getName();
+    }
+
+    /**
+     * Formats a {@link Font} (an explicit {@link FontDef}) to a readable string
+     * showing the face name, height and the bold/italic/underline/strikeout flags.
+     */
+    private String formatFont(Font font)
+    {
+        if (font == null)
+        {
+            return DASH;
+        }
+        if (!(font instanceof FontDef))
+        {
+            return font.eClass().getName();
+        }
+        FontDef def = (FontDef) font;
+        StringBuilder sb = new StringBuilder();
+        String faceName = def.getFaceName();
+        if (faceName != null && !faceName.isEmpty())
+        {
+            sb.append("face='").append(faceName).append('\''); //$NON-NLS-1$
+        }
+        if (def.getHeight() > 0)
+        {
+            if (sb.length() > 0)
+            {
+                sb.append(", "); //$NON-NLS-1$
+            }
+            sb.append("height=").append(formatHeight(def.getHeight())); //$NON-NLS-1$
+        }
+        appendFlag(sb, "bold", def.isBold()); //$NON-NLS-1$
+        appendFlag(sb, "italic", def.isItalic()); //$NON-NLS-1$
+        appendFlag(sb, "underline", def.isUnderline()); //$NON-NLS-1$
+        appendFlag(sb, "strikeout", def.isStrikeout()); //$NON-NLS-1$
+        return sb.length() > 0 ? sb.toString() : DASH;
+    }
+
+    /**
+     * Renders a font height: as an integer when it has no fractional part, otherwise
+     * with its float value (the model stores the height as a float).
+     */
+    private static String formatHeight(float height)
+    {
+        if (height == Math.rint(height))
+        {
+            return String.valueOf((int) height);
+        }
+        return String.valueOf(height);
+    }
+
+    private static void appendFlag(StringBuilder sb, String name, boolean set)
+    {
+        if (!set)
+        {
+            return;
+        }
+        if (sb.length() > 0)
+        {
+            sb.append(", "); //$NON-NLS-1$
+        }
+        sb.append(name);
     }
     
     /**
@@ -418,7 +547,7 @@ public class UniversalMetadataFormatter extends AbstractMetadataFormatter
                 catch (Exception e)
                 {
                     // Error getting attributes - skip
-                    System.err.println("Error formatting tabular section attributes: " + e.getMessage());
+                    Activator.logError("Error formatting tabular section attributes", e); //$NON-NLS-1$
                 }
             }
         }

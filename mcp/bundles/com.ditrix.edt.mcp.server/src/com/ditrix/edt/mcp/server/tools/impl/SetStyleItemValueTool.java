@@ -47,7 +47,11 @@ import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
  * </ul>
  * The mutation runs on the UI thread inside a BM write transaction, re-fetching
  * the style item by its {@code bmId} (see {@link AbstractMetadataWriteTool}).
- * EDT persists the change into the style item's {@code .mdo} file.
+ * After the transaction commits, the style item top object is force-exported to
+ * its {@code .mdo} file (the BM commit only updates the in-memory model; the
+ * model-to-file serialization runs asynchronously otherwise), so the new value is
+ * persisted on disk. When that export cannot be forced the change is still
+ * committed in memory and a {@code persistWarning} is returned.
  */
 public class SetStyleItemValueTool extends AbstractMetadataWriteTool
 {
@@ -327,9 +331,24 @@ public class SetStyleItemValueTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to set style item value: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        // The BM transaction commits the new value into the in-memory model, but the
+        // model-to-file serialization runs asynchronously, so the style item's .mdo
+        // file is not updated until that background export completes. Drive the export
+        // and the stale-marker refresh synchronously through the shared metadata-write
+        // helper (the same path used by add_enum_value / set_object_property), so the
+        // value is persisted on disk and queryable immediately. The object was already
+        // verified to be an IBmObject above, so topObjectFqnOf resolves the FQN.
+        String persistError = persistAndRevalidate(project, topObjectFqnOf(object));
+
+        ToolResult result = ToolResult.success()
             .put("objectFqn", normalizedFqn) //$NON-NLS-1$
-            .put("applied", appliedSummary) //$NON-NLS-1$
+            .put("applied", appliedSummary); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", "Value set in the in-memory model but the export to the " //$NON-NLS-1$ //$NON-NLS-2$
+                + ".mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
+        return result
             .put("message", "Style item '" + normalizedFqn + "' value set (" + appliedSummary //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + "). Run get_metadata_details or export_configuration_to_xml to verify.") //$NON-NLS-1$
             .toJson();

@@ -154,6 +154,47 @@ public class AttributeTypeSpecTest
     }
 
     @Test
+    public void testLowercasePrimitiveNamesAreCanonicalized()
+    {
+        // The platform type registry (ISymbolicNameService) is case-sensitive, so
+        // lowercase primitive names must be canonicalized at parse time to their
+        // proper casing, otherwise resolution fails with "Unknown type name: number".
+        assertEquals("Number", AttributeTypeSpec.parse("number(15,2)").getItems().get(0).name); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("String", AttributeTypeSpec.parse("string(50)").getItems().get(0).name); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("Date", AttributeTypeSpec.parse("date(datetime)").getItems().get(0).name); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("Boolean", AttributeTypeSpec.parse("boolean").getItems().get(0).name); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testCanonicalizationPreservesQualifiers()
+    {
+        // Canonicalizing the name must not disturb the parsed qualifiers.
+        Item item = AttributeTypeSpec.parse("NUMBER(15,2)").getItems().get(0); //$NON-NLS-1$
+        assertEquals("Number", item.name); //$NON-NLS-1$
+        assertEquals(Integer.valueOf(15), item.numberPrecision);
+        assertEquals(Integer.valueOf(2), item.numberScale);
+    }
+
+    @Test
+    public void testReferenceTypeCasingIsPreserved()
+    {
+        // Reference type names are NOT primitives and must keep their exact casing
+        // (they resolve against project metadata objects, which are case-sensitive).
+        assertEquals("CatalogRef.Products", //$NON-NLS-1$
+            AttributeTypeSpec.parse("CatalogRef.Products").getItems().get(0).name); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testLowercasePrimitiveCanonicalizedInComposite()
+    {
+        AttributeTypeSpec spec = AttributeTypeSpec.parse("string(10), catalogRef.Products, number(5,0)"); //$NON-NLS-1$
+        assertEquals("String", spec.getItems().get(0).name); //$NON-NLS-1$
+        // A reference type keeps its given casing.
+        assertEquals("catalogRef.Products", spec.getItems().get(1).name); //$NON-NLS-1$
+        assertEquals("Number", spec.getItems().get(2).name); //$NON-NLS-1$
+    }
+
+    @Test
     public void testNullSpecRejected()
     {
         assertParseFails(null);
