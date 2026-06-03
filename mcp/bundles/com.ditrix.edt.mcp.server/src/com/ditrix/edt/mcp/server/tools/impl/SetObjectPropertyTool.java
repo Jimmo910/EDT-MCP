@@ -14,33 +14,56 @@ import java.util.Map;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.emf.common.util.EList;
+import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.Enumerator;
+import org.eclipse.emf.ecore.EStructuralFeature;
 
+import com._1c.g5.v8.bm.core.IBmEngine;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.ButtonRepresentation;
+import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.metadata.common.AllowedLength;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicRegister;
+import com._1c.g5.v8.dt.metadata.mdclass.BusinessProcess;
 import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogCodeType;
 import com._1c.g5.v8.dt.metadata.mdclass.CatalogCodesSeries;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonCommand;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.Document;
+import com._1c.g5.v8.dt.metadata.mdclass.DocumentJournal;
 import com._1c.g5.v8.dt.metadata.mdclass.DocumentNumberPeriodicity;
 import com._1c.g5.v8.dt.metadata.mdclass.DocumentNumberType;
+import com._1c.g5.v8.dt.metadata.mdclass.EventSubscription;
+import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOption;
+import com._1c.g5.v8.dt.metadata.mdclass.FunctionalOptionsParameter;
+import com._1c.g5.v8.dt.metadata.mdclass.HTTPService;
+import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.Posting;
 import com._1c.g5.v8.dt.metadata.mdclass.RealTimePosting;
 import com._1c.g5.v8.dt.metadata.mdclass.ReturnValuesReuse;
+import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
+import com._1c.g5.v8.dt.metadata.mdclass.Sequence;
+import com._1c.g5.v8.dt.metadata.mdclass.SessionParameter;
 import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
+import com._1c.g5.v8.dt.metadata.mdclass.Task;
+import com._1c.g5.v8.dt.metadata.mdclass.WebService;
+import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -50,40 +73,36 @@ import com.google.gson.JsonPrimitive;
 /**
  * Tool to set properties on an existing top-level metadata object.
  * <p>
- * One tool covers several object kinds; only the properties relevant to the
- * resolved object type are accepted. An unknown or irrelevant property is a hard
- * error (never silently ignored), and all properties are validated and parsed
- * <em>before</em> the BM write transaction so the model is never left partially
- * updated.
+ * One tool covers several object kinds. A small set of <em>common</em>
+ * properties (synonym, comment and the four presentation strings) is handled
+ * before the type-specific dispatch and therefore works for any object that
+ * carries the corresponding EMF feature. The remaining properties are
+ * type-specific; only the ones relevant to the resolved object type are
+ * accepted. An unknown or irrelevant property is a hard error (never silently
+ * ignored), and all properties are validated and parsed <em>before</em> the BM
+ * write transaction so the model is never left partially updated.
  * <p>
- * Supported kinds and properties:
+ * Common (cross-type) properties:
  * <ul>
- * <li><b>Document</b>: {@code posting} (Allow/Deny), {@code realTimePosting}
- * (Allow/Deny), {@code postInPrivilegedMode} (boolean),
- * {@code unpostInPrivilegedMode} (boolean), {@code numberType}
- * (Number/String), {@code numberLength} (int), {@code numberAllowedLength}
- * (Variable/Fixed), {@code numberPeriodicity}
- * (Nonperiodical/Year/Quarter/Month/Day), {@code checkUnique} (boolean),
- * {@code autonumbering} (boolean), {@code registerRecords} (string array of
- * register FQNs).</li>
- * <li><b>Catalog</b>: {@code codeLength} (int), {@code descriptionLength}
- * (int), {@code codeType} (Number/String), {@code codeAllowedLength}
- * (Variable/Fixed), {@code codeSeries}
- * (WholeCatalog/WithinSubordination/WithinOwnerSubordination),
- * {@code checkUnique} (boolean), {@code autonumbering} (boolean).</li>
- * <li><b>CommonModule</b>: {@code server}, {@code serverCall},
- * {@code clientManagedApplication}, {@code clientOrdinaryApplication},
- * {@code externalConnection}, {@code global}, {@code privileged} (all
- * boolean), {@code returnValuesReuse}
- * (DontUse/DuringRequest/DuringSession).</li>
- * <li><b>Subsystem</b>: {@code includeInCommandInterface} (boolean),
- * {@code content} (string array of object FQNs to include in the
- * subsystem).</li>
+ * <li>{@code synonym} (localized; honours the {@code language} parameter, default
+ * the configuration language) - works for any {@link MdObject};</li>
+ * <li>{@code comment} - works for any {@link MdObject};</li>
+ * <li>{@code objectPresentation}, {@code listPresentation},
+ * {@code extendedObjectPresentation}, {@code extendedListPresentation}
+ * (localized) - work for any object that has the feature (Catalog, Document,
+ * register, ...); these close the common validator note
+ * {@code md-list-object-presentation}.</li>
  * </ul>
+ * Type-specific properties: see the per-kind sections in the description.
  */
 public class SetObjectPropertyTool extends AbstractMetadataWriteTool
 {
     public static final String NAME = "set_object_property"; //$NON-NLS-1$
+
+    /** EMF feature names of the localized presentation maps. */
+    private static final String[] PRESENTATION_FEATURES = {
+        "objectPresentation", "listPresentation", //$NON-NLS-1$ //$NON-NLS-2$
+        "extendedObjectPresentation", "extendedListPresentation"}; //$NON-NLS-1$ //$NON-NLS-2$
 
     @Override
     public String getName()
@@ -97,6 +116,11 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         return "Set properties on an existing top-level metadata object. " //$NON-NLS-1$
             + "Only properties relevant to the object type are accepted; an unknown or " //$NON-NLS-1$
             + "irrelevant property is reported as an error (never ignored). " //$NON-NLS-1$
+            + "Common properties for any object: synonym (localized, uses 'language' or the " //$NON-NLS-1$
+            + "configuration default language), comment. " //$NON-NLS-1$
+            + "Presentation strings (localized) for objects that have them (Catalog, Document, " //$NON-NLS-1$
+            + "registers, ...): objectPresentation, listPresentation, extendedObjectPresentation, " //$NON-NLS-1$
+            + "extendedListPresentation (these close the md-list-object-presentation note). " //$NON-NLS-1$
             + "Document: posting (Allow/Deny), realTimePosting (Allow/Deny), " //$NON-NLS-1$
             + "postInPrivilegedMode, unpostInPrivilegedMode (boolean), " //$NON-NLS-1$
             + "numberType (Number/String), numberLength (int), " //$NON-NLS-1$
@@ -111,6 +135,19 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             + "clientOrdinaryApplication, externalConnection, global, privileged (boolean), " //$NON-NLS-1$
             + "returnValuesReuse (DontUse/DuringRequest/DuringSession). " //$NON-NLS-1$
             + "Subsystem: includeInCommandInterface (boolean), content (array of object FQNs). " //$NON-NLS-1$
+            + "EventSubscription: source (type, e.g. 'CatalogRef.Products' or composite), " //$NON-NLS-1$
+            + "event (string), handler (string). " //$NON-NLS-1$
+            + "ScheduledJob: methodName (string), use (boolean), predefined (boolean), key (string). " //$NON-NLS-1$
+            + "FunctionalOption: location (storage object FQN), privilegedGetMode (boolean). " //$NON-NLS-1$
+            + "FunctionalOptionsParameter: use (array of object FQNs). " //$NON-NLS-1$
+            + "SessionParameter: type (TypeDescription, e.g. 'String(50)' or 'CatalogRef.X'). " //$NON-NLS-1$
+            + "WebService: namespace (string), descriptorFileName (string). " //$NON-NLS-1$
+            + "HTTPService: rootURL (string). " //$NON-NLS-1$
+            + "CommonCommand: commandParameterType (type), " //$NON-NLS-1$
+            + "representation (Auto/Text/Picture/PictureAndText). " //$NON-NLS-1$
+            + "DocumentJournal: registeredDocuments (array of Document FQNs). " //$NON-NLS-1$
+            + "Sequence: documents (array of Document FQNs). " //$NON-NLS-1$
+            + "BusinessProcess: task (Task FQN). " //$NON-NLS-1$
             + "Russian type names are also supported in FQNs."; //$NON-NLS-1$
     }
 
@@ -126,10 +163,16 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
                     + "Russian names supported.", true) //$NON-NLS-1$
             .stringProperty("properties", //$NON-NLS-1$
                 "JSON object of property name -> value to set (required). " //$NON-NLS-1$
+                    + "Common: {\"synonym\": \"Sales order\", \"comment\": \"...\", " //$NON-NLS-1$
+                    + "\"objectPresentation\": \"Order\", \"listPresentation\": \"Orders\"}. " //$NON-NLS-1$
                     + "Example for a Document: " //$NON-NLS-1$
                     + "{\"posting\": \"Allow\", \"numberLength\": 9, \"postInPrivilegedMode\": true, " //$NON-NLS-1$
                     + "\"registerRecords\": [\"AccumulationRegister.Sales\"]}. " //$NON-NLS-1$
                     + "Boolean values accept true/false; enum values are case-insensitive.", true) //$NON-NLS-1$
+            .stringProperty("language", //$NON-NLS-1$
+                "Language code (e.g. 'ru', 'en') for the localized properties " //$NON-NLS-1$
+                    + "(synonym and the presentation strings). If omitted, the configuration " //$NON-NLS-1$
+                    + "default language is used.") //$NON-NLS-1$
             .build();
     }
 
@@ -139,6 +182,7 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String objectFqn = JsonUtils.extractStringArgument(params, "objectFqn"); //$NON-NLS-1$
         String propertiesRaw = JsonUtils.extractStringArgument(params, "properties"); //$NON-NLS-1$
+        String language = JsonUtils.extractStringArgument(params, "language"); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -160,11 +204,11 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
                 + "e.g. {\"posting\": \"Allow\", \"numberLength\": 9}.").toJson(); //$NON-NLS-1$
         }
 
-        return executeInternal(projectName, objectFqn, properties);
+        return executeInternal(projectName, objectFqn, properties, language);
     }
 
     private String executeInternal(String projectName, String objectFqn,
-        Map<String, JsonElement> properties)
+        Map<String, JsonElement> properties, String language)
     {
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -185,6 +229,20 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
         }
 
+        // Resolve the platform version (needed for TypeDescription proxy resolution).
+        IV8ProjectManager v8ProjectManager = Activator.getDefault().getV8ProjectManager();
+        if (v8ProjectManager == null)
+        {
+            return ToolResult.error("IV8ProjectManager not available").toJson(); //$NON-NLS-1$
+        }
+        IV8Project v8Project = v8ProjectManager.getProject(project);
+        if (v8Project == null)
+        {
+            return ToolResult.error("Could not resolve V8 project for: " + projectName).toJson(); //$NON-NLS-1$
+        }
+        final Version version = v8Project.getVersion();
+        final IBmEngine bmEngine = bmModel.getEngine();
+
         // Resolve the target object outside the transaction.
         String normalizedFqn = MetadataTypeUtils.normalizeFqn(objectFqn);
         String[] parts = normalizedFqn.split("\\.", 2); //$NON-NLS-1$
@@ -204,12 +262,30 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("Target object is not a BM object: " + normalizedFqn).toJson(); //$NON-NLS-1$
         }
 
+        // Resolve the language for localized properties (only needed when one is set).
+        final String localizedLanguage;
+        if (containsLocalizedProperty(properties))
+        {
+            localizedLanguage = resolveLanguage(config, language);
+            if (localizedLanguage == null)
+            {
+                return ToolResult.error("Cannot determine a language code for the localized " //$NON-NLS-1$
+                    + "properties (synonym/presentations) in this configuration. Specify " //$NON-NLS-1$
+                    + "'language' explicitly (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+            }
+        }
+        else
+        {
+            localizedLanguage = null;
+        }
+
         // Build the list of validated mutations BEFORE the transaction. Any unknown
         // property, irrelevant property, or unparseable value fails the whole call.
         PlannedChanges plan;
         try
         {
-            plan = planChanges(target, normalizedFqn, properties, config);
+            PlanContext planCtx = new PlanContext(config, version, bmEngine, localizedLanguage);
+            plan = planChanges(target, normalizedFqn, properties, planCtx);
         }
         catch (PropertyException e)
         {
@@ -256,10 +332,11 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
     /**
      * Validates the supplied properties against the object kind and builds the
      * ordered list of mutations. Throws {@link PropertyException} on the first
-     * problem; nothing is mutated here.
+     * problem; nothing is mutated here. Common (cross-type) properties are handled
+     * first, then the type-specific dispatch.
      */
     private PlannedChanges planChanges(MdObject target, String normalizedFqn,
-        Map<String, JsonElement> properties, Configuration config) throws PropertyException
+        Map<String, JsonElement> properties, PlanContext planCtx) throws PropertyException
     {
         PlannedChanges plan = new PlannedChanges();
         for (Map.Entry<String, JsonElement> entry : properties.entrySet())
@@ -267,9 +344,13 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             String key = entry.getKey();
             JsonElement value = entry.getValue();
 
-            if (target instanceof Document)
+            if (isCommonProperty(key))
             {
-                planDocumentProperty(plan, key, value, config);
+                planCommonProperty(plan, target, normalizedFqn, key, value, planCtx);
+            }
+            else if (target instanceof Document)
+            {
+                planDocumentProperty(plan, key, value, planCtx.config);
             }
             else if (target instanceof Catalog)
             {
@@ -281,17 +362,154 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             }
             else if (target instanceof Subsystem)
             {
-                planSubsystemProperty(plan, key, value, config);
+                planSubsystemProperty(plan, key, value, planCtx.config);
+            }
+            else if (target instanceof EventSubscription)
+            {
+                planEventSubscriptionProperty(plan, key, value, planCtx);
+            }
+            else if (target instanceof ScheduledJob)
+            {
+                planScheduledJobProperty(plan, key, value);
+            }
+            else if (target instanceof FunctionalOption)
+            {
+                planFunctionalOptionProperty(plan, key, value, planCtx.config);
+            }
+            else if (target instanceof FunctionalOptionsParameter)
+            {
+                planFunctionalOptionsParameterProperty(plan, key, value, planCtx.config);
+            }
+            else if (target instanceof SessionParameter)
+            {
+                planSessionParameterProperty(plan, key, value, planCtx);
+            }
+            else if (target instanceof WebService)
+            {
+                planWebServiceProperty(plan, key, value);
+            }
+            else if (target instanceof HTTPService)
+            {
+                planHttpServiceProperty(plan, key, value);
+            }
+            else if (target instanceof CommonCommand)
+            {
+                planCommonCommandProperty(plan, key, value, planCtx);
+            }
+            else if (target instanceof DocumentJournal)
+            {
+                planDocumentJournalProperty(plan, key, value, planCtx.config);
+            }
+            else if (target instanceof Sequence)
+            {
+                planSequenceProperty(plan, key, value, planCtx.config);
+            }
+            else if (target instanceof BusinessProcess)
+            {
+                planBusinessProcessProperty(plan, key, value, planCtx.config);
             }
             else
             {
                 throw new PropertyException("Object type '" + target.eClass().getName() //$NON-NLS-1$
                     + "' (" + normalizedFqn + ") is not supported by set_object_property. " //$NON-NLS-1$ //$NON-NLS-2$
-                    + "Supported types: Document, Catalog, CommonModule, Subsystem."); //$NON-NLS-1$
+                    + "Supported types: Document, Catalog, CommonModule, Subsystem, " //$NON-NLS-1$
+                    + "EventSubscription, ScheduledJob, FunctionalOption, FunctionalOptionsParameter, " //$NON-NLS-1$
+                    + "SessionParameter, WebService, HTTPService, CommonCommand, DocumentJournal, " //$NON-NLS-1$
+                    + "Sequence, BusinessProcess. Common properties (synonym, comment, presentations) " //$NON-NLS-1$
+                    + "work on any object that has the feature."); //$NON-NLS-1$
             }
             plan.appliedNames.add(key);
         }
         return plan;
+    }
+
+    // --- Common cross-type properties ------------------------------------
+
+    private static boolean isCommonProperty(String key)
+    {
+        if ("synonym".equals(key) || "comment".equals(key)) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            return true;
+        }
+        for (String f : PRESENTATION_FEATURES)
+        {
+            if (f.equals(key))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsLocalizedProperty(Map<String, JsonElement> properties)
+    {
+        if (properties.containsKey("synonym")) //$NON-NLS-1$
+        {
+            return true;
+        }
+        for (String f : PRESENTATION_FEATURES)
+        {
+            if (properties.containsKey(f))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Plans a common (cross-type) property. {@code comment} maps to the typed
+     * {@link MdObject#setComment(String)}. {@code synonym} and the four
+     * presentation strings are localized EMF maps keyed by language code; the
+     * feature must exist on the object's {@link org.eclipse.emf.ecore.EClass} or a
+     * clear error is raised.
+     */
+    private void planCommonProperty(PlannedChanges plan, MdObject target, String normalizedFqn,
+        String key, JsonElement value, PlanContext planCtx) throws PropertyException
+    {
+        if ("comment".equals(key)) //$NON-NLS-1$
+        {
+            final String v = parseString(key, value);
+            plan.add((tx, o) -> o.setComment(v));
+            return;
+        }
+
+        // synonym + presentations: localized EMF maps keyed by language code.
+        final String featureName = key; // EMF feature name equals the property key
+        EStructuralFeature feature = target.eClass().getEStructuralFeature(featureName);
+        if (feature == null)
+        {
+            throw new PropertyException("Property '" + key + "' is not available on '" //$NON-NLS-1$ //$NON-NLS-2$
+                + target.eClass().getName() + "' (" + normalizedFqn + "). " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Presentation strings exist on data objects such as Catalog, Document and " //$NON-NLS-1$
+                + "registers; 'synonym' exists on every metadata object."); //$NON-NLS-1$
+        }
+        final String v = parseString(key, value);
+        final String lang = planCtx.localizedLanguage;
+        plan.add((tx, o) -> putLocalized(o, featureName, lang, v));
+    }
+
+    /**
+     * Writes a localized string into one of the language-keyed maps ({@code synonym}
+     * and the four presentation features). These features are EMF {@code EMap}s, i.e.
+     * {@link org.eclipse.emf.common.util.EMap}, which is an {@code EList} of map
+     * entries and is <em>not</em> a {@link java.util.Map}. They must therefore be
+     * accessed through the EMF {@code EMap} API, not {@code java.util.Map}.
+     */
+    @SuppressWarnings("unchecked")
+    private static void putLocalized(MdObject object, String featureName, String language, String value)
+    {
+        EStructuralFeature feature = object.eClass().getEStructuralFeature(featureName);
+        if (feature == null)
+        {
+            throw new RuntimeException("Feature vanished: " + featureName); //$NON-NLS-1$
+        }
+        Object map = object.eGet(feature);
+        if (!(map instanceof EMap))
+        {
+            throw new RuntimeException("Feature '" + featureName + "' is not a localized map"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        ((EMap<String, String>)map).put(language, value);
     }
 
     // --- Document ---------------------------------------------------------
@@ -546,6 +764,350 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         }
     }
 
+    // --- EventSubscription ------------------------------------------------
+
+    private void planEventSubscriptionProperty(PlannedChanges plan, String key, JsonElement value,
+        PlanContext planCtx) throws PropertyException
+    {
+        switch (key)
+        {
+        case "source": //$NON-NLS-1$
+        {
+            // The source is a TypeDescription (the set of objects subscribed to).
+            AttributeTypeSpec spec = parseTypeSpec(key, value);
+            plan.add((tx, o) -> ((EventSubscription)o).setSource(
+                buildTypeDescription(spec, planCtx, o, tx)));
+            break;
+        }
+        case "event": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((EventSubscription)o).setEvent(v));
+            break;
+        }
+        case "handler": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((EventSubscription)o).setHandler(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "EventSubscription", "source, event, handler"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- ScheduledJob -----------------------------------------------------
+
+    private void planScheduledJobProperty(PlannedChanges plan, String key, JsonElement value)
+        throws PropertyException
+    {
+        switch (key)
+        {
+        case "methodName": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((ScheduledJob)o).setMethodName(v));
+            break;
+        }
+        case "use": //$NON-NLS-1$
+        {
+            boolean v = parseBoolean(key, value);
+            plan.add((tx, o) -> ((ScheduledJob)o).setUse(v));
+            break;
+        }
+        case "predefined": //$NON-NLS-1$
+        {
+            boolean v = parseBoolean(key, value);
+            plan.add((tx, o) -> ((ScheduledJob)o).setPredefined(v));
+            break;
+        }
+        case "key": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((ScheduledJob)o).setKey(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "ScheduledJob", //$NON-NLS-1$
+                "methodName, use, predefined, key (schedule must be edited in the EDT editor)"); //$NON-NLS-1$
+        }
+    }
+
+    // --- FunctionalOption -------------------------------------------------
+
+    private void planFunctionalOptionProperty(PlannedChanges plan, String key, JsonElement value,
+        Configuration config) throws PropertyException
+    {
+        switch (key)
+        {
+        case "location": //$NON-NLS-1$
+        {
+            // The storage where the option value is kept: a Constant or a register
+            // resource attribute, referenced by FQN.
+            String fqn = parseString(key, value);
+            final long bmId = resolveRefBmId(key, fqn, config);
+            plan.add((tx, o) -> {
+                MdObject storage = (MdObject)tx.getObjectById(bmId);
+                if (storage == null)
+                {
+                    throw new RuntimeException("Location object vanished from transaction: " + fqn); //$NON-NLS-1$
+                }
+                ((FunctionalOption)o).setLocation(storage);
+            });
+            break;
+        }
+        case "privilegedGetMode": //$NON-NLS-1$
+        {
+            boolean v = parseBoolean(key, value);
+            plan.add((tx, o) -> ((FunctionalOption)o).setPrivilegedGetMode(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "FunctionalOption", "location, privilegedGetMode"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- FunctionalOptionsParameter --------------------------------------
+
+    private void planFunctionalOptionsParameterProperty(PlannedChanges plan, String key, JsonElement value,
+        Configuration config) throws PropertyException
+    {
+        switch (key)
+        {
+        case "use": //$NON-NLS-1$
+        {
+            // 'use' is the set of objects parametrized by the option (FQN array).
+            List<Long> bmIds = resolveObjectRefs(key, value, config);
+            plan.add((tx, o) -> {
+                EList<MdObject> use = ((FunctionalOptionsParameter)o).getUse();
+                for (Long bmId : bmIds)
+                {
+                    MdObject member = (MdObject)tx.getObjectById(bmId);
+                    if (member == null)
+                    {
+                        throw new RuntimeException("Object vanished from transaction (bmId=" + bmId + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    if (!use.contains(member))
+                    {
+                        use.add(member);
+                    }
+                }
+            });
+            break;
+        }
+        default:
+            throw unknownProperty(key, "FunctionalOptionsParameter", "use"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- SessionParameter -------------------------------------------------
+
+    private void planSessionParameterProperty(PlannedChanges plan, String key, JsonElement value,
+        PlanContext planCtx) throws PropertyException
+    {
+        switch (key)
+        {
+        case "type": //$NON-NLS-1$
+        {
+            AttributeTypeSpec spec = parseTypeSpec(key, value);
+            plan.add((tx, o) -> ((SessionParameter)o).setType(
+                buildTypeDescription(spec, planCtx, o, tx)));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "SessionParameter", "type"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- WebService -------------------------------------------------------
+
+    private void planWebServiceProperty(PlannedChanges plan, String key, JsonElement value)
+        throws PropertyException
+    {
+        switch (key)
+        {
+        case "namespace": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((WebService)o).setNamespace(v));
+            break;
+        }
+        case "descriptorFileName": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((WebService)o).setDescriptorFileName(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "WebService", "namespace, descriptorFileName"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- HTTPService ------------------------------------------------------
+
+    private void planHttpServiceProperty(PlannedChanges plan, String key, JsonElement value)
+        throws PropertyException
+    {
+        switch (key)
+        {
+        case "rootURL": //$NON-NLS-1$
+        {
+            String v = parseString(key, value);
+            plan.add((tx, o) -> ((HTTPService)o).setRootURL(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "HTTPService", "rootURL"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- CommonCommand ----------------------------------------------------
+
+    private void planCommonCommandProperty(PlannedChanges plan, String key, JsonElement value,
+        PlanContext planCtx) throws PropertyException
+    {
+        switch (key)
+        {
+        case "commandParameterType": //$NON-NLS-1$
+        {
+            AttributeTypeSpec spec = parseTypeSpec(key, value);
+            plan.add((tx, o) -> ((CommonCommand)o).setCommandParameterType(
+                buildTypeDescription(spec, planCtx, o, tx)));
+            break;
+        }
+        case "representation": //$NON-NLS-1$
+        {
+            ButtonRepresentation v =
+                parseEnum(ButtonRepresentation.class, ButtonRepresentation.values(), key, value);
+            plan.add((tx, o) -> ((CommonCommand)o).setRepresentation(v));
+            break;
+        }
+        default:
+            throw unknownProperty(key, "CommonCommand", //$NON-NLS-1$
+                "commandParameterType, representation (group must be set in the EDT command " //$NON-NLS-1$
+                    + "interface editor)"); //$NON-NLS-1$
+        }
+    }
+
+    // --- DocumentJournal --------------------------------------------------
+
+    private void planDocumentJournalProperty(PlannedChanges plan, String key, JsonElement value,
+        Configuration config) throws PropertyException
+    {
+        switch (key)
+        {
+        case "registeredDocuments": //$NON-NLS-1$
+        {
+            List<Long> bmIds = resolveTypedRefs(key, value, config, Document.class, "Document"); //$NON-NLS-1$
+            plan.add((tx, o) -> {
+                EList<Document> docs = ((DocumentJournal)o).getRegisteredDocuments();
+                for (Long bmId : bmIds)
+                {
+                    Document doc = (Document)tx.getObjectById(bmId);
+                    if (doc == null)
+                    {
+                        throw new RuntimeException("Document vanished from transaction (bmId=" + bmId + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    if (!docs.contains(doc))
+                    {
+                        docs.add(doc);
+                    }
+                }
+            });
+            break;
+        }
+        default:
+            throw unknownProperty(key, "DocumentJournal", "registeredDocuments"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- Sequence ---------------------------------------------------------
+
+    private void planSequenceProperty(PlannedChanges plan, String key, JsonElement value,
+        Configuration config) throws PropertyException
+    {
+        switch (key)
+        {
+        case "documents": //$NON-NLS-1$
+        {
+            List<Long> bmIds = resolveTypedRefs(key, value, config, Document.class, "Document"); //$NON-NLS-1$
+            plan.add((tx, o) -> {
+                EList<Document> docs = ((Sequence)o).getDocuments();
+                for (Long bmId : bmIds)
+                {
+                    Document doc = (Document)tx.getObjectById(bmId);
+                    if (doc == null)
+                    {
+                        throw new RuntimeException("Document vanished from transaction (bmId=" + bmId + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    if (!docs.contains(doc))
+                    {
+                        docs.add(doc);
+                    }
+                }
+            });
+            break;
+        }
+        case "dimensions": //$NON-NLS-1$
+            throw new PropertyException("Sequence 'dimensions' are child objects with their own type; " //$NON-NLS-1$
+                + "they cannot be set by reference here. Add a dimension via add_metadata_attribute " //$NON-NLS-1$
+                + "is not yet supported for Sequence - edit dimensions in the EDT editor."); //$NON-NLS-1$
+        default:
+            throw unknownProperty(key, "Sequence", "documents"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    // --- BusinessProcess --------------------------------------------------
+
+    private void planBusinessProcessProperty(PlannedChanges plan, String key, JsonElement value,
+        Configuration config) throws PropertyException
+    {
+        switch (key)
+        {
+        case "task": //$NON-NLS-1$
+        {
+            String fqn = parseString(key, value);
+            final long bmId = resolveTypedRefBmId(key, fqn, config, Task.class, "Task"); //$NON-NLS-1$
+            plan.add((tx, o) -> {
+                Task task = (Task)tx.getObjectById(bmId);
+                if (task == null)
+                {
+                    throw new RuntimeException("Task vanished from transaction: " + fqn); //$NON-NLS-1$
+                }
+                ((BusinessProcess)o).setTask(task);
+            });
+            break;
+        }
+        default:
+            throw unknownProperty(key, "BusinessProcess", "task (and the common synonym/comment/" //$NON-NLS-1$ //$NON-NLS-2$
+                + "presentation properties)"); //$NON-NLS-1$
+        }
+    }
+
+    // --- TypeDescription helper ------------------------------------------
+
+    private static AttributeTypeSpec parseTypeSpec(String key, JsonElement value) throws PropertyException
+    {
+        String raw = parseString(key, value);
+        try
+        {
+            return AttributeTypeSpec.parse(raw);
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new PropertyException("Property '" + key + "' has an invalid type: " + e.getMessage() //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Examples: 'String(50)', 'Number(15,2)', 'CatalogRef.Products', " //$NON-NLS-1$
+                + "'String(10), CatalogRef.Products'."); //$NON-NLS-1$
+        }
+    }
+
+    private static TypeDescription buildTypeDescription(AttributeTypeSpec spec, PlanContext planCtx,
+        MdObject contextObject, IBmTransaction tx)
+    {
+        String contextFqn = TypeDescriptionBuilder.topObjectFqnOf(contextObject);
+        return TypeDescriptionBuilder.build(spec, planCtx.version, contextObject, planCtx.bmEngine, contextFqn, tx);
+    }
+
     // --- Reference resolution --------------------------------------------
 
     private List<Long> resolveRegisterRecords(String key, JsonElement value, Configuration config)
@@ -580,6 +1142,13 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
     private List<Long> resolveSubsystemContent(String key, JsonElement value, Configuration config)
         throws PropertyException
     {
+        return resolveObjectRefs(key, value, config);
+    }
+
+    /** Resolves an array of FQNs to bmIds, requiring each to be a BM object. */
+    private List<Long> resolveObjectRefs(String key, JsonElement value, Configuration config)
+        throws PropertyException
+    {
         List<String> fqns = parseFqnArray(key, value);
         List<Long> bmIds = new ArrayList<>(fqns.size());
         for (String fqn : fqns)
@@ -587,16 +1156,67 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             MdObject obj = resolveObject(config, fqn);
             if (obj == null)
             {
-                throw new PropertyException("content: object not found: " + fqn //$NON-NLS-1$
+                throw new PropertyException(key + ": object not found: " + fqn //$NON-NLS-1$
                     + ". Use a metadata FQN such as 'Catalog.Products' or 'Document.SalesOrder'."); //$NON-NLS-1$
             }
             if (!(obj instanceof IBmObject))
             {
-                throw new PropertyException("content: '" + fqn + "' is not a BM object."); //$NON-NLS-1$ //$NON-NLS-2$
+                throw new PropertyException(key + ": '" + fqn + "' is not a BM object."); //$NON-NLS-1$ //$NON-NLS-2$
             }
             bmIds.add(((IBmObject)obj).bmGetId());
         }
         return bmIds;
+    }
+
+    /** Resolves an array of FQNs, requiring each to be of the given type. */
+    private List<Long> resolveTypedRefs(String key, JsonElement value, Configuration config,
+        Class<? extends MdObject> requiredType, String requiredTypeLabel) throws PropertyException
+    {
+        List<String> fqns = parseFqnArray(key, value);
+        List<Long> bmIds = new ArrayList<>(fqns.size());
+        for (String fqn : fqns)
+        {
+            bmIds.add(resolveTypedRefBmId(key, fqn, config, requiredType, requiredTypeLabel));
+        }
+        return bmIds;
+    }
+
+    /** Resolves a single FQN to a bmId (any BM object). */
+    private long resolveRefBmId(String key, String fqn, Configuration config) throws PropertyException
+    {
+        MdObject obj = resolveObject(config, fqn);
+        if (obj == null)
+        {
+            throw new PropertyException(key + ": object not found: " + fqn //$NON-NLS-1$
+                + ". Check the FQN and use get_metadata_objects to list available objects."); //$NON-NLS-1$
+        }
+        if (!(obj instanceof IBmObject))
+        {
+            throw new PropertyException(key + ": '" + fqn + "' is not a BM object."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return ((IBmObject)obj).bmGetId();
+    }
+
+    /** Resolves a single FQN to a bmId, requiring the given type. */
+    private long resolveTypedRefBmId(String key, String fqn, Configuration config,
+        Class<? extends MdObject> requiredType, String requiredTypeLabel) throws PropertyException
+    {
+        MdObject obj = resolveObject(config, fqn);
+        if (obj == null)
+        {
+            throw new PropertyException(key + ": " + requiredTypeLabel + " not found: " + fqn //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Use a " + requiredTypeLabel + " FQN such as '" + requiredTypeLabel + ".SalesOrder'."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        if (!requiredType.isInstance(obj))
+        {
+            throw new PropertyException(key + ": '" + fqn + "' is not a " + requiredTypeLabel //$NON-NLS-1$ //$NON-NLS-2$
+                + " (it is a " + obj.eClass().getName() + ")."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (!(obj instanceof IBmObject))
+        {
+            throw new PropertyException(key + ": '" + fqn + "' is not a BM object."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return ((IBmObject)obj).bmGetId();
     }
 
     private static MdObject resolveObject(Configuration config, String fqn)
@@ -612,6 +1232,37 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return null;
         }
         return MetadataTypeUtils.findObject(config, parts[0], parts[1]);
+    }
+
+    // --- Language resolution ---------------------------------------------
+
+    /**
+     * Resolves the language code for localized properties. Mirrors the logic in
+     * {@code CreateMetadataObjectTool}: an explicit {@code language} wins,
+     * otherwise the configuration default language code, otherwise the first
+     * configured language code.
+     */
+    private static String resolveLanguage(Configuration config, String language)
+    {
+        if (language != null && !language.isEmpty())
+        {
+            return language;
+        }
+        Language defaultLanguage = config.getDefaultLanguage();
+        if (defaultLanguage != null
+            && defaultLanguage.getLanguageCode() != null
+            && !defaultLanguage.getLanguageCode().isEmpty())
+        {
+            return defaultLanguage.getLanguageCode();
+        }
+        for (Language lang : config.getLanguages())
+        {
+            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
+            {
+                return lang.getLanguageCode();
+            }
+        }
+        return null;
     }
 
     // --- Value parsing helpers -------------------------------------------
@@ -641,6 +1292,16 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         {
             return null;
         }
+    }
+
+    private static String parseString(String key, JsonElement value) throws PropertyException
+    {
+        if (value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString())
+        {
+            return value.getAsString();
+        }
+        throw new PropertyException("Property '" + key + "' expects a string, got: " //$NON-NLS-1$ //$NON-NLS-2$
+            + describe(value));
     }
 
     private static boolean parseBoolean(String key, JsonElement value) throws PropertyException
@@ -785,7 +1446,8 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
     private static PropertyException unknownProperty(String key, String typeName, String supported)
     {
         return new PropertyException("Unknown or irrelevant property '" + key //$NON-NLS-1$
-            + "' for " + typeName + ". Supported properties: " + supported + "."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + "' for " + typeName + ". Supported properties: " + supported //$NON-NLS-1$ //$NON-NLS-2$
+            + " (plus the common synonym, comment and presentation properties)."); //$NON-NLS-1$
     }
 
     private static String describe(JsonElement value)
@@ -815,6 +1477,23 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         void add(Mutation mutation)
         {
             mutations.add(mutation);
+        }
+    }
+
+    /** Read-only context threaded through the planning phase. */
+    private static final class PlanContext
+    {
+        final Configuration config;
+        final Version version;
+        final IBmEngine bmEngine;
+        final String localizedLanguage;
+
+        PlanContext(Configuration config, Version version, IBmEngine bmEngine, String localizedLanguage)
+        {
+            this.config = config;
+            this.version = version;
+            this.bmEngine = bmEngine;
+            this.localizedLanguage = localizedLanguage;
         }
     }
 
