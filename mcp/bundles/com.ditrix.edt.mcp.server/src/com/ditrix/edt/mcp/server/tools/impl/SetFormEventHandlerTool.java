@@ -21,7 +21,6 @@ import com._1c.g5.v8.dt.form.model.EventHandlerContainer;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormFactory;
 import com._1c.g5.v8.dt.form.model.FormItem;
-import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com._1c.g5.v8.dt.form.model.FormVisualEntity;
 import com._1c.g5.v8.dt.form.service.FormItemInformationService;
 import com._1c.g5.v8.dt.mcore.Event;
@@ -195,7 +194,9 @@ public class SetFormEventHandlerTool extends AbstractFormWriteTool
                     }
                     else
                     {
-                        FormItem item = findItem(form, itemNameFinal);
+                        // Fail on an ambiguous element name instead of silently
+                        // binding the handler to the first match.
+                        FormItem item = FormToolSupport.findUniqueItem(form, itemNameFinal);
                         if (item == null)
                         {
                             throw new RuntimeException("Form element not found: " + itemNameFinal //$NON-NLS-1$
@@ -343,32 +344,5 @@ public class SetFormEventHandlerTool extends AbstractFormWriteTool
             }
         }
         return String.join(", ", names); //$NON-NLS-1$
-    }
-
-    /**
-     * Recursively searches a form's item tree for an item with the given name.
-     *
-     * @param container the container to search (form root or a group)
-     * @param name the item name to look up (case-insensitive)
-     * @return the matching {@link FormItem}, or {@code null}
-     */
-    private static FormItem findItem(FormItemContainer container, String name)
-    {
-        for (FormItem item : container.getItems())
-        {
-            if (name.equalsIgnoreCase(item.getName()))
-            {
-                return item;
-            }
-            if (item instanceof FormItemContainer)
-            {
-                FormItem nested = findItem((FormItemContainer)item, name);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-        }
-        return null;
     }
 }

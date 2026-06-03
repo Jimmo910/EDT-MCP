@@ -6,6 +6,15 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.eclipse.emf.ecore.EObject;
+
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormGroup;
+import com._1c.g5.v8.dt.form.model.FormItem;
+import com._1c.g5.v8.dt.form.model.FormItemContainer;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.impl.AbstractFormWriteTool.FormLocation;
 
@@ -89,5 +98,144 @@ final class FormToolSupport
     {
         String ownerFqn = ((com._1c.g5.v8.bm.core.IBmObject)location.owner).bmGetFqn();
         return ownerFqn + "." + AbstractFormWriteTool.FORM_SEGMENT + "." + location.mdForm.getName(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Finds a single form item by name anywhere in the item tree, failing on
+     * ambiguity.
+     * <p>
+     * Item names are not unique across the whole form tree (two groups may each
+     * hold a field called {@code Comment}), so a plain first-match lookup can
+     * silently target the wrong element. This collects <em>all</em> matches and:
+     * <ul>
+     * <li>returns {@code null} when none match;</li>
+     * <li>returns the single match when exactly one matches;</li>
+     * <li>throws a {@link RuntimeException} listing every candidate and its parent
+     * when more than one matches, so the caller fails loudly instead of guessing.</li>
+     * </ul>
+     *
+     * @param form the content form
+     * @param name the item name to resolve (case-insensitive)
+     * @return the single matching item, or {@code null} when none matches
+     * @throws RuntimeException when the name is ambiguous
+     */
+    static FormItem findUniqueItem(Form form, String name)
+    {
+        List<FormItem> matches = new ArrayList<>();
+        collectItems(form, name, matches);
+        if (matches.isEmpty())
+        {
+            return null;
+        }
+        if (matches.size() > 1)
+        {
+            throw new RuntimeException(ambiguityMessage("item", name, matches)); //$NON-NLS-1$
+        }
+        return matches.get(0);
+    }
+
+    /**
+     * Finds a single form group by name anywhere in the item tree, failing on
+     * ambiguity. See {@link #findUniqueItem(Form, String)}.
+     *
+     * @param form the content form
+     * @param name the group name to resolve (case-insensitive)
+     * @return the single matching group, or {@code null} when none matches
+     * @throws RuntimeException when the name is ambiguous
+     */
+    static FormGroup findUniqueGroup(Form form, String name)
+    {
+        List<FormItem> matches = new ArrayList<>();
+        collectGroups(form, name, matches);
+        if (matches.isEmpty())
+        {
+            return null;
+        }
+        if (matches.size() > 1)
+        {
+            throw new RuntimeException(ambiguityMessage("group", name, matches)); //$NON-NLS-1$
+        }
+        return (FormGroup)matches.get(0);
+    }
+
+    private static void collectItems(FormItemContainer container, String name, List<FormItem> out)
+    {
+        for (FormItem item : container.getItems())
+        {
+            if (name.equalsIgnoreCase(item.getName()))
+            {
+                out.add(item);
+            }
+            if (item instanceof FormItemContainer)
+            {
+                collectItems((FormItemContainer)item, name, out);
+            }
+        }
+    }
+
+    private static void collectGroups(FormItemContainer container, String name, List<FormItem> out)
+    {
+        for (FormItem item : container.getItems())
+        {
+            if (item instanceof FormGroup)
+            {
+                if (name.equalsIgnoreCase(item.getName()))
+                {
+                    out.add(item);
+                }
+                collectGroups((FormGroup)item, name, out);
+            }
+        }
+    }
+
+    /**
+     * Builds a disambiguation error listing every candidate and its parent.
+     *
+     * @param kind a human label ({@code "item"} / {@code "group"})
+     * @param name the ambiguous name
+     * @param matches the matching elements (size &gt; 1)
+     * @return the error message
+     */
+    private static String ambiguityMessage(String kind, String name, List<FormItem> matches)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Ambiguous ").append(kind).append(" name '").append(name) //$NON-NLS-1$ //$NON-NLS-2$
+            .append("': ").append(matches.size()).append(" elements match. Candidates (with parent): "); //$NON-NLS-1$ //$NON-NLS-2$
+        for (int i = 0; i < matches.size(); i++)
+        {
+            if (i > 0)
+            {
+                sb.append(", "); //$NON-NLS-1$
+            }
+            FormItem item = matches.get(i);
+            sb.append('\'').append(item.getName()).append("' in ").append(parentLabel(item)); //$NON-NLS-1$
+        }
+        sb.append(". Rename one of them, or move/restructure the form so the name is unique."); //$NON-NLS-1$
+        return sb.toString();
+    }
+
+    /**
+     * Describes the parent container of a form item for disambiguation messages:
+     * the form root, or the enclosing group's name.
+     *
+     * @param item the form item
+     * @return a short parent label
+     */
+    private static String parentLabel(FormItem item)
+    {
+        EObject parent = item.eContainer();
+        if (parent instanceof Form)
+        {
+            return "the form root"; //$NON-NLS-1$
+        }
+        if (parent instanceof FormGroup)
+        {
+            return "group '" + ((FormGroup)parent).getName() + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (parent instanceof FormItem)
+        {
+            return "'" + ((FormItem)parent).getName() + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return "the form"; //$NON-NLS-1$
     }
 }

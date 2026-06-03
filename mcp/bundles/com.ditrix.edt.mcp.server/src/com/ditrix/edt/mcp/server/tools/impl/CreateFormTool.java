@@ -350,13 +350,30 @@ public class CreateFormTool extends AbstractFormWriteTool
         // so it is resolvable post-commit.
         String persistWarning = persistForm(project, contentFqnRef.get());
 
+        // Also persist + revalidate the OWNER .mdo. The owner top object is what
+        // registers the new form (its <forms> entry) and, when setAsDefault was
+        // requested, the defaultObjectForm reference. Those edits live only in the
+        // in-memory BM model until the owner is force-exported; without this the
+        // owner .mdo on disk would not list the form and get_project_errors could
+        // stay stale. This mirrors how metadata tools persist the changed object.
+        String ownerFqnForPersist = topObjectFqnOf(owner);
+        String ownerPersistWarning = persistAndRevalidate(project, ownerFqnForPersist);
+        if (persistWarning == null)
+        {
+            persistWarning = ownerPersistWarning;
+        }
+        else if (ownerPersistWarning != null)
+        {
+            persistWarning = persistWarning + "; owner: " + ownerPersistWarning; //$NON-NLS-1$
+        }
+
         ToolResult result = ToolResult.success()
             .put("formFqn", formFqn) //$NON-NLS-1$
             .put("ownerFqn", normalizedOwnerFqn) //$NON-NLS-1$
             .put("formName", formName) //$NON-NLS-1$
             .put("setAsDefault", setAsDefault); //$NON-NLS-1$
         String message = "Form '" + formFqn + "' created. " + //$NON-NLS-1$ //$NON-NLS-2$
-            "The Form.form file was written to disk. " + //$NON-NLS-1$
+            "The Form.form file and the owner .mdo (which registers the form) were written to disk. " + //$NON-NLS-1$
             "Add structure with add_form_attribute / add_form_item / add_form_command. " + //$NON-NLS-1$
             "Run get_project_errors to verify; get_form_layout_snapshot to inspect."; //$NON-NLS-1$
         if (persistWarning != null)
