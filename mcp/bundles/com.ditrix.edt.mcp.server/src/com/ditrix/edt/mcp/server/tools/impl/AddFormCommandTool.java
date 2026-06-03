@@ -22,6 +22,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 
 /**
  * Tool to add a form command ({@link FormCommand}) to a managed form.
@@ -59,6 +60,10 @@ public class AddFormCommandTool extends AbstractFormWriteTool
                 "(e.g. 'Catalog.Products.Form.ItemForm'). Russian names supported.", true) //$NON-NLS-1$
             .stringProperty("commandName", //$NON-NLS-1$
                 "Name for the new form command (required). Must be a valid 1C identifier.", true) //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "commandName so the result complies with the mdo-ru-name-unallowed-letter standard; " + //$NON-NLS-1$
+                "the result reports the change. Set to false to keep it exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -68,6 +73,12 @@ public class AddFormCommandTool extends AbstractFormWriteTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String formFqn = JsonUtils.extractStringArgument(params, "formFqn"); //$NON-NLS-1$
         String commandName = JsonUtils.extractStringArgument(params, "commandName"); //$NON-NLS-1$
+
+        // Normalize the new identifier (ё->е / Ё->Е) at the input, before
+        // identifier validation, so it is stored standard-compliant.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        commandName = yoReport.apply("commandName", commandName); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -112,6 +123,7 @@ public class AddFormCommandTool extends AbstractFormWriteTool
         }
 
         final long formBmId = bmIdOf(location.content);
+        final String commandNameFinal = commandName;
         try
         {
             bmModel.execute(new AbstractBmTask<Void>("AddFormCommand") //$NON-NLS-1$
@@ -126,14 +138,14 @@ public class AddFormCommandTool extends AbstractFormWriteTool
                     }
                     for (FormCommand existing : form.getFormCommands())
                     {
-                        if (commandName.equalsIgnoreCase(existing.getName()))
+                        if (commandNameFinal.equalsIgnoreCase(existing.getName()))
                         {
-                            throw new RuntimeException("Form command already exists: " + commandName); //$NON-NLS-1$
+                            throw new RuntimeException("Form command already exists: " + commandNameFinal); //$NON-NLS-1$
                         }
                     }
 
                     FormCommand command = FormFactory.eINSTANCE.createFormCommand();
-                    command.setName(commandName);
+                    command.setName(commandNameFinal);
                     // Commands have their own id space, separate from form
                     // elements and attributes.
                     command.setId(nextCommandId(form));
@@ -163,6 +175,11 @@ public class AddFormCommandTool extends AbstractFormWriteTool
             message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
                 + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
             result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", message) //$NON-NLS-1$

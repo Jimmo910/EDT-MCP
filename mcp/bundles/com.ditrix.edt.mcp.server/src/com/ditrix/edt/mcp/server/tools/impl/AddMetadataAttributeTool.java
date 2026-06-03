@@ -51,6 +51,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 
@@ -167,6 +168,10 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
                 "Optional 'main filter' flag for a register dimension " + //$NON-NLS-1$
                 "(kind=Dimension). Supported only for InformationRegister dimensions.", //$NON-NLS-1$
                 false)
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "attributeName so the result complies with the mdo-ru-name-unallowed-letter " + //$NON-NLS-1$
+                "standard; the result reports the change. Set to false to keep it exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -176,6 +181,12 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String parentFqn = JsonUtils.extractStringArgument(params, "parentFqn"); //$NON-NLS-1$
         String attributeName = JsonUtils.extractStringArgument(params, "attributeName"); //$NON-NLS-1$
+
+        // Normalize the new identifier (ё->е / Ё->Е) at the input so it is stored
+        // already compliant with the mdo-ru-name-unallowed-letter standard.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        attributeName = yoReport.apply("attributeName", attributeName); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -257,14 +268,15 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
 
         return executeInternal(projectName, parentFqn, attributeName, kind,
             typeSpec, indexing, fillChecking, multiLineSet, multiLine,
-            masterSet, master, mainFilterSet, mainFilter);
+            masterSet, master, mainFilterSet, mainFilter, yoReport);
     }
 
     private String executeInternal(String projectName, String parentFqn, String attributeName, final Kind kind,
         final AttributeTypeSpec typeSpec, final Indexing indexing, final FillChecking fillChecking,
         final boolean multiLineSet, final boolean multiLine,
         final boolean masterSet, final boolean master,
-        final boolean mainFilterSet, final boolean mainFilter)
+        final boolean mainFilterSet, final boolean mainFilter,
+        final MdNameNormalizer.Report yoReport)
     {
         // Get project and configuration
         ProjectContext ctx = resolveProjectAndConfig(projectName);
@@ -415,6 +427,11 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
         if (typeSpec != null)
         {
             result.put("type", TypeDescriptionBuilder.describe(typeSpec)); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", kindLabel + " '" + attributeName + "' added successfully to " + normalizedParentFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

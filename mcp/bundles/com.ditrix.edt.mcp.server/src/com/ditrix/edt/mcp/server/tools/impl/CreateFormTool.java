@@ -38,6 +38,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -109,6 +110,11 @@ public class CreateFormTool extends AbstractFormWriteTool
                 "Language code for the synonym (e.g. 'en', 'ru'). Defaults to the configuration default language.") //$NON-NLS-1$
             .booleanProperty("setAsDefault", //$NON-NLS-1$
                 "When true, registers the form as the owner's default object form (default: false).") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "formName and synonym so the result complies with the mdo-ru-name-unallowed-letter " + //$NON-NLS-1$
+                "standard; the result reports which fields were changed. " + //$NON-NLS-1$
+                "Set to false to keep the text exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -121,6 +127,13 @@ public class CreateFormTool extends AbstractFormWriteTool
         String synonym = JsonUtils.extractStringArgument(params, "synonym"); //$NON-NLS-1$
         String language = JsonUtils.extractStringArgument(params, "language"); //$NON-NLS-1$
         boolean setAsDefault = JsonUtils.extractBooleanArgument(params, "setAsDefault", false); //$NON-NLS-1$
+
+        // Normalize user text (ё->е / Ё->Е) at the input, before identifier
+        // validation, so the form name/synonym are stored standard-compliant.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        formName = yoReport.apply("formName", formName); //$NON-NLS-1$
+        synonym = yoReport.apply("synonym", synonym); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -143,11 +156,11 @@ public class CreateFormTool extends AbstractFormWriteTool
                 .toJson();
         }
 
-        return executeInternal(projectName, ownerFqn, formName, synonym, language, setAsDefault);
+        return executeInternal(projectName, ownerFqn, formName, synonym, language, setAsDefault, yoReport);
     }
 
     private String executeInternal(String projectName, String ownerFqn, String formName,
-        String synonym, String language, boolean setAsDefault)
+        String synonym, String language, boolean setAsDefault, MdNameNormalizer.Report yoReport)
     {
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -351,6 +364,11 @@ public class CreateFormTool extends AbstractFormWriteTool
             message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
                 + "); the form is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
             result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", message) //$NON-NLS-1$

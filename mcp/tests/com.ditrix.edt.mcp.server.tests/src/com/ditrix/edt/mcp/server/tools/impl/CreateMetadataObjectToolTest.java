@@ -196,5 +196,20 @@ public class CreateMetadataObjectToolTest
             tail.contains("\"commonModuleKind\"")); //$NON-NLS-1$
         assertFalse("targetNamespace must not be required", //$NON-NLS-1$
             tail.contains("\"targetNamespace\"")); //$NON-NLS-1$
+        assertFalse("normalizeYo must not be required", //$NON-NLS-1$
+            tail.contains("\"normalizeYo\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testSchemaDeclaresNormalizeYo()
+    {
+        // S10 (#19884 / std474): the tool exposes an optional normalizeYo flag and
+        // its description explains the ё->е normalization.
+        String schema = new CreateMetadataObjectTool().getInputSchema();
+        assertTrue("schema must declare normalizeYo", schema.contains("\"normalizeYo\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        String desc = new CreateMetadataObjectTool().getDescription()
+            + new CreateMetadataObjectTool().getInputSchema();
+        assertTrue("schema/description must mention the ё->е normalization", //$NON-NLS-1$
+            desc.contains("ё") && desc.contains("е")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }

@@ -32,6 +32,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 
 /**
  * Tool to add an item (field or group) to a managed form.
@@ -94,6 +95,10 @@ public class AddFormItemTool extends AbstractFormWriteTool
             .stringProperty("parentGroup", //$NON-NLS-1$
                 "Optional name of an existing form group to place the item into. " + //$NON-NLS-1$
                 "When omitted, the item is added to the form root.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "itemName so the result complies with the mdo-ru-name-unallowed-letter standard; " + //$NON-NLS-1$
+                "the result reports the change. Set to false to keep it exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -106,6 +111,13 @@ public class AddFormItemTool extends AbstractFormWriteTool
         String itemName = JsonUtils.extractStringArgument(params, "itemName"); //$NON-NLS-1$
         String dataPath = JsonUtils.extractStringArgument(params, "dataPath"); //$NON-NLS-1$
         String parentGroup = JsonUtils.extractStringArgument(params, "parentGroup"); //$NON-NLS-1$
+
+        // Normalize the new identifier (ё->е / Ё->Е) at the input, before
+        // identifier validation. dataPath and parentGroup are lookup keys for
+        // existing data/groups, so they are left untouched.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        itemName = yoReport.apply("itemName", itemName); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -160,6 +172,7 @@ public class AddFormItemTool extends AbstractFormWriteTool
 
         final long formBmId = bmIdOf(location.content);
         final String kindFinal = kind;
+        final String itemNameFinal = itemName;
         final String dataPathFinal = dataPath;
         final String parentGroupFinal = parentGroup;
         try
@@ -186,13 +199,13 @@ public class AddFormItemTool extends AbstractFormWriteTool
                         container = group;
                     }
 
-                    if (itemNameExists(form, itemName))
+                    if (itemNameExists(form, itemNameFinal))
                     {
-                        throw new RuntimeException("Form item already exists: " + itemName); //$NON-NLS-1$
+                        throw new RuntimeException("Form item already exists: " + itemNameFinal); //$NON-NLS-1$
                     }
 
                     FormItem newItem = KIND_GROUP.equals(kindFinal)
-                        ? createGroup(form, itemName) : createField(form, itemName, dataPathFinal);
+                        ? createGroup(form, itemNameFinal) : createField(form, itemNameFinal, dataPathFinal);
                     container.getItems().add(newItem);
                     return null;
                 }
@@ -219,6 +232,11 @@ public class AddFormItemTool extends AbstractFormWriteTool
             message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
                 + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
             result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", message //$NON-NLS-1$

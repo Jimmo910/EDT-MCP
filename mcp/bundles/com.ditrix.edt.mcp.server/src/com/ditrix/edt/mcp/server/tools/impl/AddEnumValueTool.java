@@ -31,6 +31,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -83,6 +84,11 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
             .stringProperty("language", //$NON-NLS-1$
                 "Optional language code for the synonym (e.g. 'ru', 'en'). " //$NON-NLS-1$
                     + "If omitted, the configuration default language is used.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " //$NON-NLS-1$
+                    + "name and synonym so the result complies with the mdo-ru-name-unallowed-letter " //$NON-NLS-1$
+                    + "standard; the result reports which fields were changed. " //$NON-NLS-1$
+                    + "Set to false to keep the text exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -94,6 +100,13 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
         String name = JsonUtils.extractStringArgument(params, "name"); //$NON-NLS-1$
         String synonym = JsonUtils.extractStringArgument(params, "synonym"); //$NON-NLS-1$
         String language = JsonUtils.extractStringArgument(params, "language"); //$NON-NLS-1$
+
+        // Normalize user text (ё->е / Ё->Е) at the input, before identifier
+        // validation, so the value is stored already standard-compliant.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        name = yoReport.apply("name", name); //$NON-NLS-1$
+        synonym = yoReport.apply("synonym", synonym); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -116,11 +129,11 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
                 + "digits and underscores.").toJson(); //$NON-NLS-1$
         }
 
-        return executeInternal(projectName, enumFqn, name, synonym, language);
+        return executeInternal(projectName, enumFqn, name, synonym, language, yoReport);
     }
 
     private String executeInternal(String projectName, String enumFqn, final String name,
-        final String synonym, String language)
+        final String synonym, String language, MdNameNormalizer.Report yoReport)
     {
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -239,6 +252,11 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
         {
             result.put("warning", "Value added to the in-memory model but the export to the .mdo " //$NON-NLS-1$ //$NON-NLS-2$
                 + "file could not be forced: " + persistError); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", "Enum value '" + name + "' added to " + normalizedFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
