@@ -60,6 +60,34 @@ public class SetObjectPropertyToolTest
     }
 
     @Test
+    public void testDescriptionMentionsCommonProperties()
+    {
+        String desc = new SetObjectPropertyTool().getDescription();
+        assertTrue("description must mention synonym", desc.contains("synonym")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention comment", desc.contains("comment")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention objectPresentation", //$NON-NLS-1$
+            desc.contains("objectPresentation")); //$NON-NLS-1$
+        assertTrue("description must mention listPresentation", //$NON-NLS-1$
+            desc.contains("listPresentation")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDescriptionMentionsNewTypes()
+    {
+        String desc = new SetObjectPropertyTool().getDescription();
+        assertTrue("description must mention EventSubscription", desc.contains("EventSubscription")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention ScheduledJob", desc.contains("ScheduledJob")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention SessionParameter", desc.contains("SessionParameter")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention HTTPService", desc.contains("HTTPService")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention WebService", desc.contains("WebService")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention CommonCommand", desc.contains("CommonCommand")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention FunctionalOption", desc.contains("FunctionalOption")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention DocumentJournal", desc.contains("DocumentJournal")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention Sequence", desc.contains("Sequence")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention BusinessProcess", desc.contains("BusinessProcess")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
     public void testInputSchemaContainsAllParameters()
     {
         String schema = new SetObjectPropertyTool().getInputSchema();
@@ -67,6 +95,7 @@ public class SetObjectPropertyToolTest
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"objectFqn\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"properties\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"language\"")); //$NON-NLS-1$
     }
 
     @Test
