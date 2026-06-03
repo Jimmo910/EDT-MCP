@@ -42,6 +42,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.InformationRegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.Indexing;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.RegisterAttribute;
 import com._1c.g5.v8.dt.metadata.mdclass.RegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.Report;
 import com._1c.g5.v8.dt.metadata.mdclass.Task;
@@ -497,6 +498,13 @@ public class AddMetadataAttributeTool extends AbstractMetadataWriteTool
             else if (attribute instanceof RegisterDimension)
             {
                 ((RegisterDimension) attribute).setIndexing(indexing);
+            }
+            else if (attribute instanceof RegisterAttribute)
+            {
+                // Register attributes (InformationRegister/AccumulationRegister/...
+                // attributes) have no indexing property. The schema documents that
+                // 'indexing' is ignored for register attributes, so silently ignore
+                // it here rather than failing the whole call.
             }
             else
             {

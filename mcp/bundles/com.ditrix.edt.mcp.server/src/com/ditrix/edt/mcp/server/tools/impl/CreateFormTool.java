@@ -30,7 +30,6 @@ import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
-import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -244,12 +243,12 @@ public class CreateFormTool extends AbstractFormWriteTool
         final String synonymLanguage;
         if (synonym != null && !synonym.isEmpty())
         {
-            synonymLanguage = resolveLanguage(config, language);
-            if (synonymLanguage == null)
+            LanguageResolution langResolution = resolveLanguage(config, language);
+            if (langResolution.hasError())
             {
-                return ToolResult.error("Cannot determine a language code for the synonym. " + //$NON-NLS-1$
-                    "Specify 'language' explicitly (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+                return ToolResult.error(langResolution.error).toJson();
             }
+            synonymLanguage = langResolution.code;
         }
         else
         {
@@ -432,29 +431,6 @@ public class CreateFormTool extends AbstractFormWriteTool
             if (paramTypes.length == 1 && paramTypes[0].isInstance(mdForm))
             {
                 return method;
-            }
-        }
-        return null;
-    }
-
-    private static String resolveLanguage(Configuration config, String language)
-    {
-        if (language != null && !language.isEmpty())
-        {
-            return language;
-        }
-        Language defaultLanguage = config.getDefaultLanguage();
-        if (defaultLanguage != null
-            && defaultLanguage.getLanguageCode() != null
-            && !defaultLanguage.getLanguageCode().isEmpty())
-        {
-            return defaultLanguage.getLanguageCode();
-        }
-        for (Language lang : config.getLanguages())
-        {
-            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
-            {
-                return lang.getLanguageCode();
             }
         }
         return null;

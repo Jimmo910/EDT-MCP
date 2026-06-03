@@ -21,7 +21,6 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.Enum;
 import com._1c.g5.v8.dt.metadata.mdclass.EnumValue;
-import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassFactory;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com.ditrix.edt.mcp.server.Activator;
@@ -29,7 +28,6 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
-import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
  * Tool to append an {@link EnumValue} to an existing {@link Enum}.
@@ -151,27 +149,13 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
             return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
         }
 
-        String normalizedFqn = MetadataTypeUtils.normalizeFqn(enumFqn);
-        String[] parts = normalizedFqn.split("\\.", 2); //$NON-NLS-1$
-        if (parts.length < 2)
+        ObjectResolution resolution = resolveTopObject(config, enumFqn, Enum.class, "Enum"); //$NON-NLS-1$
+        if (resolution.hasError())
         {
-            return ToolResult.error("Invalid FQN: " + enumFqn + ". Expected 'Enum.Name'.").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+            return resolution.error;
         }
-        MdObject target = MetadataTypeUtils.findObject(config, parts[0], parts[1]);
-        if (target == null)
-        {
-            return ToolResult.error("Enum not found: " + normalizedFqn //$NON-NLS-1$
-                + ". Check the FQN and use get_metadata_objects to list available enums.").toJson(); //$NON-NLS-1$
-        }
-        if (!(target instanceof Enum))
-        {
-            return ToolResult.error("Object '" + normalizedFqn + "' is not an Enum (it is a " //$NON-NLS-1$ //$NON-NLS-2$
-                + target.eClass().getName() + "). add_enum_value applies to Enum only.").toJson(); //$NON-NLS-1$
-        }
-        if (!(target instanceof IBmObject))
-        {
-            return ToolResult.error("Enum is not a BM object: " + normalizedFqn).toJson(); //$NON-NLS-1$
-        }
+        String normalizedFqn = resolution.normalizedFqn;
+        MdObject target = resolution.object;
 
         // Duplicate check before the transaction.
         for (EnumValue existing : ((Enum)target).getEnumValues())
@@ -186,12 +170,12 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
         final String synonymLanguage;
         if (synonym != null && !synonym.isEmpty())
         {
-            synonymLanguage = resolveLanguage(config, language);
-            if (synonymLanguage == null)
+            LanguageResolution langResolution = resolveLanguage(config, language);
+            if (langResolution.hasError())
             {
-                return ToolResult.error("Cannot determine a language code for the synonym in this " //$NON-NLS-1$
-                    + "configuration. Specify 'language' explicitly (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+                return ToolResult.error(langResolution.error).toJson();
             }
+            synonymLanguage = langResolution.code;
         }
         else
         {
@@ -260,34 +244,6 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
             .put("message", "Enum value '" + name + "' added to " + normalizedFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + ". Run get_project_errors to verify, or get_metadata_details to confirm.") //$NON-NLS-1$
             .toJson();
-    }
-
-    /**
-     * Resolves the language code for the synonym. An explicit {@code language}
-     * wins, otherwise the configuration default language code, otherwise the
-     * first configured language code.
-     */
-    private static String resolveLanguage(Configuration config, String language)
-    {
-        if (language != null && !language.isEmpty())
-        {
-            return language;
-        }
-        Language defaultLanguage = config.getDefaultLanguage();
-        if (defaultLanguage != null
-            && defaultLanguage.getLanguageCode() != null
-            && !defaultLanguage.getLanguageCode().isEmpty())
-        {
-            return defaultLanguage.getLanguageCode();
-        }
-        for (Language lang : config.getLanguages())
-        {
-            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
-            {
-                return lang.getLanguageCode();
-            }
-        }
-        return null;
     }
 
     private static boolean isValidIdentifier(String name)

@@ -26,10 +26,13 @@ import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.Language;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.BuildUtils;
+import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.e1c.g5.v8.dt.check.ICheckScheduler;
 
 /**
@@ -185,6 +188,191 @@ public abstract class AbstractMetadataWriteTool implements IMcpTool
             return topObject.bmGetFqn();
         }
         return bmObject.bmGetFqn();
+    }
+
+    /**
+     * The outcome of resolving the language code for a localized value: either a
+     * usable code or a clear, user-facing error message.
+     */
+    protected static final class LanguageResolution
+    {
+        /** The resolved language code; {@code null} when {@link #error} is set. */
+        public final String code;
+        /** A user-facing error; {@code null} when {@link #code} is set. */
+        public final String error;
+
+        private LanguageResolution(String code, String error)
+        {
+            this.code = code;
+            this.error = error;
+        }
+
+        /** @return {@code true} when resolution failed and {@link #error} is set */
+        public boolean hasError()
+        {
+            return error != null;
+        }
+
+        static LanguageResolution ok(String code)
+        {
+            return new LanguageResolution(code, null);
+        }
+
+        static LanguageResolution failed(String error)
+        {
+            return new LanguageResolution(null, error);
+        }
+    }
+
+    /**
+     * Resolves the language code for a localized value (synonym, presentation, ...).
+     * <p>
+     * An explicit {@code language} wins, but it is first <b>validated against the
+     * configured Languages</b>: writing a synonym under a language code that the
+     * configuration does not declare stores it under a key EDT never reads, so the
+     * value is silently invisible in the editor. When {@code language} is not
+     * configured this returns an error rather than accepting it.
+     * <p>
+     * When {@code language} is {@code null}/blank, the configuration default language
+     * code is used, otherwise the first configured language code. The synonym map is
+     * keyed by the language CODE (e.g. {@code "en"}, {@code "ru"}), not the Language
+     * object's name.
+     *
+     * @param config the project configuration
+     * @param language the requested language code, or {@code null} to use the default
+     * @return a {@link LanguageResolution}; check {@link LanguageResolution#hasError()}
+     */
+    protected static LanguageResolution resolveLanguage(Configuration config, String language)
+    {
+        if (language != null && !language.isEmpty())
+        {
+            // Validate against the configured Languages: an unconfigured code would
+            // be written to a map key EDT never looks up (silently invisible).
+            for (Language lang : config.getLanguages())
+            {
+                if (lang != null && language.equals(lang.getLanguageCode()))
+                {
+                    return LanguageResolution.ok(language);
+                }
+            }
+            return LanguageResolution.failed("Language code '" + language //$NON-NLS-1$
+                + "' is not configured in this configuration. Configured languages: " //$NON-NLS-1$
+                + configuredLanguageCodes(config) + ". Use one of those codes, or omit " //$NON-NLS-1$
+                + "'language' to use the configuration default language."); //$NON-NLS-1$
+        }
+        Language defaultLanguage = config.getDefaultLanguage();
+        if (defaultLanguage != null
+            && defaultLanguage.getLanguageCode() != null
+            && !defaultLanguage.getLanguageCode().isEmpty())
+        {
+            return LanguageResolution.ok(defaultLanguage.getLanguageCode());
+        }
+        // No default language: use the first configured language code instead of a
+        // hardcoded "ru", which would be wrong for non-Russian configurations.
+        for (Language lang : config.getLanguages())
+        {
+            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
+            {
+                return LanguageResolution.ok(lang.getLanguageCode());
+            }
+        }
+        return LanguageResolution.failed("Cannot determine a language code for the localized value " //$NON-NLS-1$
+            + "in this configuration. Specify 'language' explicitly (e.g. 'en' or 'ru')."); //$NON-NLS-1$
+    }
+
+    /** Lists the configured language codes for an error message. */
+    private static String configuredLanguageCodes(Configuration config)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (Language lang : config.getLanguages())
+        {
+            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
+            {
+                if (sb.length() > 0)
+                {
+                    sb.append(", "); //$NON-NLS-1$
+                }
+                sb.append('\'').append(lang.getLanguageCode()).append('\'');
+            }
+        }
+        return sb.length() > 0 ? sb.toString() : "(none)"; //$NON-NLS-1$
+    }
+
+    /**
+     * The outcome of resolving a top-level metadata object by FQN: either the object
+     * or a ready-to-return JSON error string.
+     */
+    protected static final class ObjectResolution
+    {
+        /** The resolved object; non-null only when {@link #error} is null. */
+        public final MdObject object;
+        /** The normalized FQN that was resolved (non-null on success). */
+        public final String normalizedFqn;
+        /** Non-null when resolution failed: a JSON error to return verbatim. */
+        public final String error;
+
+        private ObjectResolution(MdObject object, String normalizedFqn, String error)
+        {
+            this.object = object;
+            this.normalizedFqn = normalizedFqn;
+            this.error = error;
+        }
+
+        /** @return {@code true} when resolution failed and {@link #error} is set */
+        public boolean hasError()
+        {
+            return error != null;
+        }
+    }
+
+    /**
+     * Resolves a top-level metadata object from an FQN: normalizes the FQN, splits
+     * the {@code Type.Name} pair, finds the object in the configuration, and verifies
+     * it is of the expected EMF type and is a BM object.
+     * <p>
+     * Centralizes the FQN-split / {@code findObject} / type-check boilerplate shared
+     * by the metadata write tools. On any failure the returned
+     * {@link ObjectResolution#error} is a ready-to-return JSON string built with the
+     * supplied {@code typeLabel}; on success {@link ObjectResolution#object} and
+     * {@link ObjectResolution#normalizedFqn} are set.
+     *
+     * @param config the project configuration
+     * @param fqn the object FQN from the tool parameters
+     * @param expectedType the required EMF type (e.g. {@code Enum.class}); may be
+     *            {@code null} to accept any {@link MdObject}
+     * @param typeLabel a short human label for the expected type (e.g. {@code "Enum"})
+     *            used in the error messages
+     * @return an {@link ObjectResolution}; check {@link ObjectResolution#hasError()}
+     */
+    protected static ObjectResolution resolveTopObject(Configuration config, String fqn,
+        Class<? extends MdObject> expectedType, String typeLabel)
+    {
+        String normalizedFqn = MetadataTypeUtils.normalizeFqn(fqn);
+        String[] parts = normalizedFqn.split("\\.", 2); //$NON-NLS-1$
+        if (parts.length < 2)
+        {
+            return new ObjectResolution(null, null,
+                ToolResult.error("Invalid FQN: " + fqn + ". Expected '" + typeLabel + ".Name'.").toJson()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        MdObject object = MetadataTypeUtils.findObject(config, parts[0], parts[1]);
+        if (object == null)
+        {
+            return new ObjectResolution(null, null,
+                ToolResult.error(typeLabel + " not found: " + normalizedFqn //$NON-NLS-1$
+                    + ". Check the FQN and use get_metadata_objects to list available objects.").toJson()); //$NON-NLS-1$
+        }
+        if (expectedType != null && !expectedType.isInstance(object))
+        {
+            return new ObjectResolution(null, null,
+                ToolResult.error("Object '" + normalizedFqn + "' is not a " + typeLabel + " (it is a " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + object.eClass().getName() + ").").toJson()); //$NON-NLS-1$
+        }
+        if (!(object instanceof IBmObject))
+        {
+            return new ObjectResolution(null, null,
+                ToolResult.error(typeLabel + " is not a BM object: " + normalizedFqn).toJson()); //$NON-NLS-1$
+        }
+        return new ObjectResolution(object, normalizedFqn, null);
     }
 
     /**

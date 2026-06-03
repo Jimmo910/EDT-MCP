@@ -28,7 +28,6 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
-import com._1c.g5.v8.dt.metadata.mdclass.Language;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ReturnValuesReuse;
 import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
@@ -372,12 +371,12 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
         final String synonymLanguage;
         if (synonym != null && !synonym.isEmpty())
         {
-            synonymLanguage = resolveLanguage(config, language);
-            if (synonymLanguage == null)
+            LanguageResolution langResolution = resolveLanguage(config, language);
+            if (langResolution.hasError())
             {
-                return ToolResult.error("Cannot determine a language code for the synonym " + //$NON-NLS-1$
-                    "in this configuration. Specify 'language' explicitly (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+                return ToolResult.error(langResolution.error).toJson();
             }
+            synonymLanguage = langResolution.code;
         }
         else
         {
@@ -489,35 +488,6 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
             .put("message", "Object '" + fqn + "' created successfully. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "Run get_project_errors to verify, or revalidate_objects if needed.") //$NON-NLS-1$
             .toJson();
-    }
-
-    private static String resolveLanguage(Configuration config, String language)
-    {
-        if (language != null && !language.isEmpty())
-        {
-            return language;
-        }
-        // The synonym map is keyed by the language CODE (e.g. "en", "ru"), not by
-        // the Language object's name (e.g. "English"). Using the name would store
-        // the synonym under a key EDT never looks up, leaving the synonym blank in
-        // the editor.
-        Language defaultLanguage = config.getDefaultLanguage();
-        if (defaultLanguage != null
-            && defaultLanguage.getLanguageCode() != null
-            && !defaultLanguage.getLanguageCode().isEmpty())
-        {
-            return defaultLanguage.getLanguageCode();
-        }
-        // No default language: use the first configured language code instead of a
-        // hardcoded "ru", which would be wrong for non-Russian configurations.
-        for (Language lang : config.getLanguages())
-        {
-            if (lang != null && lang.getLanguageCode() != null && !lang.getLanguageCode().isEmpty())
-            {
-                return lang.getLanguageCode();
-            }
-        }
-        return null;
     }
 
     private static boolean isValidIdentifier(String name)
