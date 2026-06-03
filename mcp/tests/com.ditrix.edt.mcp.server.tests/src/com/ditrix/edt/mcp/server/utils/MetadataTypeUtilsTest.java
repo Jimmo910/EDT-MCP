@@ -198,7 +198,9 @@ public class MetadataTypeUtilsTest
         assertEquals("chartsOfAccounts", MetadataTypeUtils.getConfigReferenceName("ChartOfAccounts"));
         assertEquals("filterCriteria", MetadataTypeUtils.getConfigReferenceName("FilterCriterion"));
         assertEquals("httpServices", MetadataTypeUtils.getConfigReferenceName("HTTPService"));
-        assertEquals("xdtoPackages", MetadataTypeUtils.getConfigReferenceName("XDTOPackage"));
+        // The Configuration reference keeps the leading "xDTO" casing so the EMF
+        // structural-feature lookup resolves the collection (getXDTOPackages).
+        assertEquals("xDTOPackages", MetadataTypeUtils.getConfigReferenceName("XDTOPackage"));
     }
 
     @Test
