@@ -331,10 +331,19 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to set properties: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        // Flush the edited object to its .mdo on disk and refresh stale validation
+        // markers (e.g. md-list-object-presentation) so get_project_errors is fresh.
+        String persistError = persistAndRevalidate(project, topObjectFqnOf(target));
+
         ToolResult result = ToolResult.success()
             .put("objectFqn", normalizedFqn) //$NON-NLS-1$
             .put("objectType", target.eClass().getName()) //$NON-NLS-1$
             .put("appliedProperties", plan.appliedNames); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", "Properties set in the in-memory model but the export to the " //$NON-NLS-1$ //$NON-NLS-2$
+                + ".mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
         if (yoReport.hasChanges())
         {
             result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$

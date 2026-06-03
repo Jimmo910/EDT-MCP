@@ -456,10 +456,22 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to create object: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
+        // The BM transaction registered the new top object in the in-memory model, but
+        // the model-to-file serialization runs asynchronously, so its .mdo file is not
+        // written until that background export completes. Flush it to disk and refresh
+        // validation synchronously (the same path the form tools use) using the new
+        // object's own top-object FQN.
+        String persistError = persistAndRevalidate(project, fqn);
+
         ToolResult result = ToolResult.success()
             .put("fqn", fqn) //$NON-NLS-1$
             .put("metadataType", canonicalType) //$NON-NLS-1$
             .put("name", name); //$NON-NLS-1$
+        if (persistError != null)
+        {
+            result.put("persistWarning", "Object created in the in-memory model but the export to its " //$NON-NLS-1$ //$NON-NLS-2$
+                + ".mdo file could not be forced: " + persistError); //$NON-NLS-1$
+        }
         if (commonModuleFlags != null)
         {
             result.put("commonModuleKind", commonModuleFlags.kind.token()); //$NON-NLS-1$

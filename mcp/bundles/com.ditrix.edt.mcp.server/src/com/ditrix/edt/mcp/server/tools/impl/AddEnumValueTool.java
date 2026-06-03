@@ -6,7 +6,6 @@
 
 package com.ditrix.edt.mcp.server.tools.impl;
 
-import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 
@@ -19,8 +18,6 @@ import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
-import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.Enum;
 import com._1c.g5.v8.dt.metadata.mdclass.EnumValue;
@@ -240,10 +237,11 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
 
         // The BM transaction commits the new value into the in-memory model, but the
         // model-to-file serialization runs asynchronously, so the enum's .mdo file is
-        // not updated until that background export completes. Drive the export
-        // synchronously (the same API the form tools use) so the value is queryable
-        // and persisted on disk immediately.
-        String persistError = persistEnum(project, enumTopObjectFqn);
+        // not updated until that background export completes. Drive the export and the
+        // stale-marker refresh synchronously through the shared metadata-write helper
+        // (the same path used by create_metadata_object / set_object_property), so the
+        // value is persisted on disk and queryable immediately.
+        String persistError = persistAndRevalidate(project, enumTopObjectFqn);
 
         ToolResult result = ToolResult.success()
             .put("enumFqn", normalizedFqn) //$NON-NLS-1$
@@ -262,45 +260,6 @@ public class AddEnumValueTool extends AbstractMetadataWriteTool
             .put("message", "Enum value '" + name + "' added to " + normalizedFqn //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + ". Run get_project_errors to verify, or get_metadata_details to confirm.") //$NON-NLS-1$
             .toJson();
-    }
-
-    /**
-     * Forces the synchronous export of the enum top object to its {@code .mdo} file
-     * via {@link IBmModelManager#forceExport(IDtProject, java.util.List)} - the same
-     * API EDT uses to flush a top object to disk. Returns {@code null} on success or
-     * a short diagnostic; the model change is committed in memory regardless.
-     */
-    private static String persistEnum(IProject project, String enumTopObjectFqn)
-    {
-        if (enumTopObjectFqn == null || enumTopObjectFqn.isEmpty())
-        {
-            return "enum FQN is unknown"; //$NON-NLS-1$
-        }
-        IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
-        if (dtProjectManager == null)
-        {
-            return "IDtProjectManager not available"; //$NON-NLS-1$
-        }
-        IDtProject dtProject = dtProjectManager.getDtProject(project);
-        if (dtProject == null)
-        {
-            return "could not resolve DT project"; //$NON-NLS-1$
-        }
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return "IBmModelManager not available"; //$NON-NLS-1$
-        }
-        try
-        {
-            bmModelManager.forceExport(dtProject, Collections.singletonList(enumTopObjectFqn));
-            return null;
-        }
-        catch (Exception e)
-        {
-            Activator.logError("Error exporting enum to disk: " + enumTopObjectFqn, e); //$NON-NLS-1$
-            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-        }
     }
 
     /**
