@@ -53,6 +53,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -103,6 +104,10 @@ public class RenameMetadataObjectTool implements IMcpTool
                 "Only optional changes can be disabled. Example: '2,3,5'") //$NON-NLS-1$
             .integerProperty("maxResults", //$NON-NLS-1$
                 "Max number of change points to show in preview (default 20). 0 = no limit.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "newName so the renamed object complies with the mdo-ru-name-unallowed-letter " + //$NON-NLS-1$
+                "standard; a note is added to the result. Set to false to keep it exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -132,6 +137,12 @@ public class RenameMetadataObjectTool implements IMcpTool
         boolean confirm = JsonUtils.extractBooleanArgument(params, "confirm", false); //$NON-NLS-1$
         String disableIndicesStr = JsonUtils.extractStringArgument(params, "disableIndices"); //$NON-NLS-1$
         final int maxResults = Math.max(0, JsonUtils.extractIntArgument(params, "maxResults", 20)); //$NON-NLS-1$
+
+        // Normalize the new identifier (ё->е / Ё->Е) at the input so the renamed
+        // object is stored standard-compliant; record a note for the result.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        newName = yoReport.apply("newName", newName); //$NON-NLS-1$
 
         // Parse disable indices
         java.util.Set<Integer> disableIndices = new java.util.HashSet<>();
@@ -168,12 +179,14 @@ public class RenameMetadataObjectTool implements IMcpTool
         }
 
         final java.util.Set<Integer> finalDisableIndices = disableIndices;
+        final String finalNewName = newName;
         AtomicReference<String> resultRef = new AtomicReference<>();
         Display display = PlatformUI.getWorkbench().getDisplay();
         display.syncExec(() -> {
             try
             {
-                resultRef.set(executeInternal(projectName, objectFqn, newName, confirm, finalDisableIndices, maxResults));
+                resultRef.set(executeInternal(projectName, objectFqn, finalNewName, confirm, finalDisableIndices,
+                    maxResults));
             }
             catch (Exception e)
             {
@@ -182,7 +195,14 @@ public class RenameMetadataObjectTool implements IMcpTool
             }
         });
 
-        return resultRef.get();
+        String result = resultRef.get();
+        // Surface the ё->е normalization to the caller. The result is markdown
+        // (or an "Error: ..." string); only annotate a non-error result.
+        if (yoReport.hasChanges() && result != null && !result.startsWith("Error:")) //$NON-NLS-1$
+        {
+            return "> " + yoReport.note() + "\n\n" + result; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return result;
     }
 
     private String executeInternal(String projectName, String objectFqn, String newName,

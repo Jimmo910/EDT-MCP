@@ -62,6 +62,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 import com.google.gson.JsonArray;
@@ -173,6 +174,12 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
                 "Language code (e.g. 'ru', 'en') for the localized properties " //$NON-NLS-1$
                     + "(synonym and the presentation strings). If omitted, the configuration " //$NON-NLS-1$
                     + "default language is used.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " //$NON-NLS-1$
+                    + "text properties (synonym, comment, objectPresentation, listPresentation, " //$NON-NLS-1$
+                    + "extendedObjectPresentation, extendedListPresentation) so the result complies " //$NON-NLS-1$
+                    + "with the mdo-ru-name-unallowed-letter standard; the result reports which " //$NON-NLS-1$
+                    + "fields were changed. Set to false to keep the text exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -183,6 +190,7 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         String objectFqn = JsonUtils.extractStringArgument(params, "objectFqn"); //$NON-NLS-1$
         String propertiesRaw = JsonUtils.extractStringArgument(params, "properties"); //$NON-NLS-1$
         String language = JsonUtils.extractStringArgument(params, "language"); //$NON-NLS-1$
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -204,11 +212,11 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
                 + "e.g. {\"posting\": \"Allow\", \"numberLength\": 9}.").toJson(); //$NON-NLS-1$
         }
 
-        return executeInternal(projectName, objectFqn, properties, language);
+        return executeInternal(projectName, objectFqn, properties, language, normalizeYo);
     }
 
     private String executeInternal(String projectName, String objectFqn,
-        Map<String, JsonElement> properties, String language)
+        Map<String, JsonElement> properties, String language, boolean normalizeYo)
     {
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -281,10 +289,14 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
 
         // Build the list of validated mutations BEFORE the transaction. Any unknown
         // property, irrelevant property, or unparseable value fails the whole call.
+        // The yo-normalizer is threaded through the plan context so the localized
+        // text properties (synonym, comment, presentations) are normalized at the
+        // single choke point where their string values are parsed.
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
         PlannedChanges plan;
         try
         {
-            PlanContext planCtx = new PlanContext(config, version, bmEngine, localizedLanguage);
+            PlanContext planCtx = new PlanContext(config, version, bmEngine, localizedLanguage, yoReport);
             plan = planChanges(target, normalizedFqn, properties, planCtx);
         }
         catch (PropertyException e)
@@ -319,10 +331,16 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to set properties: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        return ToolResult.success()
+        ToolResult result = ToolResult.success()
             .put("objectFqn", normalizedFqn) //$NON-NLS-1$
             .put("objectType", target.eClass().getName()) //$NON-NLS-1$
-            .put("appliedProperties", plan.appliedNames) //$NON-NLS-1$
+            .put("appliedProperties", plan.appliedNames); //$NON-NLS-1$
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
+        }
+        return result
             .put("message", "Set " + plan.appliedNames.size() + " property(ies) on " //$NON-NLS-1$ //$NON-NLS-2$
                 + normalizedFqn + ". Run get_project_errors to verify, and " //$NON-NLS-1$
                 + "export_configuration_to_xml to confirm values persisted to .mdo.") //$NON-NLS-1$
@@ -469,7 +487,7 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
     {
         if ("comment".equals(key)) //$NON-NLS-1$
         {
-            final String v = parseString(key, value);
+            final String v = planCtx.yoReport.apply(key, parseString(key, value));
             plan.add((tx, o) -> o.setComment(v));
             return;
         }
@@ -484,7 +502,7 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
                 + "Presentation strings exist on data objects such as Catalog, Document and " //$NON-NLS-1$
                 + "registers; 'synonym' exists on every metadata object."); //$NON-NLS-1$
         }
-        final String v = parseString(key, value);
+        final String v = planCtx.yoReport.apply(key, parseString(key, value));
         final String lang = planCtx.localizedLanguage;
         plan.add((tx, o) -> putLocalized(o, featureName, lang, v));
     }
@@ -1487,13 +1505,16 @@ public class SetObjectPropertyTool extends AbstractMetadataWriteTool
         final Version version;
         final IBmEngine bmEngine;
         final String localizedLanguage;
+        final MdNameNormalizer.Report yoReport;
 
-        PlanContext(Configuration config, Version version, IBmEngine bmEngine, String localizedLanguage)
+        PlanContext(Configuration config, Version version, IBmEngine bmEngine, String localizedLanguage,
+            MdNameNormalizer.Report yoReport)
         {
             this.config = config;
             this.version = version;
             this.bmEngine = bmEngine;
             this.localizedLanguage = localizedLanguage;
+            this.yoReport = yoReport;
         }
     }
 

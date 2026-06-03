@@ -80,4 +80,18 @@ public class AddEnumValueToolTest
         assertTrue("enumFqn must be required", tail.contains("\"enumFqn\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("name must be required", tail.contains("\"name\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testSchemaDeclaresNormalizeYo()
+    {
+        // S10 (#19884 / std474): optional normalizeYo flag, mentioning the ё->е fix.
+        String schema = new AddEnumValueTool().getInputSchema();
+        assertTrue("schema must declare normalizeYo", schema.contains("\"normalizeYo\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema must mention the ё->е normalization", //$NON-NLS-1$
+            schema.contains("ё") && schema.contains("е")); //$NON-NLS-1$ //$NON-NLS-2$
+        // normalizeYo is optional (not in the required array).
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertFalse("normalizeYo must not be required", //$NON-NLS-1$
+            schema.substring(requiredIdx).contains("\"normalizeYo\"")); //$NON-NLS-1$
+    }
 }

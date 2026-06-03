@@ -37,6 +37,7 @@ import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 
 /**
@@ -195,6 +196,11 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
             .stringProperty("targetNamespace", //$NON-NLS-1$
                 "XDTOPackage only. URI namespace for the new package. Defaults to " + //$NON-NLS-1$
                 "'http://example.org/<Name>' when omitted.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "name, synonym and comment so the result complies with the " + //$NON-NLS-1$
+                "mdo-ru-name-unallowed-letter standard; the result reports which fields were changed. " + //$NON-NLS-1$
+                "Set to false to keep the text exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -207,6 +213,15 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
         String synonym = JsonUtils.extractStringArgument(params, "synonym"); //$NON-NLS-1$
         String comment = JsonUtils.extractStringArgument(params, "comment"); //$NON-NLS-1$
         String language = JsonUtils.extractStringArgument(params, "language"); //$NON-NLS-1$
+
+        // Normalize user text (ё->е / Ё->Е) at the input, before identifier
+        // validation, so an identifier containing 'ё' is accepted and stored
+        // already compliant with the mdo-ru-name-unallowed-letter standard.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        name = yoReport.apply("name", name); //$NON-NLS-1$
+        synonym = yoReport.apply("synonym", synonym); //$NON-NLS-1$
+        comment = yoReport.apply("comment", comment); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -229,11 +244,12 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
                 "A name must start with a letter or underscore and contain only letters, digits and underscores.").toJson(); //$NON-NLS-1$
         }
 
-        return executeInternal(projectName, metadataType, name, synonym, comment, language, params);
+        return executeInternal(projectName, metadataType, name, synonym, comment, language, params, yoReport);
     }
 
     private String executeInternal(String projectName, String metadataType, String name,
-        String synonym, String comment, String language, Map<String, String> params)
+        String synonym, String comment, String language, Map<String, String> params,
+        MdNameNormalizer.Report yoReport)
     {
         // Resolve and validate the metadata type
         String canonicalType = MetadataTypeUtils.toEnglishSingular(metadataType);
@@ -451,6 +467,11 @@ public class CreateMetadataObjectTool extends AbstractMetadataWriteTool
         if (xdtoNamespace != null)
         {
             result.put("targetNamespace", xdtoNamespace); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", "Object '" + fqn + "' created successfully. " + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

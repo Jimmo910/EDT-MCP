@@ -28,6 +28,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.utils.AttributeTypeSpec;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.TypeDescriptionBuilder;
 
 /**
@@ -90,6 +91,10 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
                 false)
             .booleanProperty("main", //$NON-NLS-1$
                 "When true, marks the attribute as the form's main attribute (default: false).") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "When true (default), normalizes the Russian letter 'ё'->'е' / 'Ё'->'Е' in the " + //$NON-NLS-1$
+                "attributeName so the result complies with the mdo-ru-name-unallowed-letter " + //$NON-NLS-1$
+                "standard; the result reports the change. Set to false to keep it exactly as given.") //$NON-NLS-1$
             .build();
     }
 
@@ -100,6 +105,12 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
         String formFqn = JsonUtils.extractStringArgument(params, "formFqn"); //$NON-NLS-1$
         String attributeName = JsonUtils.extractStringArgument(params, "attributeName"); //$NON-NLS-1$
         boolean main = JsonUtils.extractBooleanArgument(params, "main", false); //$NON-NLS-1$
+
+        // Normalize the new identifier (ё->е / Ё->Е) at the input, before
+        // identifier validation, so it is stored standard-compliant.
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
+        MdNameNormalizer.Report yoReport = new MdNameNormalizer.Report(normalizeYo);
+        attributeName = yoReport.apply("attributeName", attributeName); //$NON-NLS-1$
 
         if (projectName == null || projectName.isEmpty())
         {
@@ -180,6 +191,7 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
 
         final long formBmId = bmIdOf(location.content);
         final boolean mainFlag = main;
+        final String attributeNameFinal = attributeName;
         final AttributeTypeSpec typeSpecFinal = typeSpec;
         final Version versionFinal = version;
         final IBmEngine bmEngine = bmModel.getEngine();
@@ -197,14 +209,14 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
                     }
                     for (FormAttribute existing : form.getAttributes())
                     {
-                        if (attributeName.equalsIgnoreCase(existing.getName()))
+                        if (attributeNameFinal.equalsIgnoreCase(existing.getName()))
                         {
-                            throw new RuntimeException("Form attribute already exists: " + attributeName); //$NON-NLS-1$
+                            throw new RuntimeException("Form attribute already exists: " + attributeNameFinal); //$NON-NLS-1$
                         }
                     }
 
                     FormAttribute attr = FormFactory.eINSTANCE.createFormAttribute();
-                    attr.setName(attributeName);
+                    attr.setName(attributeNameFinal);
                     // Attributes have their own id space, separate from form
                     // elements and commands.
                     attr.setId(nextAttributeId(form));
@@ -251,6 +263,11 @@ public class AddFormAttributeTool extends AbstractFormWriteTool
             message += " Warning: the on-disk export could not be forced (" + persistWarning //$NON-NLS-1$
                 + "); the change is committed in the model and will be written by EDT shortly."; //$NON-NLS-1$
             result.put("persistWarning", persistWarning); //$NON-NLS-1$
+        }
+        if (yoReport.hasChanges())
+        {
+            result.put("normalized", yoReport.normalizedFields()) //$NON-NLS-1$
+                .put("note", yoReport.note()); //$NON-NLS-1$
         }
         return result
             .put("message", message + " Run get_project_errors to verify.") //$NON-NLS-1$ //$NON-NLS-2$
