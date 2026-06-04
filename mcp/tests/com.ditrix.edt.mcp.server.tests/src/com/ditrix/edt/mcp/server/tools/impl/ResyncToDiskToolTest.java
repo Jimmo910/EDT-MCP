@@ -60,12 +60,49 @@ public class ResyncToDiskToolTest
     }
 
     @Test
+    public void testDescriptionMentionsDanglingCleanup()
+    {
+        String desc = new ResyncToDiskTool().getDescription();
+        assertTrue("description should mention dangling references", //$NON-NLS-1$
+            desc.toLowerCase().contains("dangling")); //$NON-NLS-1$
+        assertTrue("description should mention the danglingFound report field", //$NON-NLS-1$
+            desc.contains("danglingFound")); //$NON-NLS-1$
+        assertTrue("description should mention the danglingRemoved report field", //$NON-NLS-1$
+            desc.contains("danglingRemoved")); //$NON-NLS-1$
+        assertTrue("description should mention the cleanDanglingReferences param", //$NON-NLS-1$
+            desc.contains("cleanDanglingReferences")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testInputSchemaContainsParameters()
     {
         String schema = new ResyncToDiskTool().getInputSchema();
         assertNotNull(schema);
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"revalidate\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"cleanDanglingReferences\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCleanDanglingReferencesNotRequired()
+    {
+        String schema = new ResyncToDiskTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("cleanDanglingReferences must not be required", //$NON-NLS-1$
+            tail.contains("\"cleanDanglingReferences\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCleanDanglingReferencesIsBoolean()
+    {
+        String schema = new ResyncToDiskTool().getInputSchema();
+        int idx = schema.indexOf("\"cleanDanglingReferences\""); //$NON-NLS-1$
+        assertTrue("schema must declare cleanDanglingReferences property", idx >= 0); //$NON-NLS-1$
+        String tail = schema.substring(idx);
+        assertTrue("cleanDanglingReferences should be a boolean property", //$NON-NLS-1$
+            tail.contains("\"boolean\"")); //$NON-NLS-1$
     }
 
     @Test
