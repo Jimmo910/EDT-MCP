@@ -80,4 +80,34 @@ public class DeleteMetadataObjectToolTest
         String tail = schema.substring(requiredIdx);
         assertFalse("confirm must not be required", tail.contains("\"confirm\"")); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    @Test
+    public void testInputSchemaContainsForce()
+    {
+        String schema = new DeleteMetadataObjectTool().getInputSchema();
+        assertTrue("schema must expose the force parameter", //$NON-NLS-1$
+            schema.contains("\"force\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testForceNotRequired()
+    {
+        String schema = new DeleteMetadataObjectTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("force must not be required", tail.contains("\"force\"")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testDescriptionMentionsReferenceBlock()
+    {
+        String desc = new DeleteMetadataObjectTool().getDescription().toLowerCase();
+        assertTrue("description must explain the reference check / block behaviour", //$NON-NLS-1$
+            desc.contains("referenc") && desc.contains("block")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description must mention the force escape hatch", //$NON-NLS-1$
+            desc.contains("force")); //$NON-NLS-1$
+        assertFalse("description must drop the false 'cleans up all references' claim", //$NON-NLS-1$
+            desc.contains("cleans up all references")); //$NON-NLS-1$
+    }
 }
