@@ -18,6 +18,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.ProfilingStateRegistry;
 
 /**
  * Toggles 1C performance measurement (замер производительности) on the active
@@ -48,7 +49,11 @@ public class StartProfilingTool implements IMcpTool
     {
         return "Toggle performance measurement (замер производительности) on the active debug target. " //$NON-NLS-1$
             + "Enables line-level profiling: call counts and timing for every executed BSL line. " //$NON-NLS-1$
-            + "Call get_profiling_results after the test finishes to see which code was covered. " //$NON-NLS-1$
+            + "This is a TOGGLE: the response field 'profilingEnabled' tells you the resulting state " //$NON-NLS-1$
+            + "(true = now ON, false = now OFF). " //$NON-NLS-1$
+            + "Full sequence: start_profiling (turns ON) -> run your code/test -> start_profiling again " //$NON-NLS-1$
+            + "with the same applicationId (turns OFF) -> get_profiling_results. " //$NON-NLS-1$
+            + "Profiling data appears ONLY after the measurement is stopped (toggled OFF). " //$NON-NLS-1$
             + "Requires an active debug session (debug_launch or debug_yaxunit_tests)."; //$NON-NLS-1$
     }
 
@@ -142,13 +147,26 @@ public class StartProfilingTool implements IMcpTool
             Method toggleProfiling = profilingServiceClass.getMethod("toggleProfiling", profileTargetClass); //$NON-NLS-1$
             toggleProfiling.invoke(profilingService, profileTarget);
 
-            Activator.logInfo("Profiling toggled via IProfilingService for applicationId=" + applicationId); //$NON-NLS-1$
+            // The platform toggle succeeded: flip the in-plugin tracker and report
+            // the resulting state. The EDT profiling API has no isProfiling() query,
+            // so this tracker is the only accurate source of the ON/OFF state.
+            boolean profilingEnabled = ProfilingStateRegistry.get().toggle(applicationId);
+
+            Activator.logInfo("Profiling toggled via IProfilingService for applicationId=" + applicationId //$NON-NLS-1$
+                + " -> profilingEnabled=" + profilingEnabled); //$NON-NLS-1$
+
+            String message = profilingEnabled
+                ? "Profiling is now ON for applicationId=" + applicationId //$NON-NLS-1$
+                    + ". Run your code/test, then call start_profiling again with the same " //$NON-NLS-1$
+                    + "applicationId to STOP the measurement. Results appear ONLY after stopping." //$NON-NLS-1$
+                : "Profiling is now OFF for applicationId=" + applicationId //$NON-NLS-1$
+                    + ". The measurement is stopped — call get_profiling_results to read the data."; //$NON-NLS-1$
 
             return ToolResult.success()
                 .put("toggled", true) //$NON-NLS-1$
+                .put("profilingEnabled", profilingEnabled) //$NON-NLS-1$
                 .put("applicationId", applicationId) //$NON-NLS-1$
-                .put("message", "Profiling toggled (on↔off). This is a toggle — calling again " //$NON-NLS-1$ //$NON-NLS-2$
-                    + "will switch profiling off. Run your test, then call get_profiling_results.") //$NON-NLS-1$
+                .put("message", message) //$NON-NLS-1$
                 .toJson();
         }
         catch (Exception e)

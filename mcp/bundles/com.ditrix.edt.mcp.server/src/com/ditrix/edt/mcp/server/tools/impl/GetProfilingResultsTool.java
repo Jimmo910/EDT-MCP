@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.debug.core.model.IDebugTarget;
 import org.osgi.framework.Bundle;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -20,6 +21,8 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.ProfilingStateRegistry;
 
 /**
  * Retrieves profiling (замер производительности) results after a debug session.
@@ -39,6 +42,12 @@ public class GetProfilingResultsTool implements IMcpTool
     /** Max lines per module in output to avoid response explosion. */
     private static final int MAX_LINES_PER_MODULE = 200;
 
+    /** Max time to poll getResults() after an autoStop, since data arrives asynchronously. */
+    private static final long AUTOSTOP_POLL_TIMEOUT_MS = 5000;
+
+    /** Poll interval while waiting for asynchronous profiling results after autoStop. */
+    private static final long AUTOSTOP_POLL_INTERVAL_MS = 250;
+
     @Override
     public String getName()
     {
@@ -50,7 +59,12 @@ public class GetProfilingResultsTool implements IMcpTool
     {
         return "Get profiling (performance measurement) results after a debug session. " //$NON-NLS-1$
             + "Returns per-module, per-line data: call count, timing, percentage. " //$NON-NLS-1$
-            + "Optionally filter by module name. Call after start_profiling + test run."; //$NON-NLS-1$
+            + "IMPORTANT: results appear ONLY after the measurement is STOPPED. Sequence: " //$NON-NLS-1$
+            + "start_profiling (turns ON) -> run your code/test -> start_profiling again with the " //$NON-NLS-1$
+            + "same applicationId (turns OFF) -> get_profiling_results. " //$NON-NLS-1$
+            + "If profiling is still active when you call this, you get count=0 and a hint to stop it first. " //$NON-NLS-1$
+            + "Shortcut: pass autoStop=true with the applicationId and this tool will stop the active " //$NON-NLS-1$
+            + "measurement itself, then wait for the data. Optionally filter by module name."; //$NON-NLS-1$
     }
 
     @Override
@@ -59,6 +73,10 @@ public class GetProfilingResultsTool implements IMcpTool
         return JsonSchemaBuilder.object()
             .stringProperty("moduleFilter", "Optional substring filter on module name") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("minFrequency", "Only include lines called at least N times (default: 1)") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("autoStop", "If true and a measurement is currently active, stop it " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(toggle profiling OFF) before reading results. Requires applicationId. Default: false.") //$NON-NLS-1$
+            .stringProperty("applicationId", "Application id of the debug session whose measurement to " //$NON-NLS-1$ //$NON-NLS-2$
+                + "stop when autoStop=true (the same id passed to start_profiling).") //$NON-NLS-1$
             .build();
     }
 
@@ -73,6 +91,8 @@ public class GetProfilingResultsTool implements IMcpTool
     {
         String moduleFilter = JsonUtils.extractStringArgument(params, "moduleFilter"); //$NON-NLS-1$
         int minFrequency = JsonUtils.extractIntArgument(params, "minFrequency", 1); //$NON-NLS-1$
+        boolean autoStop = JsonUtils.extractBooleanArgument(params, "autoStop", false); //$NON-NLS-1$
+        String applicationId = JsonUtils.extractStringArgument(params, "applicationId"); //$NON-NLS-1$
 
         try
         {
@@ -101,15 +121,54 @@ public class GetProfilingResultsTool implements IMcpTool
 
             // IProfilingService.getResults() → List<IProfilingResult>
             Method getResults = profilingServiceClass.getMethod("getResults"); //$NON-NLS-1$
+
+            // Optional autoStop: if a measurement is currently active and the caller
+            // asked us to stop it, toggle profiling OFF and poll for the async results.
+            boolean autoStopped = false;
+            if (autoStop && applicationId != null && !applicationId.isEmpty()
+                && ProfilingStateRegistry.get().isActive(applicationId))
+            {
+                autoStopped = stopMeasurement(applicationId, profilingService, profilingServiceClass);
+            }
+
             List<?> results = (List<?>) getResults.invoke(profilingService);
+
+            if (autoStopped && (results == null || results.isEmpty()))
+            {
+                // Results arrive asynchronously after the stop — poll for a short while.
+                long deadline = System.currentTimeMillis() + AUTOSTOP_POLL_TIMEOUT_MS;
+                while ((results == null || results.isEmpty()) && System.currentTimeMillis() < deadline)
+                {
+                    Thread.sleep(AUTOSTOP_POLL_INTERVAL_MS);
+                    results = (List<?>) getResults.invoke(profilingService);
+                }
+            }
 
             if (results == null || results.isEmpty())
             {
-                return ToolResult.success()
-                    .put("count", 0) //$NON-NLS-1$
-                    .put("message", "No profiling results available. " //$NON-NLS-1$ //$NON-NLS-2$
-                        + "Make sure you called start_profiling before running the test.") //$NON-NLS-1$
-                    .toJson();
+                ProfilingStateRegistry stateRegistry = ProfilingStateRegistry.get();
+                ToolResult empty = ToolResult.success().put("count", 0); //$NON-NLS-1$
+                if (stateRegistry.anyActive())
+                {
+                    // A measurement is still running: that is why there are no results yet.
+                    List<String> active = stateRegistry.activeApplicationIds();
+                    String idHint = active.size() == 1 ? active.get(0) : "the same applicationId"; //$NON-NLS-1$
+                    empty.put("profilingActive", true) //$NON-NLS-1$
+                        .put("activeApplicationIds", active) //$NON-NLS-1$
+                        .put("message", "Profiling is still active — stop it by calling start_profiling " //$NON-NLS-1$ //$NON-NLS-2$
+                            + "again (with " + idHint + "), then retry get_profiling_results. " //$NON-NLS-1$ //$NON-NLS-2$
+                            + "Results are only available after the measurement is stopped. " //$NON-NLS-1$
+                            + "(Shortcut: call get_profiling_results with autoStop=true and applicationId.)"); //$NON-NLS-1$
+                }
+                else
+                {
+                    empty.put("profilingActive", false) //$NON-NLS-1$
+                        .put("message", "No profiling results available. Run the full sequence: " //$NON-NLS-1$ //$NON-NLS-2$
+                            + "start_profiling (turns profiling ON) -> run your code/test -> " //$NON-NLS-1$
+                            + "start_profiling again (turns it OFF) -> get_profiling_results. " //$NON-NLS-1$
+                            + "Data appears only after the measurement is stopped."); //$NON-NLS-1$
+                }
+                return empty.toJson();
             }
 
             // Process each IProfilingResult
@@ -206,6 +265,7 @@ public class GetProfilingResultsTool implements IMcpTool
 
             return ToolResult.success()
                 .put("count", resultSummaries.size()) //$NON-NLS-1$
+                .put("autoStopped", autoStopped) //$NON-NLS-1$
                 .put("results", resultSummaries) //$NON-NLS-1$
                 .toJson();
         }
@@ -214,5 +274,57 @@ public class GetProfilingResultsTool implements IMcpTool
             Activator.logError("Error in get_profiling_results", e); //$NON-NLS-1$
             return ToolResult.error("Error: " + e.getMessage()).toJson(); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Stops the active measurement for the given application by toggling profiling
+     * OFF through {@code IProfileTarget.toggleProfiling(...)}, mirroring
+     * {@code StartProfilingTool}. Updates the {@link ProfilingStateRegistry} on
+     * success so the tracked state stays consistent.
+     *
+     * @return {@code true} if the measurement was actually toggled off, {@code false}
+     *         if the target could not be resolved/adapted (state left unchanged)
+     */
+    private boolean stopMeasurement(String applicationId, Object profilingService,
+        Class<?> profilingServiceClass) throws Exception
+    {
+        IDebugTarget target = DebugSessionRegistry.findActiveTarget(applicationId);
+        if (target == null)
+        {
+            // The debug session is gone; we can no longer toggle. Mark inactive so
+            // the "still active" hint does not keep firing for a dead session.
+            ProfilingStateRegistry.get().setInactive(applicationId);
+            Activator.logInfo("autoStop: no active debug target for applicationId=" + applicationId //$NON-NLS-1$
+                + "; marked profiling inactive."); //$NON-NLS-1$
+            return false;
+        }
+
+        Bundle profilingBundle = Platform.getBundle(PROFILING_CORE_BUNDLE);
+        Class<?> profileTargetClass = profilingBundle.loadClass(
+            "com._1c.g5.v8.dt.profiling.core.IProfileTarget"); //$NON-NLS-1$
+
+        Object profileTarget;
+        if (profileTargetClass.isInstance(target))
+        {
+            profileTarget = target;
+        }
+        else
+        {
+            profileTarget = target.getAdapter(profileTargetClass);
+        }
+        if (profileTarget == null)
+        {
+            Activator.logInfo("autoStop: debug target does not support profiling for applicationId=" //$NON-NLS-1$
+                + applicationId); //$NON-NLS-1$
+            return false;
+        }
+
+        Method toggleProfiling = profilingServiceClass.getMethod("toggleProfiling", profileTargetClass); //$NON-NLS-1$
+        toggleProfiling.invoke(profilingService, profileTarget);
+
+        // Reflect the OFF state in the tracker.
+        ProfilingStateRegistry.get().setInactive(applicationId);
+        Activator.logInfo("autoStop: profiling toggled OFF for applicationId=" + applicationId); //$NON-NLS-1$
+        return true;
     }
 }
