@@ -109,6 +109,16 @@ public class GetVariablesTool implements IMcpTool
                 DebugSessionRegistry.SuspendSnapshot snap = appId != null ? registry.getSnapshot(appId) : null;
                 if (snap == null)
                 {
+                    // Also try the lone debug-server target (debug_yaxunit_tests server suspend).
+                    com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport.ServerTarget lone =
+                        com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport.findLoneServerTarget();
+                    if (lone != null)
+                    {
+                        snap = registry.getSnapshot(lone.applicationId);
+                    }
+                }
+                if (snap == null)
+                {
                     return ToolResult.error("Provide frameRef or threadId — no single suspended debug " //$NON-NLS-1$
                         + "launch available for auto-resolution. Call wait_for_break first.").toJson(); //$NON-NLS-1$
                 }
