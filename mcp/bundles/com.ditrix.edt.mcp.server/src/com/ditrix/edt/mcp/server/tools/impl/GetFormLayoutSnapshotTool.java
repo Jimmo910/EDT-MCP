@@ -266,10 +266,15 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
             // renders the same way (and the form model becomes resolvable through the editor).
             EditorScreenshotHelper.ensureBufferedNativeRenderMode();
 
-            String openError = EditorScreenshotHelper.openAndActivateForm(projectName, formPath);
-            if (openError != null)
+            // Open the requested form and resolve its WYSIWYG page from the editor that was actually
+            // opened (findPage), not from the global active form editor. This keeps the snapshot and
+            // screenshot tools on the same correct open+activate+page path so both always read the
+            // requested form (the wrong-form defect, Bitrix #19889).
+            EditorScreenshotHelper.OpenFormResult openResult =
+                EditorScreenshotHelper.openForm(projectName, formPath);
+            if (!openResult.isSuccess())
             {
-                throw new IllegalStateException(extractToolErrorMessage(openError));
+                throw new IllegalStateException(extractToolErrorMessage(openResult.getError()));
             }
 
             Display display = Display.getCurrent();
@@ -279,7 +284,7 @@ public class GetFormLayoutSnapshotTool implements IMcpTool
                 Thread.sleep(100);
             }
 
-            return EditorScreenshotHelper.waitForFormEditorPage();
+            return EditorScreenshotHelper.waitForFormEditorPageOf(openResult.getEditorPart());
         }
 
         return EditorScreenshotHelper.getActiveFormEditorPage();

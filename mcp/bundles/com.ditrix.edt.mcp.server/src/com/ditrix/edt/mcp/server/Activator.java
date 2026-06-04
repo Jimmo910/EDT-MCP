@@ -858,6 +858,101 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
+     * Returns the {@link IModelObjectFactory} that creates <em>form-model</em>
+     * objects (everything under {@code com._1c.g5.v8.dt.form.model}: the content
+     * {@link com._1c.g5.v8.dt.form.model.Form}, {@code AutoCommandBar},
+     * {@code FormCommandInterface}, …) with EDT default content — the same
+     * factory ({@code com._1c.g5.v8.dt.form.FormObjectFactory}) the "New form"
+     * wizard uses.
+     * <p>
+     * This is a <strong>different</strong> factory from
+     * {@link #getModelObjectFactory()}: that one is bound in the MD language
+     * injector and only knows the {@code mdclass} EPackage (Catalog, Document,
+     * …); it cannot create form-model objects. A {@code Form} built with the MD
+     * factory (or a bare {@code FormFactory.eINSTANCE.createForm()}) is missing
+     * the predefined {@code autoCommandBar} that EDT's WYSIWYG layout generator
+     * ({@code HippoGenerator.readElement}) unconditionally reads for a
+     * {@code CommandBarHolder}: it calls
+     * {@code findHGClass(ctx, form.getAutoCommandBar(), false)} and, when the
+     * command bar is {@code null}, throws {@code IllegalArgumentException} —
+     * aborting layout generation, so the form does not render. Creating the form
+     * through this factory gives it the full wizard default structure (auto
+     * command bar, command interface, group/title/… flags) and makes it render.
+     * <p>
+     * The factory is a Guice {@code @Singleton} in the form bundle's injector, so
+     * it must be pulled from there (reaching the bundle's internal
+     * {@code FormPlugin} reflectively), exactly like
+     * {@link #getFormItemInformationService()}. Returns {@code null} when the form
+     * bundle or its injector is not available; the reason is recorded via
+     * {@link #getFormItemInformationServiceDiagnostic()} (shared diagnostic).
+     *
+     * @return the form-model object factory, or {@code null} if unavailable
+     */
+    public IModelObjectFactory getFormModelObjectFactory()
+    {
+        lastFormServiceDiagnostic = null;
+        Bundle formBundle = Platform.getBundle(FORM_BUNDLE_ID);
+        if (formBundle == null)
+        {
+            lastFormServiceDiagnostic =
+                "form bundle '" + FORM_BUNDLE_ID + "' not found in the running platform"; //$NON-NLS-1$ //$NON-NLS-2$
+            logError(lastFormServiceDiagnostic, null);
+            return null;
+        }
+
+        String activationProblem = ensureFormBundleActive(formBundle);
+
+        try
+        {
+            Class<?> formPluginClass = formBundle.loadClass(FORM_PLUGIN_CLASS);
+            Method getDefaultMethod = formPluginClass.getMethod("getDefault"); //$NON-NLS-1$
+            getDefaultMethod.setAccessible(true);
+            Object formPlugin = getDefaultMethod.invoke(null);
+            if (formPlugin == null)
+            {
+                lastFormServiceDiagnostic = "FormPlugin.getDefault() is null (form bundle state=" //$NON-NLS-1$
+                    + bundleStateName(formBundle.getState()) + ")" //$NON-NLS-1$
+                    + (activationProblem != null ? "; activation: " + activationProblem : ""); //$NON-NLS-1$ //$NON-NLS-2$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+
+            Method getInjectorMethod = formPluginClass.getMethod("getInjector"); //$NON-NLS-1$
+            getInjectorMethod.setAccessible(true);
+            Object injectorObj = getInjectorMethod.invoke(formPlugin);
+            if (!(injectorObj instanceof Injector))
+            {
+                lastFormServiceDiagnostic = "FormPlugin.getInjector() returned " //$NON-NLS-1$
+                    + (injectorObj == null ? "null" : "a " + injectorObj.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " not assignable to com.google.inject.Injector"); //$NON-NLS-1$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+
+            Injector injector = (Injector)injectorObj;
+            IModelObjectFactory factory = injector.getInstance(IModelObjectFactory.class);
+            if (factory == null)
+            {
+                lastFormServiceDiagnostic = "injector.getInstance(IModelObjectFactory) returned null"; //$NON-NLS-1$
+                logError(lastFormServiceDiagnostic, null);
+                return null;
+            }
+            return factory;
+        }
+        catch (Throwable e)
+        {
+            Throwable root = rootCause(e);
+            lastFormServiceDiagnostic = "obtaining the form IModelObjectFactory threw " //$NON-NLS-1$
+                + root.getClass().getName()
+                + (root.getMessage() != null ? ": " + root.getMessage() : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + (activationProblem != null ? " (activation: " + activationProblem + ")" : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            logError("Failed to obtain the form IModelObjectFactory from the form bundle injector: " //$NON-NLS-1$
+                + lastFormServiceDiagnostic, e);
+            return null;
+        }
+    }
+
+    /**
      * Returns the com._1c.g5.v8.dt.cli.api.workspace.IExportConfigurationFilesApi
      * (EDT "Export → Configuration to XML Files" action) — typed as
      * {@code Object}, callers invoke via reflection. Returns null when

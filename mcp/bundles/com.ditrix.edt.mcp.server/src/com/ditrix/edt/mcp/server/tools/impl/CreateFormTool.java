@@ -26,8 +26,11 @@ import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.form.model.AutoCommandBar;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormFactory;
+import com._1c.g5.v8.dt.form.model.FormPackage;
+import com._1c.g5.v8.dt.form.model.ItemHorizontalAlignment;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
@@ -216,6 +219,17 @@ public class CreateFormTool extends AbstractFormWriteTool
             return ToolResult.error("IModelObjectFactory not available").toJson(); //$NON-NLS-1$
         }
 
+        // The content Form must be built by the FORM model factory (the same
+        // FormObjectFactory the "New form" wizard uses), not by the MD factory
+        // and not by a bare FormFactory.createForm(). Only the form factory fills
+        // the predefined autoCommandBar (plus command interface and the form-level
+        // flags); without the autoCommandBar EDT's WYSIWYG layout generator
+        // (HippoGenerator.readElement -> findHGClass(null)) throws
+        // IllegalArgumentException and the form never renders. May be null if the
+        // form bundle injector is unavailable; we fall back to a manual minimal-
+        // but-renderable build inside the transaction.
+        final IModelObjectFactory formFactory = Activator.getDefault().getFormModelObjectFactory();
+
         IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
         if (bmModelManager == null)
         {
@@ -290,8 +304,13 @@ public class CreateFormTool extends AbstractFormWriteTool
                         mdForm.getSynonym().put(synonymLanguage, synonym);
                     }
 
-                    // (2) Create the empty content form.
-                    Form content = FormFactory.eINSTANCE.createForm();
+                    // (2) Create the content form with EDT's default structure.
+                    // Built by the FORM model factory so it gets the predefined
+                    // autoCommandBar (and command interface / form flags) the
+                    // WYSIWYG layout generator requires; otherwise rendering
+                    // crashes in HippoGenerator.findHGClass(null). Falls back to a
+                    // manual minimal-but-renderable build if the factory is absent.
+                    Form content = createContentForm(formFactory, freshOwner, version);
 
                     // (3) Link MD-form <-> content form (both directions).
                     mdForm.setForm(content);
@@ -389,6 +408,72 @@ public class CreateFormTool extends AbstractFormWriteTool
         return result
             .put("message", message) //$NON-NLS-1$
             .toJson();
+    }
+
+    /**
+     * Creates the content {@link Form} with EDT's default structure.
+     * <p>
+     * Prefers the FORM model factory ({@code FormObjectFactory}, resolved from
+     * the form bundle injector) — calling
+     * {@code create(FormPackage.Literals.FORM, owner, version)} produces exactly
+     * what the "New form" wizard builds: a {@link Form} whose predefined
+     * {@code autoCommandBar} is set, along with the command interface and the
+     * form-level flags ({@code autoTitle}, {@code group}, …). The
+     * {@code autoCommandBar} is the part the WYSIWYG layout generator requires:
+     * {@code HippoGenerator.readElement} unconditionally calls
+     * {@code findHGClass(ctx, form.getAutoCommandBar(), false)} for the form
+     * (a {@code CommandBarHolder}) and throws {@code IllegalArgumentException}
+     * when it is {@code null}, aborting layout generation so nothing renders.
+     * <p>
+     * If the form factory is unavailable, falls back to a manual build that still
+     * attaches a minimal valid {@code autoCommandBar} so the form renders.
+     *
+     * @param formFactory the FORM model factory, or {@code null} if unavailable
+     * @param owner the owner metadata object (passed as the creation parent)
+     * @param version the platform version
+     * @return a content {@link Form} that renders in the WYSIWYG editor
+     */
+    private Form createContentForm(IModelObjectFactory formFactory, MdObject owner, Version version)
+    {
+        if (formFactory != null)
+        {
+            Form content = formFactory.create(FormPackage.Literals.FORM, owner, version);
+            if (content != null)
+            {
+                // Guard against a future factory change that stops seeding the
+                // command bar: ensure the render-critical element is present.
+                if (content.getAutoCommandBar() == null)
+                {
+                    content.setAutoCommandBar(createDefaultAutoCommandBar());
+                }
+                return content;
+            }
+        }
+        // Fallback: bare form plus the render-critical autoCommandBar.
+        Form content = FormFactory.eINSTANCE.createForm();
+        content.setAutoCommandBar(createDefaultAutoCommandBar());
+        return content;
+    }
+
+    /**
+     * Builds the form's predefined automatic command bar, mirroring
+     * {@code FormObjectFactory.newAutoCommandBar}: {@code autoFill = true},
+     * {@code horizontalAlign = LEFT}. The id is set to {@code -1}, the sentinel
+     * EDT persists for a form's own predefined command bar (see any
+     * EDT-authored {@code Form.form}), keeping it out of the regular element id
+     * space. A name is assigned so the element is well-formed; EDT renames
+     * predefined items to their canonical names on the next form sync.
+     *
+     * @return a renderable {@link AutoCommandBar}
+     */
+    private AutoCommandBar createDefaultAutoCommandBar()
+    {
+        AutoCommandBar bar = FormFactory.eINSTANCE.createAutoCommandBar();
+        bar.setAutoFill(true);
+        bar.setHorizontalAlign(ItemHorizontalAlignment.LEFT);
+        bar.setId(-1);
+        bar.setName("ФормаКоманднаяПанель"); //$NON-NLS-1$
+        return bar;
     }
 
     /**

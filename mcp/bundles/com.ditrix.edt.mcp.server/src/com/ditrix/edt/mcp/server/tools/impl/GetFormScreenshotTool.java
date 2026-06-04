@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.swt.graphics.ImageData;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorPart;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -115,16 +116,26 @@ public class GetFormScreenshotTool implements IMcpTool
         try
         {
             Object editorPage;
+            boolean formRequested = formPath != null && !formPath.isEmpty();
 
-            if (formPath != null && !formPath.isEmpty())
+            if (formRequested)
             {
                 EditorScreenshotHelper.ensureBufferedNativeRenderMode();
 
-                String openError = EditorScreenshotHelper.openAndActivateForm(projectName, formPath);
-                if (openError != null)
+                // Open the requested form and keep a direct handle on the editor that was opened
+                // for it. The image MUST come from this editor's own WYSIWYG representation, not
+                // from the globally active form editor: previously this tool resolved the page via
+                // FormEditor.getActiveFormEditorPage(), which returns whatever form editor currently
+                // has workbench focus, so a previously rendered/active form (e.g. DataProcessor.X)
+                // was captured instead of the requested one (Bitrix #19889).
+                EditorScreenshotHelper.OpenFormResult openResult =
+                    EditorScreenshotHelper.openForm(projectName, formPath);
+                if (!openResult.isSuccess())
                 {
-                    return CaptureResult.error(openError);
+                    return CaptureResult.error(openResult.getError());
                 }
+
+                IEditorPart editorPart = openResult.getEditorPart();
 
                 // Let UI settle after activation
                 Display display = Display.getCurrent();
@@ -134,12 +145,27 @@ public class GetFormScreenshotTool implements IMcpTool
                     Thread.sleep(100);
                 }
 
-                editorPage = EditorScreenshotHelper.waitForFormEditorPage();
+                // Resolve the WYSIWYG page from THIS editor part (findPage), not the global active
+                // page, so the page is guaranteed to belong to the requested form.
+                editorPage = EditorScreenshotHelper.waitForFormEditorPageOf(editorPart);
                 if (editorPage == null)
                 {
                     return CaptureResult.error(ToolResult.error(
                         "Form editor opened but WYSIWYG page is not available. " + //$NON-NLS-1$
                         "The form may still be loading.").toJson()); //$NON-NLS-1$
+                }
+
+                // Identity guard: confirm the opened editor actually corresponds to the requested
+                // form before reading its image. If it does not match, fail explicitly rather than
+                // return another form's PNG (the silent wrong-form defect, Bitrix #19889).
+                String actualFqn = EditorScreenshotHelper.getFormEditorFqn(editorPart);
+                if (actualFqn != null && !EditorScreenshotHelper.fqnMatchesFormPath(actualFqn, formPath))
+                {
+                    return CaptureResult.error(ToolResult.error(
+                        "Captured form editor does not match the requested form. Requested '" //$NON-NLS-1$
+                        + formPath + "' but the active editor is '" + actualFqn //$NON-NLS-1$
+                        + "'. No screenshot was taken to avoid returning the wrong form's image; " //$NON-NLS-1$
+                        + "try again once the requested form's editor is fully open.").toJson()); //$NON-NLS-1$
                 }
             }
             else
@@ -159,24 +185,63 @@ public class GetFormScreenshotTool implements IMcpTool
                 return CaptureResult.error(ToolResult.error("WYSIWYG viewer is not available").toJson()); //$NON-NLS-1$
             }
 
+            Object representation = EditorScreenshotHelper.getRepresentation(wysiwygViewer);
+            if (representation == null)
+            {
+                return CaptureResult.error(
+                    ToolResult.error("WYSIWYG representation is not available").toJson()); //$NON-NLS-1$
+            }
+
+            // Image-level identity guard (Bitrix #19889 stale-image defect). The form image is read
+            // from the representation's own form model: in the rebuild task the image and the layout
+            // are produced together from a single createHippoSession(tx, this.form, ...) call, so the
+            // pixels belong to whatever form THIS representation renders. Confirm that model is the
+            // requested form before trusting the image. The shared HippoLayoutService singleton paints
+            // every form into ONE memory-mapped offscreen buffer, so an editor-input FQN match alone
+            // does not prove the buffer (and thus the image) was repainted for the requested form.
+            if (formRequested && !EditorScreenshotHelper.representationFormMatches(representation, formPath))
+            {
+                return CaptureResult.error(ToolResult.error(
+                    "The WYSIWYG editor for '" + formPath + "' does not render the requested form model. " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "No screenshot was taken to avoid returning another form's image " //$NON-NLS-1$
+                    + "(Bitrix #19889); try again once the requested form's editor is fully open.").toJson()); //$NON-NLS-1$
+            }
+
             if (refresh)
             {
                 EditorScreenshotHelper.refreshViewer(wysiwygViewer);
             }
 
-            // The form layout is produced by an asynchronous native render; on the first call
-            // right after opening (or changing) a form the image is not ready yet. Wait until the
-            // render produces a non-empty image instead of returning an empty/blank result.
-            final Object viewer = wysiwygViewer;
-            Object representation = EditorScreenshotHelper.getRepresentation(viewer);
-            boolean rendered = EditorScreenshotHelper.waitUntilRendered(viewer,
-                () -> EditorScreenshotHelper.readFormImageData(representation) != null);
+            // Ensure THIS representation's form is rendered into its formImageData and wait (bounded)
+            // until that image is non-empty before reading it. Correctness comes from the identity guard
+            // above (representationFormMatches): the image and the layout are produced together from a
+            // single createHippoSession(tx, this.form, ...) call, so a non-empty image on a representation
+            // whose own form IS the requested form is the requested form's image. We deliberately do NOT
+            // require a brand-new ImageData instance: in this detached/MCP-driven EDT the native render
+            // reuses the existing instance, so the old "must be a NEW instance" gate was never satisfied
+            // and suppressed screenshots for every form (including renderable ones). ensureRenderedFormImage
+            // best-effort triggers a synchronous render to populate the buffer, but falls through to the
+            // already-present (identity-verified) image when it exists. Only fail if no image is produced.
+            boolean rendered = EditorScreenshotHelper.ensureRenderedFormImage(representation);
+            if (formRequested && !rendered)
+            {
+                return CaptureResult.error(ToolResult.error(
+                    "Could not render the requested form '" + formPath //$NON-NLS-1$
+                    + "' in time, so no screenshot was taken. Its WYSIWYG representation produced no " //$NON-NLS-1$
+                    + "image (formImageData is empty) within the wait budget. " //$NON-NLS-1$
+                    + "Ensure EDT runs with buffered native render " //$NON-NLS-1$
+                    + "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson()); //$NON-NLS-1$
+            }
 
-            // Primary method: extract image from representation (rebuild + read).
-            ImageData imageData = EditorScreenshotHelper.extractFormImageData(wysiwygViewer);
+            // Read the (identity-verified) rendered image from this representation. For a requested form
+            // this is the requested form's image: representationFormMatches proved the representation's
+            // own form IS the requested form, and ensureRenderedFormImage confirmed formImageData is
+            // non-empty.
+            ImageData imageData = EditorScreenshotHelper.readFormImageData(representation);
 
-            // Fallback: capture control via print
-            if (imageData == null)
+            // Fallback: capture control via print (only used for the active-editor case with no
+            // explicit formPath; for a requested form the image above is already the correct one).
+            if (imageData == null && !formRequested)
             {
                 imageData = EditorScreenshotHelper.captureControlImageData(wysiwygViewer);
             }
