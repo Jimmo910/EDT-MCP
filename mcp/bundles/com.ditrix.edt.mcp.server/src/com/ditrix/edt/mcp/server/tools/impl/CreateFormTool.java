@@ -28,6 +28,8 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.form.model.AutoCommandBar;
 import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormChildrenGroup;
+import com._1c.g5.v8.dt.form.model.FormCommandInterface;
 import com._1c.g5.v8.dt.form.model.FormFactory;
 import com._1c.g5.v8.dt.form.model.FormPackage;
 import com._1c.g5.v8.dt.form.model.ItemHorizontalAlignment;
@@ -435,24 +437,72 @@ public class CreateFormTool extends AbstractFormWriteTool
      */
     private Form createContentForm(IModelObjectFactory formFactory, MdObject owner, Version version)
     {
+        Form content = null;
         if (formFactory != null)
         {
-            Form content = formFactory.create(FormPackage.Literals.FORM, owner, version);
-            if (content != null)
-            {
-                // Guard against a future factory change that stops seeding the
-                // command bar: ensure the render-critical element is present.
-                if (content.getAutoCommandBar() == null)
-                {
-                    content.setAutoCommandBar(createDefaultAutoCommandBar());
-                }
-                return content;
-            }
+            content = formFactory.create(FormPackage.Literals.FORM, owner, version);
         }
-        // Fallback: bare form plus the render-critical autoCommandBar.
-        Form content = FormFactory.eINSTANCE.createForm();
-        content.setAutoCommandBar(createDefaultAutoCommandBar());
+        if (content == null)
+        {
+            // Fallback: bare form when the FORM model factory is unavailable.
+            content = FormFactory.eINSTANCE.createForm();
+        }
+        // Guard against the factory not running (its injector may be absent in
+        // this environment) or a future factory change that stops seeding the
+        // command bar: ensure the render-critical element is present.
+        if (content.getAutoCommandBar() == null)
+        {
+            content.setAutoCommandBar(createDefaultAutoCommandBar());
+        }
+        // Apply the standard form-level defaults a manually-created form has.
+        // FormObjectFactory normally sets these, but it does not resolve/run in
+        // this environment (only the safety-net above runs), which would leave
+        // the form degenerate (every form flag unchecked, no command interface).
+        // We therefore set them explicitly here, AFTER the factory attempt, so
+        // they hold whether or not the factory ran.
+        applyFormDefaults(content);
         return content;
+    }
+
+    /**
+     * Sets the standard default form-level properties that a managed form
+     * created manually in EDT has, so an MCP-created form matches the reference
+     * regardless of whether {@code FormObjectFactory} resolved and ran.
+     * <p>
+     * Mirrors an empty form authored in EDT (e.g.
+     * {@code Catalogs/.../Forms/.../Form.form}): the form flags
+     * ({@code saveWindowSettings}, {@code autoTitle}, {@code autoUrl},
+     * {@code autoFillCheck}, {@code allowFormCustomize}, {@code enabled},
+     * {@code showTitle}, {@code showCloseButton}) are {@code true}, the children
+     * grouping is {@link FormChildrenGroup#VERTICAL} (serialized
+     * {@code <group>Vertical</group>}), and the form has a
+     * {@link FormCommandInterface} with an (empty) navigation panel and command
+     * bar (serialized {@code <commandInterface><navigationPanel/><commandBar/>
+     * </commandInterface>}). The {@code autoCommandBar} is created separately
+     * (it is render-critical); this method does not touch it.
+     *
+     * @param form the content form to populate with defaults
+     */
+    private void applyFormDefaults(Form form)
+    {
+        form.setSaveWindowSettings(true);
+        form.setAutoTitle(true);
+        form.setAutoUrl(true);
+        form.setAutoFillCheck(true);
+        form.setAllowFormCustomize(true);
+        form.setEnabled(true);
+        form.setShowTitle(true);
+        form.setShowCloseButton(true);
+        form.setGroup(FormChildrenGroup.VERTICAL);
+
+        // Command interface: a FormCommandInterface holding an (empty)
+        // navigation panel and command bar, each a FormCommandInterfaceItems.
+        // Setting empty instances (rather than leaving them null) reproduces the
+        // reference's empty <navigationPanel/> and <commandBar/> elements.
+        FormCommandInterface commandInterface = FormFactory.eINSTANCE.createFormCommandInterface();
+        commandInterface.setNavigationPanel(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
+        commandInterface.setCommandBar(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
+        form.setCommandInterface(commandInterface);
     }
 
     /**
