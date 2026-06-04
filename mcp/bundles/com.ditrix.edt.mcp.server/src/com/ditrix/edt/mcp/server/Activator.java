@@ -626,6 +626,53 @@ public class Activator extends AbstractUIPlugin
         return null;
     }
 
+    /** Exported manager interface that lists 1C debug-server targets (incl. UI-launched). */
+    private static final String RUNTIME_DEBUG_TARGET_MANAGER_CLASS =
+        "com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTargetManager"; //$NON-NLS-1$
+
+    /**
+     * Returns the EDT {@code IRuntimeDebugClientTargetManager} — typed as
+     * {@link Object} to avoid a compile-time/Import-Package dependency on the
+     * debug-core API — looked up as an OSGi service by class name.
+     * <p>
+     * EDT's wiring framework registers its Guice singletons as OSGi services, so the
+     * real (state-bearing) manager singleton is reachable via the bundle context
+     * without touching the non-exported {@code DebugCorePlugin} (which, unlike
+     * {@code FormPlugin}/{@code MdPlugin}, exposes no {@code getInjector()}). This
+     * manager enumerates debug-server targets (via {@code listDebugTargets()}),
+     * including sessions a user started from the EDT UI ("Debug As"), which the
+     * generic Eclipse {@link org.eclipse.debug.core.ILaunchManager} view does not
+     * surface. Callers reach {@code listDebugTargets()} reflectively.
+     *
+     * @return the manager instance, or {@code null} if the service is not registered
+     */
+    public Object getRuntimeDebugClientTargetManager()
+    {
+        try
+        {
+            Bundle bundle = getBundle();
+            org.osgi.framework.BundleContext ctx = bundle != null ? bundle.getBundleContext() : null;
+            if (ctx == null)
+            {
+                return null;
+            }
+            org.osgi.framework.ServiceReference<?> ref =
+                ctx.getServiceReference(RUNTIME_DEBUG_TARGET_MANAGER_CLASS);
+            if (ref == null)
+            {
+                // Not registered as an OSGi service in this EDT build — the supplement
+                // simply stays empty; the launch:<name> path is the primary mechanism.
+                return null;
+            }
+            return ctx.getService(ref);
+        }
+        catch (Throwable e)
+        {
+            logError("Failed to obtain IRuntimeDebugClientTargetManager service", e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
     /** Symbolic name of the EDT form bundle that owns the form Guice injector. */
     private static final String FORM_BUNDLE_ID = "com._1c.g5.v8.dt.form"; //$NON-NLS-1$
 

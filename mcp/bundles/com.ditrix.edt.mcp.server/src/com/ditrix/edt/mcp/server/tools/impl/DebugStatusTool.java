@@ -47,9 +47,12 @@ public class DebugStatusTool implements IMcpTool
     @Override
     public String getDescription()
     {
-        return "Report active debug launches: applicationId (real or synthetic 'attach:<name>'), " //$NON-NLS-1$
-            + "launch configuration name/type, mode (debug/run), whether the target is currently " //$NON-NLS-1$
-            + "suspended, thread count, and the line of the top suspended frame. " //$NON-NLS-1$
+        return "Report active debug launches: applicationId (real, or synthetic 'attach:<name>' / " //$NON-NLS-1$
+            + "'launch:<name>' for sessions started from the EDT UI), launch configuration " //$NON-NLS-1$
+            + "name/type, mode (debug/run), whether the target is currently suspended, thread " //$NON-NLS-1$
+            + "count, and the line of the top suspended frame. Also lists 'debugServerTargets' — " //$NON-NLS-1$
+            + "the debug-server view of running debuggees (incl. UI-started ones the Eclipse " //$NON-NLS-1$
+            + "launch manager does not surface), with debug server URL and application. " //$NON-NLS-1$
             + "Optionally filter by applicationId."; //$NON-NLS-1$
     }
 
@@ -178,17 +181,112 @@ public class DebugStatusTool implements IMcpTool
             }
 
             Map<String, Object> registryInfo = DebugSessionRegistry.get().snapshotInfo();
+            List<Map<String, Object>> serverTargets = listDebugServerTargets();
 
             return ToolResult.success()
                 .put("launches", launches) //$NON-NLS-1$
                 .put("count", launches.size()) //$NON-NLS-1$
                 .put("registry", registryInfo) //$NON-NLS-1$
+                .put("debugServerTargets", serverTargets) //$NON-NLS-1$
+                .put("debugServerTargetCount", serverTargets.size()) //$NON-NLS-1$
                 .toJson();
         }
         catch (Exception e)
         {
             Activator.logError("Error in debug_status", e); //$NON-NLS-1$
             return ToolResult.error("Error: " + e.getMessage()).toJson(); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Best-effort enumeration of the debug-server targets EDT tracks via
+     * {@code IRuntimeDebugClientTargetManager.listDebugTargets()}. Surfaces
+     * sessions the Eclipse {@code ILaunchManager} view misses — in particular ones
+     * a user started from the EDT UI. Fully reflective and guarded: returns an
+     * empty list (never throws) if the debug-core API is unavailable.
+     */
+    private static List<Map<String, Object>> listDebugServerTargets()
+    {
+        List<Map<String, Object>> out = new ArrayList<>();
+        Object manager = Activator.getDefault().getRuntimeDebugClientTargetManager();
+        if (manager == null)
+        {
+            return out;
+        }
+        try
+        {
+            java.lang.reflect.Method listMethod = manager.getClass().getMethod("listDebugTargets"); //$NON-NLS-1$
+            listMethod.setAccessible(true);
+            Object targets = listMethod.invoke(manager);
+            if (targets instanceof Iterable<?>)
+            {
+                for (Object t : (Iterable<?>)targets)
+                {
+                    if (t == null)
+                    {
+                        continue;
+                    }
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("targetClass", t.getClass().getSimpleName()); //$NON-NLS-1$
+                    String url = reflectString(t, "getDebugServerUrl"); //$NON-NLS-1$
+                    if (url != null)
+                    {
+                        m.put("debugServerUrl", url); //$NON-NLS-1$
+                    }
+                    String app = reflectApplicationName(t);
+                    if (app != null)
+                    {
+                        m.put("application", app); //$NON-NLS-1$
+                    }
+                    out.add(m);
+                }
+            }
+        }
+        catch (Throwable e)
+        {
+            Activator.logError("Error enumerating debug-server targets", e); //$NON-NLS-1$
+        }
+        return out;
+    }
+
+    /** Reflectively invokes a no-arg getter and returns its {@code toString()}; null on any failure. */
+    private static String reflectString(Object target, String getter)
+    {
+        try
+        {
+            java.lang.reflect.Method m = target.getClass().getMethod(getter);
+            m.setAccessible(true);
+            Object v = m.invoke(target);
+            return v != null ? v.toString() : null;
+        }
+        catch (Throwable e)
+        {
+            return null;
+        }
+    }
+
+    /** Reflectively resolves {@code getApplication()} (possibly an Optional) to its name. */
+    private static String reflectApplicationName(Object target)
+    {
+        try
+        {
+            java.lang.reflect.Method m = target.getClass().getMethod("getApplication"); //$NON-NLS-1$
+            m.setAccessible(true);
+            Object app = m.invoke(target);
+            if (app instanceof java.util.Optional<?>)
+            {
+                app = ((java.util.Optional<?>)app).orElse(null);
+            }
+            if (app == null)
+            {
+                return null;
+            }
+            String name = reflectString(app, "getName"); //$NON-NLS-1$
+            return name != null ? name : app.toString();
+        }
+        catch (Throwable e)
+        {
+            return null;
         }
     }
 }
