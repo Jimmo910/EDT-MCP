@@ -9,13 +9,21 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.emf.common.util.EList;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.InternalEObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 
+import com._1c.g5.v8.bm.core.BmUriUtil;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
 import com._1c.g5.v8.bm.integration.AbstractBmTask;
@@ -23,6 +31,8 @@ import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -66,6 +76,31 @@ import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
  * After the export it re-checks and reports anything still missing (normally
  * none). The operation is read-safe and idempotent: when everything is already
  * in sync it simply re-exports (no model change) and reports {@code 0} missing.
+ * <p>
+ * <b>Dangling-reference cleanup.</b> Independently of the missing-{@code .mdo}
+ * desync above, a {@code Configuration.mdo} can still <em>register</em> objects
+ * that have neither a {@code .mdo} file nor a BM body - "dangling" / "orphaned"
+ * entries left behind when an object's body was lost but its registration in a
+ * Configuration reference collection ({@code webServices}, {@code commonForms},
+ * {@code subsystems}, …) was not. EDT surfaces each as a
+ * {@code md-reference-intergrity} warning ("a lost reference is set in field X
+ * at position N"), and {@code update_database} / XML import fail because the
+ * Configuration points at non-existent object bodies. {@code delete_metadata_object}
+ * cannot remove them (no BM object to delete). These entries are
+ * <b>unresolved EMF proxies</b> in the Configuration's many-valued
+ * {@link MdObject} references. This tool detects them with the same check the
+ * codebase already uses for BM references - {@link InternalEObject#eIsProxy()}
+ * combined, for a BM proxy URI, with
+ * {@link BmUriUtil#extractTopObjectFqn(URI)} +
+ * {@link IBmTransaction#getTopObjectByFqn(String)} returning {@code null} - so
+ * only genuinely unresolvable entries are touched, never a valid reference. When
+ * {@code cleanDanglingReferences} is {@code true} (the default) it removes the
+ * proxy elements from their collections inside a BM transaction and re-exports
+ * the {@code Configuration} top object so {@code Configuration.mdo} no longer
+ * registers them; the project then validates clean and {@code update_database}
+ * unblocks. The cleanup is reported as {@code danglingFound} +
+ * {@code danglingRemoved} and is idempotent (a clean project reports
+ * {@code danglingFound 0}).
  */
 public class ResyncToDiskTool extends AbstractMetadataWriteTool
 {
@@ -92,6 +127,13 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             + "export existed). Read-safe and idempotent: when already in sync it re-exports " //$NON-NLS-1$
             + "harmlessly and reports 0 missing. Reports objectsExported, the missing-before " //$NON-NLS-1$
             + "set (the real desync) and anything still missing after export. " //$NON-NLS-1$
+            + "Also CLEANS dangling/orphaned references in Configuration.mdo: entries that " //$NON-NLS-1$
+            + "register an object with no .mdo and no BM body (unresolved proxies), shown by " //$NON-NLS-1$
+            + "get_project_errors as md-reference-intergrity 'lost reference' warnings and " //$NON-NLS-1$
+            + "blocking update_database / XML import. Removes those proxy entries from the " //$NON-NLS-1$
+            + "Configuration collections (webServices, commonForms, subsystems, ...) and " //$NON-NLS-1$
+            + "re-exports Configuration.mdo, reporting danglingFound + danglingRemoved " //$NON-NLS-1$
+            + "(controlled by cleanDanglingReferences, default true; idempotent). " //$NON-NLS-1$
             + "Optionally revalidates the project afterwards (revalidate=false by default)."; //$NON-NLS-1$
     }
 
@@ -101,6 +143,12 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
         return JsonSchemaBuilder.object()
             .stringProperty("projectName", //$NON-NLS-1$
                 "EDT project name (required).", true) //$NON-NLS-1$
+            .booleanProperty("cleanDanglingReferences", //$NON-NLS-1$
+                "When true (default), remove dangling/orphaned references from Configuration.mdo " //$NON-NLS-1$
+                    + "- entries that register an object with no .mdo and no BM body (unresolved " //$NON-NLS-1$
+                    + "proxies), the source of md-reference-intergrity 'lost reference' warnings " //$NON-NLS-1$
+                    + "that block update_database / XML import. Set false to only report " //$NON-NLS-1$
+                    + "danglingFound without removing anything.") //$NON-NLS-1$
             .booleanProperty("revalidate", //$NON-NLS-1$
                 "When true, schedule a full project revalidation after the export so stale " //$NON-NLS-1$
                     + "markers refresh. Default: false (export only).") //$NON-NLS-1$
@@ -116,6 +164,9 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             return ToolResult.error("projectName is required").toJson(); //$NON-NLS-1$
         }
         boolean revalidate = JsonUtils.extractBooleanArgument(params, "revalidate", false); //$NON-NLS-1$
+        // Default true: dangling entries are already-broken zombie registrations with no
+        // body anywhere, so removing them loses nothing and is what makes the project valid.
+        boolean cleanDangling = JsonUtils.extractBooleanArgument(params, "cleanDanglingReferences", true); //$NON-NLS-1$
 
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -177,7 +228,18 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             ? findMissingMdoFiles(ctx.project, missingBefore)
             : missingBefore;
 
-        // Step 5 (optional, best-effort): refresh stale validation markers.
+        // Step 5: clean dangling/orphaned references in Configuration.mdo. These are
+        // unresolved proxies registered in the Configuration's MdObject collections
+        // with no .mdo and no BM body - the source of md-reference-intergrity "lost
+        // reference" warnings that block update_database / XML import. Detection and
+        // (optional) removal run in a single BM task; when entries are removed the
+        // Configuration top object is re-exported so Configuration.mdo no longer
+        // registers them. Independent of the missing-.mdo export above, so it still
+        // runs after an export error to at least report what is dangling.
+        DanglingResult dangling = cleanDanglingReferences(ctx.config, bmModel, bmModelManager,
+            dtProject, cleanDangling);
+
+        // Step 6 (optional, best-effort): refresh stale validation markers.
         String revalidateWarning = null;
         if (revalidate && exportError == null)
         {
@@ -199,13 +261,26 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             .put("missingBeforeCount", missingBefore.size()) //$NON-NLS-1$
             .put("missingBefore", limit(missingBefore)) //$NON-NLS-1$
             .put("stillMissingCount", stillMissing.size()) //$NON-NLS-1$
-            .put("stillMissing", limit(stillMissing)); //$NON-NLS-1$
+            .put("stillMissing", limit(stillMissing)) //$NON-NLS-1$
+            .put("cleanDanglingReferences", cleanDangling) //$NON-NLS-1$
+            .put("danglingFound", dangling.found) //$NON-NLS-1$
+            .put("danglingRemovedCount", dangling.removedCount()) //$NON-NLS-1$
+            // danglingRemoved: the entries actually removed (empty in report-only mode).
+            // danglingDetails: every dangling entry found, shown even when nothing was
+            // removed so a report-only run still surfaces what is dangling.
+            .put("danglingRemoved", limitObjects(dangling.removedFromModel ? dangling.details //$NON-NLS-1$
+                : java.util.Collections.emptyList()))
+            .put("danglingDetails", limitObjects(dangling.details)); //$NON-NLS-1$
+        if (dangling.warning != null)
+        {
+            result.put("danglingWarning", dangling.warning); //$NON-NLS-1$
+        }
         if (revalidateWarning != null)
         {
             result.put("revalidateWarning", revalidateWarning); //$NON-NLS-1$
         }
         result.put("message", buildMessage(allFqns.size(), missingBefore.size(), //$NON-NLS-1$
-            stillMissing.size(), exportError));
+            stillMissing.size(), exportError, dangling, cleanDangling));
         return result.toJson();
     }
 
@@ -261,6 +336,283 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             }
         });
         return fqns;
+    }
+
+    /**
+     * Outcome of the dangling-reference scan/cleanup: how many dangling entries
+     * were found, the per-entry detail of the ones removed, and an optional
+     * best-effort warning when the BM task or Configuration re-export failed.
+     */
+    private static final class DanglingResult
+    {
+        /** Total dangling (unresolved-proxy) entries detected across all collections. */
+        int found;
+        /** {@code true} when the detected entries were actually removed from the model. */
+        boolean removedFromModel;
+        /** Detail of each dangling entry: {@code field}, {@code lostFqn}, {@code position}. */
+        final List<Map<String, Object>> details = new ArrayList<>();
+        /** Non-{@code null} when detection/removal could not be performed cleanly. */
+        String warning;
+
+        /** Number of entries actually removed (0 in report-only mode). */
+        int removedCount()
+        {
+            return removedFromModel ? found : 0;
+        }
+    }
+
+    /**
+     * Detects, and (when {@code remove} is {@code true}) removes, dangling /
+     * orphaned references registered in the project's {@link Configuration}.
+     * <p>
+     * A dangling entry is an element of one of the Configuration's many-valued
+     * {@link MdObject} reference collections ({@code catalogs}, {@code subsystems},
+     * {@code webServices}, {@code commonForms}, {@code commonAttributes},
+     * {@code commandGroups}, {@code sessionParameters}, {@code businessProcesses},
+     * …) that is an <b>unresolved EMF proxy</b>: the referenced object has no
+     * {@code .mdo} and no BM body, so EDT reports it as a
+     * {@code md-reference-intergrity} "lost reference" warning and
+     * {@code update_database} / XML import fail.
+     * <p>
+     * <b>Detection.</b> Every collection is read without proxy resolution
+     * ({@code eGet(ref, false)}), and each element is tested with the same check
+     * the codebase already uses for BM references:
+     * {@link InternalEObject#eIsProxy()} is {@code true}, and - for a BM proxy URI
+     * - {@link BmUriUtil#extractTopObjectFqn(URI)} +
+     * {@link IBmTransaction#getTopObjectByFqn(String)} returning {@code null}
+     * confirm the target genuinely does not exist. Only the EClass reference
+     * features whose type is a subtype of {@link MdObject} are scanned, and a
+     * non-proxy (resolvable) element is never touched, so a valid reference is
+     * never removed.
+     * <p>
+     * <b>Removal.</b> When {@code remove} is {@code true} the proxy elements are
+     * removed from their {@link EList}s inside the same BM write transaction; the
+     * change is then flushed by re-exporting the {@code Configuration} top object
+     * so {@code Configuration.mdo} no longer registers them. When {@code remove} is
+     * {@code false} the method only reports what is dangling (no model change, no
+     * re-export). The operation is idempotent: a clean Configuration yields
+     * {@code found == 0} and makes no change.
+     *
+     * @param config the project configuration (a {@link IBmObject})
+     * @param bmModel the project BM model
+     * @param bmModelManager the BM model manager (for the Configuration re-export)
+     * @param dtProject the DT project (for the Configuration re-export)
+     * @param remove {@code true} to remove the dangling entries, {@code false} to
+     *            only report them
+     * @return the {@link DanglingResult} (never {@code null})
+     */
+    private static DanglingResult cleanDanglingReferences(Configuration config, IBmModel bmModel,
+        IBmModelManager bmModelManager, IDtProject dtProject, boolean remove)
+    {
+        DanglingResult result = new DanglingResult();
+        if (!(config instanceof IBmObject))
+        {
+            result.warning = "Configuration is not a BM object; dangling-reference scan skipped."; //$NON-NLS-1$
+            return result;
+        }
+        final long configBmId = ((IBmObject)config).bmGetId();
+
+        // Detection (and, when remove=true, mutation) run inside one BM write task so
+        // the same transaction that observes the proxies also removes them atomically.
+        try
+        {
+            bmModel.execute(new AbstractBmTask<Void>("CleanDanglingReferences") //$NON-NLS-1$
+            {
+                @Override
+                public Void execute(IBmTransaction tx, IProgressMonitor pm)
+                {
+                    Configuration cfg = (Configuration)tx.getObjectById(configBmId);
+                    if (cfg == null)
+                    {
+                        result.warning = "Configuration not found in transaction; dangling-reference scan skipped."; //$NON-NLS-1$
+                        return null;
+                    }
+                    scanAndRemove(cfg, tx, remove, result);
+                    return null;
+                }
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error cleaning dangling references in Configuration", e); //$NON-NLS-1$
+            result.warning = unwrapCauseMessage(e);
+            return result;
+        }
+
+        // Flush the cleaned Configuration to disk so Configuration.mdo no longer
+        // registers the removed proxies. Only needed when something was removed.
+        if (result.removedFromModel && result.found > 0)
+        {
+            String configFqn = ((IBmObject)config).bmGetFqn();
+            if (configFqn != null && !configFqn.isEmpty())
+            {
+                try
+                {
+                    bmModelManager.forceExport(dtProject, java.util.Collections.singletonList(configFqn));
+                }
+                catch (Exception e)
+                {
+                    Activator.logError("Error re-exporting Configuration after dangling cleanup", e); //$NON-NLS-1$
+                    result.warning = "Dangling entries removed in the model but Configuration.mdo re-export failed: " //$NON-NLS-1$
+                        + unwrapCauseMessage(e);
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Scans every many-valued {@link MdObject} reference of the Configuration for
+     * unresolved-proxy (dangling) elements, records them in {@code result}, and -
+     * when {@code remove} is {@code true} - removes them from their {@link EList}.
+     * <p>
+     * Runs inside the supplied BM transaction so {@link #isDanglingReference} can
+     * confirm a BM proxy's target is truly absent via
+     * {@link IBmTransaction#getTopObjectByFqn(String)}.
+     */
+    @SuppressWarnings("unchecked")
+    private static void scanAndRemove(Configuration cfg, IBmTransaction tx, boolean remove,
+        DanglingResult result)
+    {
+        for (EReference ref : cfg.eClass().getEAllReferences())
+        {
+            if (!ref.isMany())
+            {
+                // Single-valued references are not the "lost reference at position N"
+                // collections the md-reference-intergrity check reports; skip them.
+                continue;
+            }
+            if (ref.isDerived() || ref.isTransient() || ref.isVolatile() || !ref.isChangeable())
+            {
+                // Derived/computed collections are not the persisted Configuration.mdo
+                // registrations and may be unmodifiable - never the dangling source.
+                continue;
+            }
+            if (!isMdObjectReference(ref))
+            {
+                continue;
+            }
+            // Read WITHOUT resolving proxies: a dangling target must stay a proxy so
+            // eIsProxy() can detect it; resolving a valid ref returns the real object.
+            Object value = cfg.eGet(ref, false);
+            if (!(value instanceof EList))
+            {
+                continue;
+            }
+            EList<EObject> list = (EList<EObject>)value;
+            // Walk a snapshot of positions so the reported position matches the
+            // original .mdo layout even as earlier entries are removed.
+            List<EObject> dangling = new ArrayList<>();
+            int position = 0;
+            for (EObject element : list)
+            {
+                if (element != null && isDanglingReference(element, tx))
+                {
+                    result.found++;
+                    String lostFqn = proxyFqnOf(element);
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    entry.put("field", ref.getName()); //$NON-NLS-1$
+                    entry.put("lostFqn", lostFqn != null ? lostFqn : "(unknown)"); //$NON-NLS-1$ //$NON-NLS-2$
+                    entry.put("position", Integer.valueOf(position)); //$NON-NLS-1$
+                    result.details.add(entry);
+                    dangling.add(element);
+                }
+                position++;
+            }
+            if (remove && !dangling.isEmpty())
+            {
+                list.removeAll(dangling);
+                result.removedFromModel = true;
+            }
+        }
+    }
+
+    /**
+     * Returns {@code true} when {@code ref} points at metadata objects, i.e. its
+     * reference type is a subtype of {@link MdObject}. The Configuration also holds
+     * non-{@code MdObject} references (e.g. the default-language/object pointers)
+     * that are not part of the "lost reference" collections, so they are excluded.
+     */
+    private static boolean isMdObjectReference(EReference ref)
+    {
+        return ref.getEReferenceType() != null
+            && MdClassPackage.Literals.MD_OBJECT.isSuperTypeOf(ref.getEReferenceType());
+    }
+
+    /**
+     * Tests whether a Configuration reference element is a dangling (unresolvable)
+     * entry, using the same approach the codebase applies to BM references.
+     * <p>
+     * The element is dangling when it is an EMF proxy that cannot be resolved: it is
+     * an {@link InternalEObject} with {@link InternalEObject#eIsProxy()} set, and -
+     * when the proxy URI is a BM URI - its target top object is absent from the
+     * transaction ({@link IBmTransaction#getTopObjectByFqn(String)} is {@code null}).
+     * A non-proxy element (a real, resolvable object) is never dangling, so a valid
+     * reference is never removed.
+     */
+    private static boolean isDanglingReference(EObject element, IBmTransaction tx)
+    {
+        if (!(element instanceof InternalEObject))
+        {
+            return false;
+        }
+        InternalEObject internal = (InternalEObject)element;
+        if (!internal.eIsProxy())
+        {
+            // Resolvable / already-resolved object: a genuine reference, never removed.
+            return false;
+        }
+        URI proxyUri = internal.eProxyURI();
+        if (proxyUri == null)
+        {
+            // A proxy with no URI cannot be resolved at all: dangling by definition.
+            return true;
+        }
+        if (BmUriUtil.isBmUri(proxyUri))
+        {
+            // BM proxy: confirm the target top object genuinely does not exist before
+            // treating it as dangling, so a not-yet-loaded-but-present object is kept.
+            String fqn = BmUriUtil.extractTopObjectFqn(proxyUri);
+            if (fqn == null || fqn.isEmpty())
+            {
+                return true;
+            }
+            return tx.getTopObjectByFqn(fqn) == null;
+        }
+        // Non-BM proxy on an MdObject reference: try one last resolution against the
+        // element's own resource set; only if it stays an unresolved proxy is it
+        // dangling. EcoreUtil.resolve returns the proxy unchanged when it cannot be
+        // resolved, so an equal-and-still-proxy result means genuinely unresolvable.
+        EObject resolved = EcoreUtil.resolve(element, element);
+        return resolved == element && ((InternalEObject)resolved).eIsProxy();
+    }
+
+    /**
+     * Extracts the lost FQN reported by a dangling proxy for the
+     * {@code danglingRemoved} report. For a BM proxy URI this is the referenced top
+     * object FQN (e.g. {@code "WebService.TestService"}); otherwise the raw proxy
+     * URI string, or {@code null} when none is available.
+     */
+    private static String proxyFqnOf(EObject element)
+    {
+        if (!(element instanceof InternalEObject))
+        {
+            return null;
+        }
+        URI proxyUri = ((InternalEObject)element).eProxyURI();
+        if (proxyUri == null)
+        {
+            return null;
+        }
+        if (BmUriUtil.isBmUri(proxyUri))
+        {
+            String fqn = BmUriUtil.extractTopObjectFqn(proxyUri);
+            if (fqn != null && !fqn.isEmpty())
+            {
+                return fqn;
+            }
+        }
+        return proxyUri.toString();
     }
 
     /**
@@ -346,32 +698,65 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
         return new ArrayList<>(values.subList(0, MAX_LISTED_FQNS));
     }
 
+    /** Caps a list of detail maps to {@link #MAX_LISTED_FQNS} entries. */
+    private static List<Map<String, Object>> limitObjects(List<Map<String, Object>> values)
+    {
+        if (values.size() <= MAX_LISTED_FQNS)
+        {
+            return values;
+        }
+        return new ArrayList<>(values.subList(0, MAX_LISTED_FQNS));
+    }
+
     /** Builds a concise human-readable summary of the outcome. */
     private static String buildMessage(int exported, int missingBefore, int stillMissing,
-        String exportError)
+        String exportError, DanglingResult dangling, boolean cleanDangling)
     {
+        StringBuilder sb = new StringBuilder();
         if (exportError != null)
         {
-            return "Export failed: " + exportError + ". " + missingBefore //$NON-NLS-1$ //$NON-NLS-2$
-                + " object(s) were missing on disk before the attempt."; //$NON-NLS-1$
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("Re-exported ").append(exported).append(" top object(s) to src/. "); //$NON-NLS-1$ //$NON-NLS-2$
-        if (missingBefore == 0)
-        {
-            sb.append("Already in sync: no .mdo files were missing."); //$NON-NLS-1$
+            sb.append("Export failed: ").append(exportError).append(". ").append(missingBefore) //$NON-NLS-1$ //$NON-NLS-2$
+                .append(" object(s) were missing on disk before the attempt."); //$NON-NLS-1$
         }
         else
         {
-            sb.append(missingBefore).append(" object(s) had no .mdo on disk before and were written out"); //$NON-NLS-1$
-            if (stillMissing == 0)
+            sb.append("Re-exported ").append(exported).append(" top object(s) to src/. "); //$NON-NLS-1$ //$NON-NLS-2$
+            if (missingBefore == 0)
             {
-                sb.append("; all are present now."); //$NON-NLS-1$
+                sb.append("Already in sync: no .mdo files were missing."); //$NON-NLS-1$
             }
             else
             {
-                sb.append("; ").append(stillMissing).append(" still missing after export."); //$NON-NLS-1$ //$NON-NLS-2$
+                sb.append(missingBefore)
+                    .append(" object(s) had no .mdo on disk before and were written out"); //$NON-NLS-1$
+                if (stillMissing == 0)
+                {
+                    sb.append("; all are present now."); //$NON-NLS-1$
+                }
+                else
+                {
+                    sb.append("; ").append(stillMissing).append(" still missing after export."); //$NON-NLS-1$ //$NON-NLS-2$
+                }
             }
+        }
+        // Dangling-reference summary.
+        sb.append(' ');
+        if (dangling.found == 0)
+        {
+            sb.append("No dangling references in Configuration.mdo."); //$NON-NLS-1$
+        }
+        else if (dangling.removedFromModel)
+        {
+            sb.append("Removed ").append(dangling.found) //$NON-NLS-1$
+                .append(" dangling reference(s) from Configuration.mdo."); //$NON-NLS-1$
+        }
+        else
+        {
+            sb.append("Found ").append(dangling.found) //$NON-NLS-1$
+                .append(" dangling reference(s) in Configuration.mdo"); //$NON-NLS-1$
+            sb.append(cleanDangling
+                ? " (not removed - see danglingWarning)." //$NON-NLS-1$
+                : " (cleanDanglingReferences=false, not removed)."); //$NON-NLS-1$
         }
         return sb.toString();
     }
