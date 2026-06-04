@@ -90,6 +90,10 @@ public class RunYaxunitTestsTool implements IMcpTool
                "**Pending** — call this tool again with the same arguments to keep waiting and " + //$NON-NLS-1$
                "fetch the result once the launch finishes. The launch is NOT terminated on timeout. " + //$NON-NLS-1$
                "A full Markdown report is also written to report.md next to junit.xml. " + //$NON-NLS-1$
+               "With updateBeforeLaunch=true (default) the tool waits for the incremental rebuild " + //$NON-NLS-1$
+               "of the project AND its dependent EXTENSION (.cfe) projects to finish before launching, " + //$NON-NLS-1$
+               "then updates the infobase — so a test you just edited inside an extension is rebuilt " + //$NON-NLS-1$
+               "and pushed into the infobase before the run, instead of executing a stale extension. " + //$NON-NLS-1$
                "Requires an existing launch configuration and YAXUnit extension installed in the infobase."; //$NON-NLS-1$
     }
 
@@ -108,10 +112,14 @@ public class RunYaxunitTestsTool implements IMcpTool
             .integerProperty("timeout", "Polling window in seconds (default: 60). On expiry returns Pending; call again to keep waiting.") //$NON-NLS-1$ //$NON-NLS-2$
             .booleanProperty("updateBeforeLaunch", //$NON-NLS-1$
                 "Auto-chain (default: true): before spawning a new test launch, " //$NON-NLS-1$
-                    + "politely terminate any live 1С client running this configuration " //$NON-NLS-1$
-                    + "and run a silent DB update — so EDT's launch delegate does not pop " //$NON-NLS-1$
-                    + "its modal 'Update database?' dialog that would block the MCP call. " //$NON-NLS-1$
-                    + "Set false to keep legacy behaviour (delegate decides; dialog may appear).") //$NON-NLS-1$
+                    + "politely terminate any live 1С client running this configuration, " //$NON-NLS-1$
+                    + "wait for the workspace build and derived data of the project AND its " //$NON-NLS-1$
+                    + "dependent EXTENSION projects to settle (so an edited .cfe is fully " //$NON-NLS-1$
+                    + "rebuilt before tests run — see below), then run a silent DB update — " //$NON-NLS-1$
+                    + "so EDT's launch delegate does not pop its modal 'Update database?' " //$NON-NLS-1$
+                    + "dialog that would block the MCP call. " //$NON-NLS-1$
+                    + "Set false to keep legacy behaviour (delegate decides; dialog may appear; " //$NON-NLS-1$
+                    + "no extension-rebuild wait, so a freshly edited extension may run stale).") //$NON-NLS-1$
             .build();
     }
 
