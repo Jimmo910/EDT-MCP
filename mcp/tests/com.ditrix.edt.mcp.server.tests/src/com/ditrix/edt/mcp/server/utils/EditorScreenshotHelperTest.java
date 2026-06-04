@@ -70,4 +70,63 @@ public class EditorScreenshotHelperTest
 
         assertFalse("predicate exceptions must be treated as not-ready, not propagated", rendered); //$NON-NLS-1$
     }
+
+    // ==================== fqnMatchesFormPath (Bitrix #19889 identity guard) ====================
+
+    @Test
+    public void testFqnMatchesSamePathAndModelFqn()
+    {
+        // The model FQN uses the singular 'Form' separator; the requested path may use plural
+        // 'Forms'. Both must be recognized as the same form (object form case).
+        assertTrue("singular Form FQN must match the same form", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "Catalog.Products.Form.ItemForm", "Catalog.Products.Form.ItemForm")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("plural 'Forms' request must match singular 'Form' model FQN", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "Catalog.Products.Form.ItemForm", "Catalog.Products.Forms.ItemForm")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testFqnMatchesCommonForm()
+    {
+        assertTrue("CommonForm FQN must match itself", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath("CommonForm.MyForm", "CommonForm.MyForm")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testFqnMatchesIgnoresCaseAndRussianType()
+    {
+        assertTrue("type segment must match case-insensitively", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "Catalog.Products.Form.ItemForm", "catalog.Products.forms.ItemForm")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Russian type name on the requested side must resolve to the same English type.
+        assertTrue("Russian metadata type must match its English equivalent", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "Catalog.Товары.Form.X", // Catalog.Товары.Form.X //$NON-NLS-1$
+                "Справочник.Товары.Forms.X")); // Справочник.Товары.Forms.X //$NON-NLS-1$
+    }
+
+    @Test
+    public void testFqnDoesNotMatchDifferentForm()
+    {
+        // The core defect: a previously active form (DataProcessor.X) must NOT be accepted when a
+        // different catalog object form was requested.
+        assertFalse("different form must not match (the wrong-form defect)", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "DataProcessor.GrafikSTO.Form.MainForm", //$NON-NLS-1$
+                "Catalog.TestS11.Forms.ItemForm")); //$NON-NLS-1$
+        assertFalse("same object different form name must not match", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(
+                "Catalog.Products.Form.ItemForm", //$NON-NLS-1$
+                "Catalog.Products.Forms.ListForm")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testFqnMatchNullSafe()
+    {
+        assertFalse("null actual FQN must not match", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath(null, "Catalog.Products.Forms.ItemForm")); //$NON-NLS-1$
+        assertFalse("null requested path must not match", //$NON-NLS-1$
+            EditorScreenshotHelper.fqnMatchesFormPath("Catalog.Products.Form.ItemForm", null)); //$NON-NLS-1$
+    }
 }

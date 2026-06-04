@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.swt.graphics.ImageData;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorPart;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -120,11 +121,20 @@ public class GetFormScreenshotTool implements IMcpTool
             {
                 EditorScreenshotHelper.ensureBufferedNativeRenderMode();
 
-                String openError = EditorScreenshotHelper.openAndActivateForm(projectName, formPath);
-                if (openError != null)
+                // Open the requested form and keep a direct handle on the editor that was opened
+                // for it. The image MUST come from this editor's own WYSIWYG representation, not
+                // from the globally active form editor: previously this tool resolved the page via
+                // FormEditor.getActiveFormEditorPage(), which returns whatever form editor currently
+                // has workbench focus, so a previously rendered/active form (e.g. DataProcessor.X)
+                // was captured instead of the requested one (Bitrix #19889).
+                EditorScreenshotHelper.OpenFormResult openResult =
+                    EditorScreenshotHelper.openForm(projectName, formPath);
+                if (!openResult.isSuccess())
                 {
-                    return CaptureResult.error(openError);
+                    return CaptureResult.error(openResult.getError());
                 }
+
+                IEditorPart editorPart = openResult.getEditorPart();
 
                 // Let UI settle after activation
                 Display display = Display.getCurrent();
@@ -134,12 +144,27 @@ public class GetFormScreenshotTool implements IMcpTool
                     Thread.sleep(100);
                 }
 
-                editorPage = EditorScreenshotHelper.waitForFormEditorPage();
+                // Resolve the WYSIWYG page from THIS editor part (findPage), not the global active
+                // page, so the page is guaranteed to belong to the requested form.
+                editorPage = EditorScreenshotHelper.waitForFormEditorPageOf(editorPart);
                 if (editorPage == null)
                 {
                     return CaptureResult.error(ToolResult.error(
                         "Form editor opened but WYSIWYG page is not available. " + //$NON-NLS-1$
                         "The form may still be loading.").toJson()); //$NON-NLS-1$
+                }
+
+                // Identity guard: confirm the opened editor actually corresponds to the requested
+                // form before reading its image. If it does not match, fail explicitly rather than
+                // return another form's PNG (the silent wrong-form defect, Bitrix #19889).
+                String actualFqn = EditorScreenshotHelper.getFormEditorFqn(editorPart);
+                if (actualFqn != null && !EditorScreenshotHelper.fqnMatchesFormPath(actualFqn, formPath))
+                {
+                    return CaptureResult.error(ToolResult.error(
+                        "Captured form editor does not match the requested form. Requested '" //$NON-NLS-1$
+                        + formPath + "' but the active editor is '" + actualFqn //$NON-NLS-1$
+                        + "'. No screenshot was taken to avoid returning the wrong form's image; " //$NON-NLS-1$
+                        + "try again once the requested form's editor is fully open.").toJson()); //$NON-NLS-1$
                 }
             }
             else
