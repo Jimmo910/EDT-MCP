@@ -16,6 +16,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 
 /**
@@ -41,8 +42,11 @@ public class ResumeTool implements IMcpTool
     public String getDescription()
     {
         return "Resume a suspended debug thread or all threads of a debug target. " //$NON-NLS-1$
-            + "Pass threadId (from wait_for_break) or applicationId. " //$NON-NLS-1$
-            + "With no arguments, resumes the single active debug launch if exactly one exists."; //$NON-NLS-1$
+            + "Pass threadId (from wait_for_break) or applicationId (real, 'attach:<name>', or a " //$NON-NLS-1$
+            + "server target id 'ServerApplication.<app>' from debug_status). " //$NON-NLS-1$
+            + "With no arguments, resumes the single active debug session (launch or server " //$NON-NLS-1$
+            + "target) if exactly one exists. NOTE: if resume of a server-side suspend does not " //$NON-NLS-1$
+            + "take effect, the breakpoint can also be released from the EDT UI."; //$NON-NLS-1$
     }
 
     @Override
@@ -51,7 +55,8 @@ public class ResumeTool implements IMcpTool
         return JsonSchemaBuilder.object()
             .integerProperty("threadId", "Thread id from wait_for_break") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("applicationId", //$NON-NLS-1$
-                "Application id (real or 'attach:<configName>' — resumes all threads of this target)") //$NON-NLS-1$
+                "Application id (real, 'attach:<configName>', or 'ServerApplication.<app>' — " //$NON-NLS-1$
+                    + "resumes all threads of this target)") //$NON-NLS-1$
             .build();
     }
 
@@ -91,6 +96,39 @@ public class ResumeTool implements IMcpTool
             String effectiveAppId = (applicationId != null && !applicationId.isEmpty())
                 ? applicationId
                 : DebugSessionRegistry.findLoneActiveApplicationId();
+
+            // SERVER-TARGET PATH: a server-side suspend (debug_yaxunit_tests) lives
+            // on a 1C debug-server target, not an Eclipse launch. Resolve it by the
+            // minted ServerApplication id (or, when auto-resolving, the lone target).
+            DebugServerTargetSupport.ServerTarget serverTarget = effectiveAppId != null
+                ? DebugServerTargetSupport.resolve(effectiveAppId)
+                : DebugServerTargetSupport.findLoneServerTarget();
+            if (serverTarget != null)
+            {
+                if (effectiveAppId == null)
+                {
+                    effectiveAppId = serverTarget.applicationId;
+                }
+                IDebugTarget srv = serverTarget.target;
+                if (srv == null || srv.isTerminated() || !srv.canResume())
+                {
+                    return ToolResult.error("server debug target cannot resume").toJson(); //$NON-NLS-1$
+                }
+                srv.resume();
+                // Drop the cached snapshot so a subsequent wait_for_break does not
+                // return the now-stale pre-resume frame.
+                registry.clearSnapshot(effectiveAppId);
+                ToolResult res = ToolResult.success()
+                    .put("resumed", true) //$NON-NLS-1$
+                    .put("scope", "target") //$NON-NLS-1$ //$NON-NLS-2$
+                    .put("serverTarget", true) //$NON-NLS-1$
+                    .put("applicationId", effectiveAppId); //$NON-NLS-1$
+                if (applicationId == null || applicationId.isEmpty())
+                {
+                    res.put("autoResolved", true); //$NON-NLS-1$
+                }
+                return res.toJson();
+            }
 
             if (effectiveAppId == null)
             {

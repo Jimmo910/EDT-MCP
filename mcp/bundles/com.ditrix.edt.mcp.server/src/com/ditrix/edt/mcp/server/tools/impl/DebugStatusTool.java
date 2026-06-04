@@ -24,6 +24,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 
@@ -51,9 +52,11 @@ public class DebugStatusTool implements IMcpTool
             + "'launch:<name>' for sessions started from the EDT UI), launch configuration " //$NON-NLS-1$
             + "name/type, mode (debug/run), whether the target is currently suspended, thread " //$NON-NLS-1$
             + "count, and the line of the top suspended frame. Also lists 'debugServerTargets' — " //$NON-NLS-1$
-            + "the debug-server view of running debuggees (incl. UI-started ones the Eclipse " //$NON-NLS-1$
-            + "launch manager does not surface), with debug server URL and application. " //$NON-NLS-1$
-            + "Optionally filter by applicationId."; //$NON-NLS-1$
+            + "the debug-server view of running debuggees, including SERVER-SIDE suspends from " //$NON-NLS-1$
+            + "debug_yaxunit_tests that the Eclipse launch manager does NOT surface. Each server " //$NON-NLS-1$
+            + "target carries its OWN real 'suspended' flag, suspendedAt, threadCount and a " //$NON-NLS-1$
+            + "stable 'applicationId' ('ServerApplication.<app>') that wait_for_break / resume / " //$NON-NLS-1$
+            + "step / get_variables / evaluate_expression accept. Optionally filter by applicationId."; //$NON-NLS-1$
     }
 
     @Override
@@ -181,7 +184,7 @@ public class DebugStatusTool implements IMcpTool
             }
 
             Map<String, Object> registryInfo = DebugSessionRegistry.get().snapshotInfo();
-            List<Map<String, Object>> serverTargets = listDebugServerTargets();
+            List<Map<String, Object>> serverTargets = listDebugServerTargets(filterAppId);
 
             return ToolResult.success()
                 .put("launches", launches) //$NON-NLS-1$
@@ -199,94 +202,37 @@ public class DebugStatusTool implements IMcpTool
     }
 
     /**
-     * Best-effort enumeration of the debug-server targets EDT tracks via
-     * {@code IRuntimeDebugClientTargetManager.listDebugTargets()}. Surfaces
-     * sessions the Eclipse {@code ILaunchManager} view misses — in particular ones
-     * a user started from the EDT UI. Fully reflective and guarded: returns an
-     * empty list (never throws) if the debug-core API is unavailable.
+     * Enumerates the debug-server targets EDT tracks via
+     * {@code IRuntimeDebugClientTargetManager.listDebugTargets()} and enriches
+     * each with its REAL suspend state (walking the target's threads through the
+     * Eclipse {@link IThread} interface — the 1C target implements
+     * {@code org.eclipse.debug.core.model.IDebugTarget}). Surfaces server-side
+     * suspends from {@code debug_yaxunit_tests} that the Eclipse
+     * {@code ILaunchManager} view misses, and exposes a stable, addressable
+     * {@code applicationId} so the other debug tools can resolve them. Fully
+     * guarded — never throws.
+     *
+     * @param filterAppId optional applicationId filter (matches the minted
+     *     {@code ServerApplication.<app>} id or the bare application name)
      */
-    private static List<Map<String, Object>> listDebugServerTargets()
+    private static List<Map<String, Object>> listDebugServerTargets(String filterAppId)
     {
         List<Map<String, Object>> out = new ArrayList<>();
-        Object manager = Activator.getDefault().getRuntimeDebugClientTargetManager();
-        if (manager == null)
+        for (DebugServerTargetSupport.ServerTarget st : DebugServerTargetSupport.listServerTargets())
         {
-            return out;
-        }
-        try
-        {
-            java.lang.reflect.Method listMethod = manager.getClass().getMethod("listDebugTargets"); //$NON-NLS-1$
-            listMethod.setAccessible(true);
-            Object targets = listMethod.invoke(manager);
-            if (targets instanceof Iterable<?>)
+            if (filterAppId != null && !filterAppId.isEmpty())
             {
-                for (Object t : (Iterable<?>)targets)
+                boolean matches = filterAppId.equals(st.applicationId)
+                    || filterAppId.equals(st.application)
+                    || (st.applicationId != null
+                        && st.applicationId.equals(DebugServerTargetSupport.SERVER_APP_ID_PREFIX + filterAppId));
+                if (!matches)
                 {
-                    if (t == null)
-                    {
-                        continue;
-                    }
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("targetClass", t.getClass().getSimpleName()); //$NON-NLS-1$
-                    String url = reflectString(t, "getDebugServerUrl"); //$NON-NLS-1$
-                    if (url != null)
-                    {
-                        m.put("debugServerUrl", url); //$NON-NLS-1$
-                    }
-                    String app = reflectApplicationName(t);
-                    if (app != null)
-                    {
-                        m.put("application", app); //$NON-NLS-1$
-                    }
-                    out.add(m);
+                    continue;
                 }
             }
-        }
-        catch (Throwable e)
-        {
-            Activator.logError("Error enumerating debug-server targets", e); //$NON-NLS-1$
+            out.add(DebugServerTargetSupport.describe(st));
         }
         return out;
-    }
-
-    /** Reflectively invokes a no-arg getter and returns its {@code toString()}; null on any failure. */
-    private static String reflectString(Object target, String getter)
-    {
-        try
-        {
-            java.lang.reflect.Method m = target.getClass().getMethod(getter);
-            m.setAccessible(true);
-            Object v = m.invoke(target);
-            return v != null ? v.toString() : null;
-        }
-        catch (Throwable e)
-        {
-            return null;
-        }
-    }
-
-    /** Reflectively resolves {@code getApplication()} (possibly an Optional) to its name. */
-    private static String reflectApplicationName(Object target)
-    {
-        try
-        {
-            java.lang.reflect.Method m = target.getClass().getMethod("getApplication"); //$NON-NLS-1$
-            m.setAccessible(true);
-            Object app = m.invoke(target);
-            if (app instanceof java.util.Optional<?>)
-            {
-                app = ((java.util.Optional<?>)app).orElse(null);
-            }
-            if (app == null)
-            {
-                return null;
-            }
-            String name = reflectString(app, "getName"); //$NON-NLS-1$
-            return name != null ? name : app.toString();
-        }
-        catch (Throwable e)
-        {
-            return null;
-        }
     }
 }
