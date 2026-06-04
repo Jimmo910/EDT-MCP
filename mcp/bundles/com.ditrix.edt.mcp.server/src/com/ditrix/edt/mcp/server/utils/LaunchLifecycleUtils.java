@@ -6,6 +6,10 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +24,9 @@ import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
+import com._1c.g5.v8.dt.core.platform.IExtensionProject;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.ToolParameterSettings;
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -232,6 +239,113 @@ public final class LaunchLifecycleUtils
             return false;
         }
         return waitForTerminated(launch, Math.max(1, timeoutSeconds) * 1000L);
+    }
+
+    /**
+     * Waits for the incremental build and derived-data computations of the
+     * launch's project <em>and every extension project that depends on it</em>
+     * to settle before the pre-launch DB update runs.
+     *
+     * <p>This closes the race behind bug #19925: after a test module inside an
+     * <strong>extension</strong> ({@code .cfe}) is edited, EDT schedules an
+     * asynchronous incremental rebuild of that extension. The rebuild lives in a
+     * <em>separate</em> {@link IProject} from the launch's configuration project,
+     * so {@code ProjectStateChecker} (which only inspects the launch project) and
+     * {@link #updateApplicationIfNeeded} (which only reads the application's
+     * update state) both see "ready" while the extension is still being rebuilt
+     * and exported. The pre-launch update then either no-ops or pushes the stale
+     * {@code .cfe} into the infobase, so the first test run executes the old
+     * extension and a freshly added test is silently missing — only a second run
+     * (after the rebuild settled) picks it up.
+     *
+     * <p>By joining the workspace-wide build job families (which cover the
+     * extension's incremental build regardless of which project owns it) and then
+     * waiting on the derived-data managers of the launch project plus its
+     * dependent extension projects, we guarantee the rebuilt {@code .cfe} is on
+     * disk before {@link #updateApplicationIfNeeded} runs, so the update pushes
+     * the current extension into the infobase.
+     *
+     * <p>Reuses {@link BuildUtils} — the same build/derived-data wait the
+     * metadata-persist path uses — rather than inventing a new mechanism.
+     *
+     * @param launchProject the configuration project the launch targets
+     */
+    public static void waitForLaunchBuildSettled(IProject launchProject)
+    {
+        if (launchProject == null || !launchProject.exists() || !launchProject.isOpen())
+        {
+            return;
+        }
+        // Step 1: join the workspace-wide auto/manual build job families. This is
+        // not project-scoped, so it also drains the extension's incremental
+        // rebuild — the build that actually regenerates the edited .cfe.
+        BuildUtils.waitForBuildJobs(new NullProgressMonitor());
+
+        // Step 2: wait for derived data of the launch project and every extension
+        // that depends on it, so the rebuilt model is fully exported before the
+        // pre-launch DB update reads the application's update state.
+        for (IProject project : collectLaunchAndExtensionProjects(launchProject))
+        {
+            BuildUtils.waitForDerivedData(project);
+        }
+    }
+
+    /**
+     * Returns the launch's project followed by every open extension project whose
+     * parent configuration project is the launch's project. Order is preserved
+     * and duplicates removed; the launch project is always first.
+     *
+     * <p>Extensions are discovered via {@link IV8ProjectManager} —
+     * {@link IExtensionProject#getParentProject()} links an extension back to the
+     * configuration project it extends. When the project manager is unavailable
+     * (headless tests, early startup) the list degrades gracefully to just the
+     * launch project, so the build wait is still performed for it.
+     */
+    static List<IProject> collectLaunchAndExtensionProjects(IProject launchProject)
+    {
+        Set<IProject> projects = new LinkedHashSet<>();
+        projects.add(launchProject);
+
+        IV8ProjectManager projectManager = Activator.getDefault() != null
+            ? Activator.getDefault().getV8ProjectManager() : null;
+        if (projectManager == null)
+        {
+            return new ArrayList<>(projects);
+        }
+        try
+        {
+            Collection<IExtensionProject> extensions =
+                projectManager.getProjects(IExtensionProject.class);
+            if (extensions != null)
+            {
+                for (IExtensionProject extension : extensions)
+                {
+                    if (extension == null)
+                    {
+                        continue;
+                    }
+                    IProject parent = extension.getParentProject();
+                    if (!launchProject.equals(parent))
+                    {
+                        continue;
+                    }
+                    IProject extProject = extension.getProject();
+                    if (extProject != null && extProject.exists() && extProject.isOpen())
+                    {
+                        projects.add(extProject);
+                    }
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // Discovery is best-effort: a failure here must not abort the launch.
+            // The workspace-wide build join already drained the extension build;
+            // we just skip the per-extension derived-data wait.
+            Activator.logError("Error collecting extension projects for " //$NON-NLS-1$
+                + launchProject.getName(), e);
+        }
+        return new ArrayList<>(projects);
     }
 
     /**
@@ -495,6 +609,14 @@ public final class LaunchLifecycleUtils
                     + name + "' on project " + project.getName()); //$NON-NLS-1$
                 terminated++;
             }
+
+            // Wait for the workspace build and derived data to settle for the
+            // launch project AND every extension that depends on it BEFORE the
+            // update runs. Without this, an extension (.cfe) edited just before
+            // the launch may still be mid-rebuild — the update would then no-op
+            // (or push a stale extension), and the first test run would execute
+            // the old extension, missing freshly added tests (bug #19925).
+            waitForLaunchBuildSettled(project);
 
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
                 appManager);
