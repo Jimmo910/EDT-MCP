@@ -266,26 +266,16 @@ public class MoveFormItemTool extends AbstractFormWriteTool
 
         EList<FormItem> destItems = destContainer.getItems();
 
-        // Capture the item's original index in the destination list BEFORE the
-        // removal. For an integer position that targets the same container, the
-        // index the caller gives is relative to the list they observed (which still
-        // contained the moved item); removing the item first shifts every later
-        // slot left by one, so a downward integer move would land one slot short.
-        // We compensate below. 'before:'/'after:' resolve against a sibling name and
-        // are unaffected, so they stay as-is.
-        boolean sameContainer = destContainer == sourceContainer;
-        int originalIndex = sameContainer ? destItems.indexOf(item) : -1;
-
-        // Remove from the source list first (it may be the same list).
+        // Remove from the source list first (it may be the same list as the
+        // destination). The requested integer position is the desired FINAL
+        // 0-based index of the item in the resulting list ("as you currently see
+        // it"): inserting at that index into the post-removal list lands the item
+        // at exactly that final index in both directions, so no off-by-one
+        // compensation is needed. 'first'/'last'/'before:'/'after:' are resolved
+        // by resolvePosition.
         sourceContainer.getItems().remove(item);
 
         int index = resolvePosition(position, destItems, itemName);
-        if (sameContainer && isIntegerPosition(position) && originalIndex >= 0 && index > originalIndex)
-        {
-            // Requested an absolute slot below the item's original slot: account for
-            // the one-element left shift caused by removing the item first.
-            index--;
-        }
         if (index < 0 || index > destItems.size())
         {
             index = destItems.size();
@@ -293,30 +283,6 @@ public class MoveFormItemTool extends AbstractFormWriteTool
         destItems.add(index, item);
 
         return destLabel + " at index " + index; //$NON-NLS-1$
-    }
-
-    /**
-     * Returns {@code true} when a position spec is a plain integer index (not
-     * {@code first}/{@code last}/{@code before:}/{@code after:} and not blank).
-     * Only integer positions are affected by the remove-before-insert shift.
-     *
-     * @param position the position spec
-     * @return {@code true} when it parses as a non-negative integer
-     */
-    private static boolean isIntegerPosition(String position)
-    {
-        if (position == null || position.isEmpty())
-        {
-            return false;
-        }
-        try
-        {
-            return Integer.parseInt(position.trim()) >= 0;
-        }
-        catch (NumberFormatException e)
-        {
-            return false;
-        }
     }
 
     private String sameContainerLabel(FormItemContainer container, Form form)
