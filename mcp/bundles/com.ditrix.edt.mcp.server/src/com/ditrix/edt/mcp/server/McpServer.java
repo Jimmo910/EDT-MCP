@@ -95,6 +95,7 @@ import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataObjectTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetRegisterPropertyTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetStyleItemValueTool;
 import com.ditrix.edt.mcp.server.tools.impl.SetObjectPropertyTool;
+import com.ditrix.edt.mcp.server.tools.impl.ResyncToDiskTool;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -285,6 +286,7 @@ public class McpServer
         registry.register(new SetRegisterPropertyTool());
         registry.register(new SetStyleItemValueTool());
         registry.register(new SetObjectPropertyTool());
+        registry.register(new ResyncToDiskTool());
 
         // Managed form authoring tools
         registry.register(new CreateFormTool());
