@@ -187,7 +187,15 @@ public final class DebugServerTargetSupport
             boolean exact = applicationId.equals(st.applicationId);
             boolean byName = bare.equals(st.application);
             boolean byUrl = bare.equals(st.debugServerUrl);
-            if (exact || byName || byUrl)
+            // Also match by the id of the Eclipse launch that owns this server
+            // debuggee (the real ATTR_APPLICATION_ID / attach:<name> / launch:<name>).
+            // The server-target id is keyed on the application NAME, but the id that
+            // debug_yaxunit_tests / debug_launch return is the application ID
+            // (app.getId()), which can differ from the name. Matching the owning
+            // launch makes the SAME id the launch path and the server path resolve to
+            // this one ProfilingRuntimeDebugClientTarget object.
+            boolean byLaunchId = matchesOwningLaunchId(st.target, applicationId);
+            if (exact || byName || byUrl || byLaunchId)
             {
                 if (isAnyThreadSuspended(st.target))
                 {
@@ -392,6 +400,30 @@ public final class DebugServerTargetSupport
             m.put("suspendedThread", suspendedThreadName); //$NON-NLS-1$
         }
         return m;
+    }
+
+    /**
+     * @param target the server target viewed as an Eclipse debug target
+     * @param applicationId the id to compare against the owning launch's id
+     * @return {@code true} if the Eclipse launch that owns {@code target} resolves to
+     *     the same {@code applicationId} (real {@code ATTR_APPLICATION_ID},
+     *     {@code attach:<name>} or {@code launch:<name>}). Best-effort; never throws.
+     */
+    private static boolean matchesOwningLaunchId(IDebugTarget target, String applicationId)
+    {
+        if (target == null || applicationId == null)
+        {
+            return false;
+        }
+        try
+        {
+            String launchId = LaunchConfigUtils.getApplicationIdFor(target.getLaunch());
+            return applicationId.equals(launchId);
+        }
+        catch (Exception ex)
+        {
+            return false;
+        }
     }
 
     /** Reflectively invokes a no-arg getter and returns its {@code toString()}; null on any failure. */

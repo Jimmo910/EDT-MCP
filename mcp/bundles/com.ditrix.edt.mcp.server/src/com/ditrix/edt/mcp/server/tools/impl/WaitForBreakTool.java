@@ -22,6 +22,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.DebugTargetResolver;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 
 /**
@@ -92,36 +93,34 @@ public class WaitForBreakTool implements IMcpTool
         DebugSessionRegistry registry = DebugSessionRegistry.get();
         registry.ensureListenerRegistered();
 
+        // Unified resolution: accept ANY id form for the session (real,
+        // attach:<name>, launch:<name>, ServerApplication.<app>, the bare app name,
+        // the debug server URL); a blank id auto-resolves the single active session.
         boolean autoResolved = false;
-        if (applicationId == null || applicationId.isEmpty())
+        DebugServerTargetSupport.ServerTarget serverTarget = null;
+        DebugTargetResolver.Resolution res = DebugTargetResolver.resolve(applicationId);
+        if (res != null)
         {
-            applicationId = DebugSessionRegistry.findLoneActiveApplicationId();
-            if (applicationId == null)
-            {
-                // No single Eclipse launch — fall back to a lone server debug target
-                // (e.g. the only running debug_yaxunit_tests server session).
-                DebugServerTargetSupport.ServerTarget lone = DebugServerTargetSupport.findLoneServerTarget();
-                if (lone != null)
-                {
-                    applicationId = lone.applicationId;
-                }
-            }
-            if (applicationId == null)
-            {
-                return ToolResult.error("applicationId is required — no single active debug launch " //$NON-NLS-1$
-                    + "available for auto-resolution. Use debug_status to list active launches.").toJson(); //$NON-NLS-1$
-            }
-            autoResolved = true;
+            // Use the canonical id so every follow-up tool addresses the same session.
+            applicationId = res.canonicalId;
+            autoResolved = res.autoResolved;
+            serverTarget = res.serverTarget;
         }
+        else if (applicationId == null || applicationId.isEmpty())
+        {
+            return ToolResult.error("applicationId is required — no single active debug session " //$NON-NLS-1$
+                + "available for auto-resolution. Use debug_status to list active sessions.").toJson(); //$NON-NLS-1$
+        }
+        // If res is null but an explicit id was given, fall through with that id:
+        // the session may have suspended pre-listener; the launch-based wait below
+        // still tries (findActiveTarget) and reports a clean timeout otherwise.
 
         // SERVER-TARGET PATH: a breakpoint hit in code that runs on the 1C server
         // (the common debug_yaxunit_tests case) suspends a 1C-native debug-server
-        // target, NOT an Eclipse ILaunch thread. Resolve and handle it here; this
-        // path polls the live target (its SUSPEND events do not reliably key into
-        // the launch-based registry) and injects the suspended thread so the rest
-        // of the snapshot machinery (frames/variables/eval/step) works unchanged.
-        DebugServerTargetSupport.ServerTarget serverTarget =
-            DebugServerTargetSupport.resolve(applicationId);
+        // target, NOT an Eclipse ILaunch thread. This path polls the live target
+        // (its SUSPEND events do not reliably key into the launch-based registry)
+        // and injects the suspended thread so the rest of the snapshot machinery
+        // (frames/variables/eval/step) works unchanged.
         if (serverTarget != null && !registry.hasSnapshot(applicationId))
         {
             return waitOnServerTarget(registry, serverTarget, applicationId, timeout, autoResolved);

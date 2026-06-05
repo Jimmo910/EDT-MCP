@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.runtime.Platform;
-import org.eclipse.debug.core.model.IDebugTarget;
 import org.osgi.framework.Bundle;
 
 import com.ditrix.edt.mcp.server.Activator;
@@ -21,8 +20,9 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
-import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.DebugTargetResolver;
 import com.ditrix.edt.mcp.server.utils.ProfilingStateRegistry;
+import com.ditrix.edt.mcp.server.utils.ProfilingTargetResolver;
 
 /**
  * Retrieves profiling (замер производительности) results after a debug session.
@@ -76,7 +76,9 @@ public class GetProfilingResultsTool implements IMcpTool
             .booleanProperty("autoStop", "If true and a measurement is currently active, stop it " //$NON-NLS-1$ //$NON-NLS-2$
                 + "(toggle profiling OFF) before reading results. Requires applicationId. Default: false.") //$NON-NLS-1$
             .stringProperty("applicationId", "Application id of the debug session whose measurement to " //$NON-NLS-1$ //$NON-NLS-2$
-                + "stop when autoStop=true (the same id passed to start_profiling).") //$NON-NLS-1$
+                + "stop when autoStop=true. Accepts ANY id form for the session (real, " //$NON-NLS-1$
+                + "'attach:<name>', 'launch:<name>', 'ServerApplication.<app>', the bare app name); " //$NON-NLS-1$
+                + "it is resolved to the same session start_profiling used.") //$NON-NLS-1$
             .build();
     }
 
@@ -124,11 +126,16 @@ public class GetProfilingResultsTool implements IMcpTool
 
             // Optional autoStop: if a measurement is currently active and the caller
             // asked us to stop it, toggle profiling OFF and poll for the async results.
+            // Canonicalize the id first so any accepted form resolves to the same
+            // session start_profiling tracked.
             boolean autoStopped = false;
-            if (autoStop && applicationId != null && !applicationId.isEmpty()
-                && ProfilingStateRegistry.get().isActive(applicationId))
+            if (autoStop && applicationId != null && !applicationId.isEmpty())
             {
-                autoStopped = stopMeasurement(applicationId, profilingService, profilingServiceClass);
+                String canonicalId = canonicalIdFor(applicationId);
+                if (canonicalId != null && ProfilingStateRegistry.get().isActive(canonicalId))
+                {
+                    autoStopped = stopMeasurement(canonicalId, profilingService, profilingServiceClass);
+                }
             }
 
             List<?> results = (List<?>) getResults.invoke(profilingService);
@@ -277,54 +284,50 @@ public class GetProfilingResultsTool implements IMcpTool
     }
 
     /**
-     * Stops the active measurement for the given application by toggling profiling
-     * OFF through {@code IProfileTarget.toggleProfiling(...)}, mirroring
-     * {@code StartProfilingTool}. Updates the {@link ProfilingStateRegistry} on
-     * success so the tracked state stays consistent.
+     * Stops the active measurement for the given (already canonicalized) application
+     * by toggling profiling OFF through {@code IProfileTarget.toggleProfiling(...)},
+     * mirroring {@code StartProfilingTool}. Resolves the profiling-capable target
+     * through {@link ProfilingTargetResolver}, so it works for server-side
+     * ({@code ServerApplication.<app>}) sessions too. Updates the
+     * {@link ProfilingStateRegistry} on success so the tracked state stays consistent.
      *
      * @return {@code true} if the measurement was actually toggled off, {@code false}
      *         if the target could not be resolved/adapted (state left unchanged)
      */
-    private boolean stopMeasurement(String applicationId, Object profilingService,
+    private boolean stopMeasurement(String canonicalId, Object profilingService,
         Class<?> profilingServiceClass) throws Exception
     {
-        IDebugTarget target = DebugSessionRegistry.findActiveTarget(applicationId);
-        if (target == null)
+        ProfilingTargetResolver.Result profiling = ProfilingTargetResolver.resolve(canonicalId);
+        if (!profiling.isResolved())
         {
-            // The debug session is gone; we can no longer toggle. Mark inactive so
-            // the "still active" hint does not keep firing for a dead session.
-            ProfilingStateRegistry.get().setInactive(applicationId);
-            Activator.logInfo("autoStop: no active debug target for applicationId=" + applicationId //$NON-NLS-1$
-                + "; marked profiling inactive."); //$NON-NLS-1$
+            // The debug session is gone or not profile-capable; we can no longer
+            // toggle. Mark inactive so the "still active" hint does not keep firing
+            // for a dead session.
+            ProfilingStateRegistry.get().setInactive(canonicalId);
+            Activator.logInfo("autoStop: could not resolve a profiling target for applicationId=" //$NON-NLS-1$
+                + canonicalId + " (" + profiling.error + "); marked profiling inactive."); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
 
-        Bundle profilingBundle = Platform.getBundle(PROFILING_CORE_BUNDLE);
-        Class<?> profileTargetClass = profilingBundle.loadClass(
-            "com._1c.g5.v8.dt.profiling.core.IProfileTarget"); //$NON-NLS-1$
-
-        Object profileTarget;
-        if (profileTargetClass.isInstance(target))
-        {
-            profileTarget = target;
-        }
-        else
-        {
-            profileTarget = target.getAdapter(profileTargetClass);
-        }
-        if (profileTarget == null)
-        {
-            Activator.logInfo("autoStop: debug target does not support profiling for applicationId=" //$NON-NLS-1$
-                + applicationId); //$NON-NLS-1$
-            return false;
-        }
-
-        Method toggleProfiling = profilingServiceClass.getMethod("toggleProfiling", profileTargetClass); //$NON-NLS-1$
-        toggleProfiling.invoke(profilingService, profileTarget);
+        Method toggleProfiling = profilingServiceClass.getMethod("toggleProfiling", //$NON-NLS-1$
+            profiling.profileTargetClass);
+        toggleProfiling.invoke(profilingService, profiling.profileTarget);
 
         // Reflect the OFF state in the tracker.
-        ProfilingStateRegistry.get().setInactive(applicationId);
-        Activator.logInfo("autoStop: profiling toggled OFF for applicationId=" + applicationId); //$NON-NLS-1$
+        ProfilingStateRegistry.get().setInactive(canonicalId);
+        Activator.logInfo("autoStop: profiling toggled OFF for applicationId=" + canonicalId); //$NON-NLS-1$
         return true;
+    }
+
+    /**
+     * Maps any accepted {@code applicationId} form to the canonical id the
+     * profiling tracker uses (the id {@code start_profiling} recorded). Returns the
+     * input unchanged if no live session resolves (best-effort — the caller then
+     * simply finds the tracker inactive for it).
+     */
+    private static String canonicalIdFor(String applicationId)
+    {
+        DebugTargetResolver.Resolution res = DebugTargetResolver.resolve(applicationId);
+        return res != null ? res.canonicalId : applicationId;
     }
 }
