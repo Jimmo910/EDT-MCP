@@ -94,8 +94,9 @@ public class RunYaxunitTestsTool implements IMcpTool
                "(recomputeAll) of the project AND its dependent EXTENSION (.cfe) projects, waits for " + //$NON-NLS-1$
                "it to settle, then updates the infobase — so a test you just edited inside an extension " + //$NON-NLS-1$
                "is force-rebuilt and its regenerated .cfe is loaded into the infobase before the run, " + //$NON-NLS-1$
-               "instead of executing a stale extension. It then WAITS until the infobase has actually " + //$NON-NLS-1$
-               "applied the change (the update state is observed UPDATED) before starting the run; if the " + //$NON-NLS-1$
+               "instead of executing a stale extension. It then WAITS until the infobase actually reports " + //$NON-NLS-1$
+               "UPDATED via EDT's own update-state event (the same signal that drives the Applications " + //$NON-NLS-1$
+               "view's out-of-sync star) before starting the run; if the " + //$NON-NLS-1$
                "IB cannot be brought in sync in time it REFUSES to run (clear out-of-sync error) rather " + //$NON-NLS-1$
                "than executing the tests against a stale infobase. Use updateScope to narrow this to the " + //$NON-NLS-1$
                "fast 'extension:<ProjectName>' path. " + //$NON-NLS-1$
