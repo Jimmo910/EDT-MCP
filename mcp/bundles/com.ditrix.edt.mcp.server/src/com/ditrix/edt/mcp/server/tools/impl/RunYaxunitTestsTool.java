@@ -90,10 +90,12 @@ public class RunYaxunitTestsTool implements IMcpTool
                "**Pending** — call this tool again with the same arguments to keep waiting and " + //$NON-NLS-1$
                "fetch the result once the launch finishes. The launch is NOT terminated on timeout. " + //$NON-NLS-1$
                "A full Markdown report is also written to report.md next to junit.xml. " + //$NON-NLS-1$
-               "With updateBeforeLaunch=true (default) the tool waits for the incremental rebuild " + //$NON-NLS-1$
-               "of the project AND its dependent EXTENSION (.cfe) projects to finish before launching, " + //$NON-NLS-1$
-               "then updates the infobase — so a test you just edited inside an extension is rebuilt " + //$NON-NLS-1$
-               "and pushed into the infobase before the run, instead of executing a stale extension. " + //$NON-NLS-1$
+               "With updateBeforeLaunch=true (default) the tool FORCES a derived-data recompute " + //$NON-NLS-1$
+               "(recomputeAll) of the project AND its dependent EXTENSION (.cfe) projects, waits for " + //$NON-NLS-1$
+               "it to settle, then updates the infobase — so a test you just edited inside an extension " + //$NON-NLS-1$
+               "is force-rebuilt and its regenerated .cfe is loaded into the infobase before the run, " + //$NON-NLS-1$
+               "instead of executing a stale extension. Use updateScope to narrow this to the fast " + //$NON-NLS-1$
+               "'extension:<ProjectName>' path. " + //$NON-NLS-1$
                "Requires an existing launch configuration and YAXUnit extension installed in the infobase."; //$NON-NLS-1$
     }
 
@@ -120,8 +122,19 @@ public class RunYaxunitTestsTool implements IMcpTool
                     + "dialog that would block the MCP call. " //$NON-NLS-1$
                     + "Set false to keep legacy behaviour (delegate decides; dialog may appear; " //$NON-NLS-1$
                     + "no extension-rebuild wait, so a freshly edited extension may run stale).") //$NON-NLS-1$
+            .stringProperty("updateScope", UPDATE_SCOPE_DESCRIPTION) //$NON-NLS-1$
             .build();
     }
+
+    /**
+     * Shared schema doc for the {@code updateScope} parameter (also used by
+     * {@code debug_yaxunit_tests} and {@code update_database}).
+     */
+    static final String UPDATE_SCOPE_DESCRIPTION =
+        "Which projects to rebuild+update before the run: 'all' (configuration + dependent " //$NON-NLS-1$
+            + "extensions, default), 'configuration', or 'extension:<ProjectName>' " //$NON-NLS-1$
+            + "(comma-separate several). Forces a derived-data recompute so a freshly edited " //$NON-NLS-1$
+            + "extension's .cfe is regenerated and loaded into the infobase before the run."; //$NON-NLS-1$
 
     @Override
     public ResponseType getResponseType()
@@ -145,6 +158,7 @@ public class RunYaxunitTestsTool implements IMcpTool
         }
         boolean updateBeforeLaunch = JsonUtils.extractBooleanArgument(params, //$NON-NLS-1$
             "updateBeforeLaunch", true); //$NON-NLS-1$
+        String updateScope = JsonUtils.extractStringArgument(params, "updateScope"); //$NON-NLS-1$
 
         boolean hasName = configName != null && !configName.isEmpty();
         if (!hasName)
@@ -164,7 +178,7 @@ public class RunYaxunitTestsTool implements IMcpTool
         purgeTerminatedLaunches();
 
         return runTests(configName, projectName, applicationId, extensions, modules, tests,
-            timeout, updateBeforeLaunch);
+            timeout, updateBeforeLaunch, updateScope);
     }
 
     /**
@@ -182,7 +196,8 @@ public class RunYaxunitTestsTool implements IMcpTool
      * the result. Old runs are cleaned up automatically before starting a new launch.
      */
     private String runTests(String configName, String projectName, String applicationId,
-            String extensions, String modules, String tests, int timeout, boolean updateBeforeLaunch)
+            String extensions, String modules, String tests, int timeout, boolean updateBeforeLaunch,
+            String updateScope)
     {
         try
         {
@@ -343,7 +358,7 @@ public class RunYaxunitTestsTool implements IMcpTool
                     {
                         int terminateTimeout = LaunchLifecycleUtils.getDefaultTerminateTimeoutSeconds();
                         preLaunch = LaunchLifecycleUtils.prepareForFreshLaunch(launchManager,
-                            project, applicationId, appManager, terminateTimeout);
+                            project, applicationId, appManager, terminateTimeout, updateScope);
                         if (!preLaunch.isOk())
                         {
                             return "**Error:** Pre-launch preparation failed: " //$NON-NLS-1$

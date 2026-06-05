@@ -141,7 +141,7 @@ public class LaunchLifecycleUtilsPrepareTest
         when(launchManager.getLaunches()).thenReturn(new ILaunch[] { attachLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals("stale attach must be counted as swept",
@@ -176,7 +176,7 @@ public class LaunchLifecycleUtilsPrepareTest
 
             PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
                 launchManager, mockOpenProject(), RUNTIME_APP_ID,
-                mockUpToDateAppManager(), 2);
+                mockUpToDateAppManager(), 2, null);
 
             assertFalse("owned attach must block the chain", result.isOk());
             assertTrue("error must mention the owning launch by name",
@@ -206,7 +206,7 @@ public class LaunchLifecycleUtilsPrepareTest
         when(launchManager.getLaunches()).thenReturn(new ILaunch[] { runtimeLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals(1, result.getTerminatedCount());
@@ -236,7 +236,7 @@ public class LaunchLifecycleUtilsPrepareTest
             .thenReturn(new ILaunch[] { runtimeLaunch, attachLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals("both runtime and attach must be counted",

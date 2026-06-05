@@ -101,7 +101,11 @@ public class UpdateDatabaseTool implements IMcpTool
             + "pass terminateSessions=true to stop those EDT-launched 1С clients first, or call " //$NON-NLS-1$
             + "terminate_launch manually and retry. NOTE: only 1С clients started from THIS EDT " //$NON-NLS-1$
             + "instance are visible/terminable — a session opened by an external 1С:Enterprise / " //$NON-NLS-1$
-            + "Designer cannot be detected here; if the update times out, close such sessions manually."; //$NON-NLS-1$
+            + "Designer cannot be detected here; if the update times out, close such sessions manually. " //$NON-NLS-1$
+            + "Before updating, the tool FORCES a derived-data recompute (recomputeAll) of the " //$NON-NLS-1$
+            + "configuration and its dependent EXTENSION (.cfe) projects and waits for it to settle, " //$NON-NLS-1$
+            + "so an edited extension's regenerated .cfe is loaded into the infobase (not left stale). " //$NON-NLS-1$
+            + "Use updateScope to narrow this to the fast 'extension:<ProjectName>' path."; //$NON-NLS-1$
     }
 
     @Override
@@ -126,6 +130,7 @@ public class UpdateDatabaseTool implements IMcpTool
                     + "(prevents an unbounded hang when the IB is busy). Default is configured in EDT " //$NON-NLS-1$
                     + "preferences (MCP Server -> Tools -> update_database), factory default 120. " //$NON-NLS-1$
                     + "Clamped to [5, 1800].") //$NON-NLS-1$
+            .stringProperty("updateScope", RunYaxunitTestsTool.UPDATE_SCOPE_DESCRIPTION) //$NON-NLS-1$
             .build();
     }
 
@@ -144,6 +149,7 @@ public class UpdateDatabaseTool implements IMcpTool
         boolean fullUpdate = JsonUtils.extractBooleanArgument(params, "fullUpdate", false); //$NON-NLS-1$
         boolean autoRestructure = JsonUtils.extractBooleanArgument(params, "autoRestructure", true); //$NON-NLS-1$
         boolean terminateSessions = JsonUtils.extractBooleanArgument(params, "terminateSessions", false); //$NON-NLS-1$
+        String updateScope = JsonUtils.extractStringArgument(params, "updateScope"); //$NON-NLS-1$
         int timeoutSeconds = resolveTimeoutSeconds(params);
 
         boolean hasName = configName != null && !configName.isEmpty();
@@ -210,7 +216,8 @@ public class UpdateDatabaseTool implements IMcpTool
             return busyError;
         }
 
-        return updateDatabase(projectName, applicationId, fullUpdate, autoRestructure, timeoutSeconds);
+        return updateDatabase(projectName, applicationId, fullUpdate, autoRestructure, timeoutSeconds,
+            updateScope);
     }
 
     /**
@@ -352,10 +359,12 @@ public class UpdateDatabaseTool implements IMcpTool
      * @param fullUpdate true for full update, false for incremental
      * @param autoRestructure whether to auto-apply restructurization
      * @param timeoutSeconds maximum time to wait for the update before reporting a timeout
+     * @param updateScope which projects to force-recompute before the update (see
+     *            {@link LaunchLifecycleUtils#resolveUpdateScope(IProject, String)})
      * @return JSON string with result
      */
     private String updateDatabase(String projectName, String applicationId,
-            boolean fullUpdate, boolean autoRestructure, int timeoutSeconds)
+            boolean fullUpdate, boolean autoRestructure, int timeoutSeconds, String updateScope)
     {
         try
         {
@@ -388,6 +397,16 @@ public class UpdateDatabaseTool implements IMcpTool
             }
 
             IApplication application = appOpt.get();
+
+            // FORCE a derived-data recompute of the configuration and the requested
+            // extensions, then wait for it to settle, BEFORE updating. Without this
+            // an extension (.cfe) edited just before the update is never regenerated
+            // (waitAllComputations no-ops when nothing is scheduled), so the update
+            // consumes the stale export artifact and the infobase keeps the old
+            // extension — exactly the "explicit update_database still stale" symptom
+            // of bug #19925. updateScope narrows the recompute to a specific extension.
+            LaunchLifecycleUtils.recomputeAndSettle(
+                LaunchLifecycleUtils.resolveUpdateScope(project, updateScope));
 
             // Check current update state before proceeding
             ApplicationUpdateState stateBefore = appManager.getUpdateState(application);

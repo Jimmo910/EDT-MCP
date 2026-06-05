@@ -76,10 +76,12 @@ public class DebugYaxunitTestsTool implements IMcpTool
             + "to block until a breakpoint is hit, then inspect with get_variables / " //$NON-NLS-1$
             + "evaluate_expression / step / resume. " //$NON-NLS-1$
             + "Use a tight tests filter (single test method) to make the cycle predictable. " //$NON-NLS-1$
-            + "With updateBeforeLaunch=true (default) the tool waits for the incremental rebuild " //$NON-NLS-1$
-            + "of the project AND its dependent EXTENSION (.cfe) projects to finish before launching, " //$NON-NLS-1$
-            + "then updates the infobase — so a test edited inside an extension is rebuilt and pushed " //$NON-NLS-1$
-            + "into the infobase before the run, instead of debugging a stale extension. " //$NON-NLS-1$
+            + "With updateBeforeLaunch=true (default) the tool FORCES a derived-data recompute " //$NON-NLS-1$
+            + "(recomputeAll) of the project AND its dependent EXTENSION (.cfe) projects, waits for " //$NON-NLS-1$
+            + "it to settle, then updates the infobase — so a test edited inside an extension is " //$NON-NLS-1$
+            + "force-rebuilt and its regenerated .cfe is loaded into the infobase before the run, " //$NON-NLS-1$
+            + "instead of debugging a stale extension. Use updateScope to narrow this to the fast " //$NON-NLS-1$
+            + "'extension:<ProjectName>' path. " //$NON-NLS-1$
             + "Requires an existing 1C launch configuration and YAXUnit installed in the infobase."; //$NON-NLS-1$
     }
 
@@ -105,6 +107,7 @@ public class DebugYaxunitTestsTool implements IMcpTool
                     + "block the MCP call. " //$NON-NLS-1$
                     + "Set false to keep legacy behaviour (delegate decides; dialog may appear; " //$NON-NLS-1$
                     + "no extension-rebuild wait, so a freshly edited extension may run stale).") //$NON-NLS-1$
+            .stringProperty("updateScope", RunYaxunitTestsTool.UPDATE_SCOPE_DESCRIPTION) //$NON-NLS-1$
             .build();
     }
 
@@ -125,6 +128,7 @@ public class DebugYaxunitTestsTool implements IMcpTool
         String tests = JsonUtils.extractStringArgument(params, "tests"); //$NON-NLS-1$
         boolean updateBeforeLaunch = JsonUtils.extractBooleanArgument(params, //$NON-NLS-1$
             "updateBeforeLaunch", true); //$NON-NLS-1$
+        String updateScope = JsonUtils.extractStringArgument(params, "updateScope"); //$NON-NLS-1$
 
         boolean hasName = configName != null && !configName.isEmpty();
         if (!hasName)
@@ -248,7 +252,7 @@ public class DebugYaxunitTestsTool implements IMcpTool
                 {
                     int terminateTimeout = LaunchLifecycleUtils.getDefaultTerminateTimeoutSeconds();
                     preLaunch = LaunchLifecycleUtils.prepareForFreshLaunch(launchManager, project,
-                        applicationId, appManager, terminateTimeout);
+                        applicationId, appManager, terminateTimeout, updateScope);
                     if (!preLaunch.isOk())
                     {
                         return ToolResult.error("Pre-launch preparation failed: " //$NON-NLS-1$
