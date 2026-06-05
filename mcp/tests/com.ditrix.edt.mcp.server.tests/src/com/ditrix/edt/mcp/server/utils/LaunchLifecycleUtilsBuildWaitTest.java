@@ -90,4 +90,122 @@ public class LaunchLifecycleUtilsBuildWaitTest
         LaunchLifecycleUtils.waitForLaunchBuildSettled(launch);
         assertTrue(true);
     }
+
+    // --- resolveUpdateScope (bug #19925 S20b) -------------------------------
+    //
+    // These run headless (Activator.getDefault() == null), so extension
+    // discovery via collectLaunchAndExtensionProjects degrades to "just the
+    // launch project". The assertions therefore exercise the scope-PARSING logic
+    // (all / configuration / extension:<Name> / unknown / null) and the
+    // invariant that the configuration project is always present and first. The
+    // live extension-discovery branch is covered by a real YAXUnit-in-extension
+    // run.
+
+    @Test
+    public void testResolveUpdateScopeNullIsAllAndConfigFirst()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch, null);
+        assertFalse("null scope must resolve to a non-empty list", projects.isEmpty());
+        assertSame("configuration must always be first", launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeEmptyIsAll()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch, "   ");
+        assertFalse(projects.isEmpty());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeAllKeywordCaseInsensitive()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch, "ALL");
+        assertFalse(projects.isEmpty());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeConfigurationIsLaunchProjectOnly()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch, "configuration");
+        assertEquals("configuration scope is exactly the launch project", 1, projects.size());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeConfigurationCaseInsensitive()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch, "Configuration");
+        assertEquals(1, projects.size());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeExtensionAlwaysIncludesConfigFirst()
+    {
+        // An extension cannot reach the IB without its parent configuration, so the
+        // configuration project is always included (and first). Headless: the named
+        // extension is not discoverable, so the result is exactly the launch project.
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects =
+            LaunchLifecycleUtils.resolveUpdateScope(launch, "extension:yaxunit");
+        assertFalse("extension scope must always include the configuration", projects.isEmpty());
+        assertSame("configuration must be first", launch, projects.get(0));
+        assertEquals("headless: only the configuration is resolvable", 1, projects.size());
+    }
+
+    @Test
+    public void testResolveUpdateScopeMultipleExtensionsIncludesConfigFirst()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(launch,
+            "extension:yaxunit, extension:other");
+        assertFalse(projects.isEmpty());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeUnknownNameStillRecomputesConfig()
+    {
+        // Unknown extension names are ignored, but the configuration is always
+        // recomputed — never an empty scope.
+        IProject launch = mockOpenProject("MyConfig");
+        List<IProject> projects =
+            LaunchLifecycleUtils.resolveUpdateScope(launch, "extension:doesNotExist");
+        assertEquals(1, projects.size());
+        assertSame(launch, projects.get(0));
+    }
+
+    @Test
+    public void testResolveUpdateScopeNullProjectIsEmpty()
+    {
+        // Defensive: a null launch project must not throw and yields an empty scope.
+        List<IProject> projects = LaunchLifecycleUtils.resolveUpdateScope(null, "all");
+        assertTrue("null project yields an empty scope", projects.isEmpty());
+    }
+
+    @Test
+    public void testRecomputeAndSettleNullCollectionIsNoOp()
+    {
+        // Must not throw on a null/empty collection (defensive launch hot path).
+        LaunchLifecycleUtils.recomputeAndSettle(null);
+        LaunchLifecycleUtils.recomputeAndSettle(java.util.Collections.emptyList());
+        assertTrue(true);
+    }
+
+    @Test
+    public void testRecomputeAndSettleOpenProjectDoesNotThrow()
+    {
+        // With no OSGi services the per-project recompute degrades to a no-op and
+        // the build/derived-data drain is best-effort; the call must not throw.
+        IProject launch = mockOpenProject("MyConfig");
+        LaunchLifecycleUtils.recomputeAndSettle(java.util.Arrays.asList(launch));
+        assertTrue(true);
+    }
 }

@@ -24,6 +24,10 @@ import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
+import com._1c.g5.v8.derived.IDerivedDataManager;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
 import com._1c.g5.v8.dt.core.platform.IExtensionProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -268,6 +272,11 @@ public final class LaunchLifecycleUtils
      * <p>Reuses {@link BuildUtils} — the same build/derived-data wait the
      * metadata-persist path uses — rather than inventing a new mechanism.
      *
+     * <p>Thin wrapper over {@link #recomputeAndSettle(Collection)} for the full
+     * launch-project-plus-extensions scope, preserved so existing callers/tests
+     * keep working. Prefer {@link #recomputeAndSettle(Collection)} +
+     * {@link #resolveUpdateScope(IProject, String)} for a narrowable scope.
+     *
      * @param launchProject the configuration project the launch targets
      */
     public static void waitForLaunchBuildSettled(IProject launchProject)
@@ -276,18 +285,208 @@ public final class LaunchLifecycleUtils
         {
             return;
         }
-        // Step 1: join the workspace-wide auto/manual build job families. This is
-        // not project-scoped, so it also drains the extension's incremental
-        // rebuild — the build that actually regenerates the edited .cfe.
+        recomputeAndSettle(collectLaunchAndExtensionProjects(launchProject));
+    }
+
+    /**
+     * Forces a derived-data recompute of the given projects and then waits for the
+     * workspace build and per-project derived data to settle, so a freshly edited
+     * <strong>extension</strong> ({@code .cfe}) is regenerated and exported to disk
+     * before the pre-launch DB update reads the application's update state.
+     *
+     * <p>This is the FORCE lever bug #19925 needs. The previous pre-launch chain
+     * only <em>waited</em> for derived data, but {@code waitAllComputations(...)}
+     * returns immediately when nothing is scheduled — so a stale extension
+     * {@code .cfe} was never regenerated and {@code appManager.update(...)} simply
+     * consumed the existing (stale) export artifact. {@link IDerivedDataManager#recomputeAll()}
+     * (exactly what {@code refresh_model} / {@code RefreshModelTool} uses) forces the
+     * extension's model — and thus its {@code .cfe} — to be rebuilt before the update.
+     *
+     * <p>Sequence (mirrors {@code RefreshModelTool.refreshModel}'s recompute+settle
+     * site: resolve {@code IDtProject} → {@code IDerivedDataManager} via the same
+     * provider, then {@code recomputeAll()} followed by {@link BuildUtils} draining):
+     * <ol>
+     *   <li>schedule {@code recomputeAll()} for EVERY project first (so all rebuilds
+     *       are queued before we start blocking on any of them);</li>
+     *   <li>drain the workspace-wide build job families once via
+     *       {@link BuildUtils#waitForBuildJobs};</li>
+     *   <li>wait on each project's derived data via {@link BuildUtils#waitForDerivedData}.</li>
+     * </ol>
+     *
+     * <p>Null-safe and defensive, matching {@link BuildUtils#waitForDerivedData}:
+     * a {@code null}/closed project, or unavailable EDT services
+     * ({@code IDtProjectManager}, {@code IDerivedDataManagerProvider}, the per-project
+     * {@code IDtProject} or {@code IDerivedDataManager}), make the recompute a per-project
+     * no-op. Nothing here is allowed to throw into the launch hot path — failures are
+     * logged and the loop continues.
+     *
+     * @param projects projects to force-recompute and settle (may be {@code null} or
+     *            contain {@code null}/closed entries — all skipped)
+     */
+    public static void recomputeAndSettle(Collection<IProject> projects)
+    {
+        if (projects == null || projects.isEmpty())
+        {
+            return;
+        }
+
+        // Phase 1: schedule a forced recompute for every open project up front,
+        // so all extension rebuilds are queued before we start blocking. This is
+        // the same provider/manager access pattern RefreshModelTool uses.
+        for (IProject project : projects)
+        {
+            if (project == null || !project.exists() || !project.isOpen())
+            {
+                continue;
+            }
+            try
+            {
+                if (Activator.getDefault() == null)
+                {
+                    continue;
+                }
+                IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
+                if (dtProjectManager == null)
+                {
+                    continue;
+                }
+                IDtProject dtProject = dtProjectManager.getDtProject(project);
+                if (dtProject == null)
+                {
+                    continue;
+                }
+                IDerivedDataManagerProvider ddProvider =
+                    Activator.getDefault().getDerivedDataManagerProvider();
+                if (ddProvider == null)
+                {
+                    continue;
+                }
+                IDerivedDataManager ddManager = ddProvider.get(dtProject);
+                if (ddManager == null)
+                {
+                    continue;
+                }
+                Activator.logInfo("Pre-launch: forcing derived-data recompute for project: " //$NON-NLS-1$
+                    + project.getName());
+                ddManager.recomputeAll();
+            }
+            catch (RuntimeException e)
+            {
+                // A recompute failure must never abort the launch — log and move on.
+                Activator.logError("Error forcing derived-data recompute for " //$NON-NLS-1$
+                    + project.getName(), e);
+            }
+        }
+
+        // Phase 2: drain the workspace-wide build job families once. This is not
+        // project-scoped, so it covers the extension's incremental rebuild
+        // regardless of which project owns it.
         BuildUtils.waitForBuildJobs(new NullProgressMonitor());
 
-        // Step 2: wait for derived data of the launch project and every extension
-        // that depends on it, so the rebuilt model is fully exported before the
-        // pre-launch DB update reads the application's update state.
-        for (IProject project : collectLaunchAndExtensionProjects(launchProject))
+        // Phase 3: wait on each project's derived data so the recomputed model
+        // (and the regenerated .cfe) is fully exported before the DB update runs.
+        for (IProject project : projects)
         {
+            if (project == null || !project.exists() || !project.isOpen())
+            {
+                continue;
+            }
             BuildUtils.waitForDerivedData(project);
         }
+    }
+
+    /**
+     * Resolves which projects the pre-launch recompute+update should cover, from
+     * the optional {@code updateScope} tool parameter.
+     * <ul>
+     *   <li>{@code null} / empty / {@code "all"} (case-insensitive) → the full list
+     *       from {@link #collectLaunchAndExtensionProjects(IProject)} (launch project
+     *       first, then its dependent extensions);</li>
+     *   <li>{@code "configuration"} (case-insensitive) → just {@code [launchProject]};</li>
+     *   <li>{@code "extension:<Name>"} or a comma-separated list of such tokens →
+     *       {@code launchProject} PLUS only the dependent extension projects whose
+     *       {@link IExtensionProject#getProject()} name equals a requested
+     *       {@code <Name>}. The launch (configuration) project is ALWAYS included,
+     *       because an extension cannot reach the infobase without its parent
+     *       configuration present. Unknown names are ignored (the configuration is
+     *       still recomputed); callers may note them.</li>
+     * </ul>
+     *
+     * <p>Null-safe: a {@code null} {@code launchProject} yields an empty list.
+     * The launch (configuration) project is always first in the returned list.
+     *
+     * @param launchProject the configuration project the launch targets
+     * @param updateScope the raw {@code updateScope} parameter value (may be {@code null})
+     * @return ordered, de-duplicated project list (configuration first)
+     */
+    public static List<IProject> resolveUpdateScope(IProject launchProject, String updateScope)
+    {
+        if (launchProject == null)
+        {
+            return new ArrayList<>();
+        }
+
+        String scope = updateScope != null ? updateScope.trim() : ""; //$NON-NLS-1$
+        if (scope.isEmpty() || "all".equalsIgnoreCase(scope)) //$NON-NLS-1$
+        {
+            return collectLaunchAndExtensionProjects(launchProject);
+        }
+        if ("configuration".equalsIgnoreCase(scope)) //$NON-NLS-1$
+        {
+            List<IProject> only = new ArrayList<>();
+            only.add(launchProject);
+            return only;
+        }
+
+        // "extension:<Name>" tokens (comma-separated). Collect the requested
+        // extension names case-sensitively (project names are case-sensitive on
+        // Linux), then keep only the dependent extensions whose project name
+        // matches. The configuration project is always included first.
+        Set<String> requested = new LinkedHashSet<>();
+        for (String token : scope.split(",")) //$NON-NLS-1$
+        {
+            String trimmed = token.trim();
+            if (trimmed.isEmpty())
+            {
+                continue;
+            }
+            // Accept "extension:<Name>"; tolerate a bare name as the same intent.
+            int colon = trimmed.indexOf(':');
+            if (colon >= 0)
+            {
+                String prefix = trimmed.substring(0, colon).trim();
+                String name = trimmed.substring(colon + 1).trim();
+                if ("extension".equalsIgnoreCase(prefix) && !name.isEmpty()) //$NON-NLS-1$
+                {
+                    requested.add(name);
+                }
+            }
+            else
+            {
+                requested.add(trimmed);
+            }
+        }
+
+        Set<IProject> projects = new LinkedHashSet<>();
+        projects.add(launchProject);
+        if (requested.isEmpty())
+        {
+            // Scope referenced no parseable extension name — degrade to just the
+            // configuration (which is always rebuilt) rather than the full scope.
+            return new ArrayList<>(projects);
+        }
+        for (IProject project : collectLaunchAndExtensionProjects(launchProject))
+        {
+            if (project == null || launchProject.equals(project))
+            {
+                continue;
+            }
+            if (requested.contains(project.getName()))
+            {
+                projects.add(project);
+            }
+        }
+        return new ArrayList<>(projects);
     }
 
     /**
@@ -498,10 +697,14 @@ public final class LaunchLifecycleUtils
      * @param applicationId           target {@code ATTR_APPLICATION_ID}
      * @param appManager              EDT application manager
      * @param terminateTimeoutSeconds polite-wait window per live launch
+     * @param updateScope             which projects to force-recompute+update before
+     *            the launch (see {@link #resolveUpdateScope(IProject, String)}); pass
+     *            {@code null} or {@code "all"} for the configuration plus its
+     *            dependent extensions
      */
     public static PreLaunchResult prepareForFreshLaunch(ILaunchManager launchManager,
             IProject project, String applicationId, IApplicationManager appManager,
-            int terminateTimeoutSeconds)
+            int terminateTimeoutSeconds, String updateScope)
     {
         if (launchManager == null)
         {
@@ -610,13 +813,15 @@ public final class LaunchLifecycleUtils
                 terminated++;
             }
 
-            // Wait for the workspace build and derived data to settle for the
-            // launch project AND every extension that depends on it BEFORE the
-            // update runs. Without this, an extension (.cfe) edited just before
-            // the launch may still be mid-rebuild — the update would then no-op
-            // (or push a stale extension), and the first test run would execute
-            // the old extension, missing freshly added tests (bug #19925).
-            waitForLaunchBuildSettled(project);
+            // FORCE a derived-data recompute of the launch project AND the
+            // requested extensions BEFORE the update runs, then wait for it to
+            // settle. Without the forced recompute, an extension (.cfe) edited
+            // just before the launch is never regenerated (waitAllComputations
+            // no-ops when nothing is scheduled) and appManager.update() consumes
+            // the stale export artifact — so the first test run executes the old
+            // extension, missing freshly added tests (bug #19925). updateScope
+            // narrows the recompute when only a specific extension changed.
+            recomputeAndSettle(resolveUpdateScope(project, updateScope));
 
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
                 appManager);
