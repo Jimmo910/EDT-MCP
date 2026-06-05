@@ -28,6 +28,8 @@ import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.ILaunchConfigurationType;
 import org.eclipse.debug.core.ILaunchManager;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.PreLaunchResult;
@@ -49,6 +51,21 @@ public class LaunchLifecycleUtilsPrepareTest
 {
     private static final String PROJECT_NAME = "MyProject";
     private static final String RUNTIME_APP_ID = "real-app-uuid";
+
+    @Before
+    public void shrinkTimings()
+    {
+        // The up-to-date appManager mock returns UPDATED, which now triggers the
+        // settle-before-decide window — shrink it so these terminate-focused tests
+        // stay fast.
+        LaunchLifecycleUtils.setSyncTimingsForTest(20L, 200L, 5L);
+    }
+
+    @After
+    public void restoreTimings()
+    {
+        LaunchLifecycleUtils.resetSyncTimingsForTest();
+    }
 
     private static IProject mockOpenProject()
     {
