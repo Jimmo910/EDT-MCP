@@ -321,9 +321,18 @@ public class RunYaxunitTestsTool implements IMcpTool
                 return buildPendingMessage(reportDir);
             }
 
-            // No active launch — return fresh cached result if available.
+            // No active launch — return a fresh cached result if available, BUT never
+            // when updateBeforeLaunch=true. With updateBeforeLaunch=true the caller is
+            // explicitly asking for a fresh run after a possible source edit: returning a
+            // cached junit here would skip BOTH the pre-launch DB sync (Phase 2) and the
+            // run itself, silently yielding a stale result for the just-edited code
+            // (e.g. a deleted/added test not reflected). The cache stays valid only for
+            // updateBeforeLaunch=false (an explicit "just fetch the last result").
+            // The non-blocking poll/fetch of an in-flight or just-finished launch goes
+            // through the ACTIVE_LAUNCHES path above, not this cache.
             File cached = findJunitXml(reportDir);
-            if (cached != null && (System.currentTimeMillis() - cached.lastModified()) < CACHE_TTL_MS)
+            if (!updateBeforeLaunch && cached != null
+                && (System.currentTimeMillis() - cached.lastModified()) < CACHE_TTL_MS)
             {
                 Activator.logInfo("Returning cached YAXUnit results from " + cached); //$NON-NLS-1$
                 return readResults(cached);
