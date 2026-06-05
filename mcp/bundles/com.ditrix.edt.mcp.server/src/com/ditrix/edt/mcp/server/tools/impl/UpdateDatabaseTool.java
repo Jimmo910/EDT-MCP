@@ -105,9 +105,10 @@ public class UpdateDatabaseTool implements IMcpTool
             + "Before updating, the tool FORCES a derived-data recompute (recomputeAll) of the " //$NON-NLS-1$
             + "configuration and its dependent EXTENSION (.cfe) projects and waits for it to settle, " //$NON-NLS-1$
             + "so an edited extension's regenerated .cfe is loaded into the infobase (not left stale). " //$NON-NLS-1$
-            + "After issuing the update it WAITS until the infobase has actually applied the change " //$NON-NLS-1$
-            + "(polls the update state to UPDATED), because the update call can return before the DB " //$NON-NLS-1$
-            + "application completes; if the IB does not reach UPDATED in time it reports an error with " //$NON-NLS-1$
+            + "After issuing the update it WAITS until the infobase actually reports UPDATED via EDT's " //$NON-NLS-1$
+            + "own update-state event (the same signal that drives the Applications view's out-of-sync " //$NON-NLS-1$
+            + "star), because the update call can return before the DB application completes; if the IB " //$NON-NLS-1$
+            + "does not reach UPDATED in time it reports an error with " //$NON-NLS-1$
             + "infobaseOutOfSync=true instead of a misleading success. " //$NON-NLS-1$
             + "Use updateScope to narrow this to the fast 'extension:<ProjectName>' path."; //$NON-NLS-1$
     }
@@ -449,9 +450,10 @@ public class UpdateDatabaseTool implements IMcpTool
 
             // appManager.update() may return before the DB has actually applied the
             // change (async / BEING_UPDATED): the return value is NOT the real gate.
-            // Block until getUpdateState is observed UPDATED (bug #19925) so callers
-            // never see a stale "success" while the IB still requires update. Reuses
-            // the same blocking poll the YAXUnit auto-chain uses.
+            // Await EDT's UPDATE_STATE_CHANGED→UPDATED event (bug #19925) — the same
+            // push-style signal the Applications view's star uses — so callers never
+            // see a stale "success" while the IB still requires update. Reuses the
+            // exact event-driven gate the YAXUnit auto-chain uses.
             if (stateAfter != ApplicationUpdateState.UPDATED)
             {
                 stateAfter = LaunchLifecycleUtils.waitForInfobaseApplied(appManager, application);

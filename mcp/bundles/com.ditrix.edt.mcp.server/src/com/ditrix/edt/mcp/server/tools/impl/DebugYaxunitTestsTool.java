@@ -80,8 +80,9 @@ public class DebugYaxunitTestsTool implements IMcpTool
             + "(recomputeAll) of the project AND its dependent EXTENSION (.cfe) projects, waits for " //$NON-NLS-1$
             + "it to settle, then updates the infobase — so a test edited inside an extension is " //$NON-NLS-1$
             + "force-rebuilt and its regenerated .cfe is loaded into the infobase before the run, " //$NON-NLS-1$
-            + "instead of debugging a stale extension. It then WAITS until the infobase has actually " //$NON-NLS-1$
-            + "applied the change (update state observed UPDATED) before launching; if the IB cannot be " //$NON-NLS-1$
+            + "instead of debugging a stale extension. It then WAITS until the infobase actually reports " //$NON-NLS-1$
+            + "UPDATED via EDT's own update-state event (the same signal that drives the Applications " //$NON-NLS-1$
+            + "view's out-of-sync star) before launching; if the IB cannot be " //$NON-NLS-1$
             + "brought in sync in time it REFUSES to launch rather than debugging a stale infobase. " //$NON-NLS-1$
             + "Use updateScope to narrow this to the fast " //$NON-NLS-1$
             + "'extension:<ProjectName>' path. " //$NON-NLS-1$
