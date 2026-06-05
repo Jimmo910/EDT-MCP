@@ -21,6 +21,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.core.resources.IProject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -31,16 +33,40 @@ import com.e1c.g5.dt.applications.IApplication;
 import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
- * Mock-driven tests for {@link LaunchLifecycleUtils#updateApplicationIfNeeded}.
+ * Mock-driven tests for {@link LaunchLifecycleUtils#updateApplicationIfNeeded}
+ * and the supporting infobase-sync gate added for bug #19925.
  *
- * <p>Covers the post-update state branches that determine whether the
- * auto-chain proceeds to {@code workingCopy.launch()} or aborts with a clear
- * error — including the previously-broken branch where {@code appManager.update()}
- * returned a non-{@code UPDATED} state and the auto-chain still claimed success.
+ * <p>Covers:
+ * <ul>
+ *   <li>the settle-before-decide window — a lagging {@code UPDATED} that flips to
+ *       {@code …UPDATE_REQUIRED} must NOT be trusted as "no update needed";</li>
+ *   <li>the block-until-{@code UPDATED} gate — {@code appManager.update()} returning
+ *       a non-{@code UPDATED} (e.g. {@code BEING_UPDATED}) state must be followed by a
+ *       poll that waits for the IB to actually apply;</li>
+ *   <li>refusal on a never-applied IB — if sync is never observed, the auto-chain
+ *       must ABORT with an explicit out-of-sync error rather than a stale green.</li>
+ * </ul>
+ *
+ * <p>The sync timing windows are shrunk to a few milliseconds in {@link #shrinkTimings}
+ * so the polling paths run instantly and deterministically.
  */
 public class LaunchLifecycleUtilsUpdateTest
 {
     private static final String APP_ID = "app-1";
+
+    @Before
+    public void shrinkTimings()
+    {
+        // settleWindow=40ms, applyTimeout=200ms, pollInterval=5ms — enough iterations
+        // to exercise the settle/poll loops without slowing the suite.
+        LaunchLifecycleUtils.setSyncTimingsForTest(40L, 200L, 5L);
+    }
+
+    @After
+    public void restoreTimings()
+    {
+        LaunchLifecycleUtils.resetSyncTimingsForTest();
+    }
 
     private static IProject mockOpenProject()
     {
@@ -87,8 +113,10 @@ public class LaunchLifecycleUtilsUpdateTest
     }
 
     @Test
-    public void testAlreadyUpdatedIsNoOp() throws ApplicationException
+    public void testStablyUpdatedIsNoOp() throws ApplicationException
     {
+        // getUpdateState reads UPDATED and KEEPS reading UPDATED across the whole
+        // settle window → genuinely in sync → no-op, no update issued.
         IApplication app = mock(IApplication.class);
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
@@ -97,8 +125,46 @@ public class LaunchLifecycleUtilsUpdateTest
 
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
             mockOpenProject(), APP_ID, mgr);
-        assertFalse("UPDATED state must be a no-op", result.isPresent());
+        assertFalse("stable UPDATED across the settle window must be a no-op", result.isPresent());
         verify(mgr, never()).update(any(), any(), any(), any());
+    }
+
+    @Test
+    public void testLaggingUpdatedThatFlipsTriggersUpdate() throws ApplicationException
+    {
+        // The bug #19925 core: getUpdateState reads a STALE UPDATED right after the
+        // recompute, then flips to INCREMENTAL_UPDATE_REQUIRED inside the settle
+        // window. We must NOT short-circuit — we must run the update.
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
+            .thenReturn(Optional.of(app));
+
+        AtomicInteger reads = new AtomicInteger(0);
+        when(mgr.getUpdateState(app)).thenAnswer(inv -> {
+            int n = reads.getAndIncrement();
+            if (n == 0)
+            {
+                // First (entry) read: stale UPDATED.
+                return ApplicationUpdateState.UPDATED;
+            }
+            if (n == 1)
+            {
+                // Settle poll surfaces the lagging desync flag.
+                return ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED;
+            }
+            // After update() runs, the IB is applied.
+            return ApplicationUpdateState.UPDATED;
+        });
+        when(mgr.update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
+            any(ExecutionContext.class), any())).thenReturn(ApplicationUpdateState.UPDATED);
+
+        Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
+            mockOpenProject(), APP_ID, mgr);
+        assertFalse("a lagging UPDATED that flips must still update and succeed",
+            result.isPresent());
+        verify(mgr, times(1)).update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
+            any(ExecutionContext.class), any());
     }
 
     @Test
@@ -109,7 +175,7 @@ public class LaunchLifecycleUtilsUpdateTest
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
             .thenReturn(Optional.of(app));
 
-        // First call: BEING_UPDATED (entering the poll branch).
+        // First call: BEING_UPDATED (entering the block-until-applied poll).
         // Subsequent calls: UPDATED (settled).
         AtomicInteger pollCount = new AtomicInteger(0);
         when(mgr.getUpdateState(app)).thenAnswer(inv -> {
@@ -120,6 +186,25 @@ public class LaunchLifecycleUtilsUpdateTest
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
             mockOpenProject(), APP_ID, mgr);
         assertFalse("polling to UPDATED must yield success", result.isPresent());
+        verify(mgr, never()).update(any(), any(), any(), any());
+    }
+
+    @Test
+    public void testBeingUpdatedThatNeverAppliesAborts() throws ApplicationException
+    {
+        // Another update is in progress and never reaches UPDATED within the apply
+        // timeout → we must NOT launch; abort with an out-of-sync error.
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.BEING_UPDATED);
+
+        Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
+            mockOpenProject(), APP_ID, mgr);
+        assertTrue("a never-applying in-progress update must abort", result.isPresent());
+        assertTrue("error must say the IB is out of sync",
+            result.get().contains("out of sync"));
         verify(mgr, never()).update(any(), any(), any(), any());
     }
 
@@ -142,25 +227,26 @@ public class LaunchLifecycleUtilsUpdateTest
     }
 
     @Test
-    public void testUpdateReturnsNonUpdatedReturnsError() throws ApplicationException
+    public void testUpdateNeverReachesUpdatedReturnsError() throws ApplicationException
     {
-        // This is the bug-fix branch: appManager.update() returns a non-UPDATED state
-        // (e.g. FULL_UPDATE_REQUIRED because the INCREMENTAL we ran isn't enough) and
-        // we must NOT silently report success — otherwise the launch delegate would
-        // pop its modal "Update database?" dialog and block the MCP call.
+        // Bug-fix branch: update() runs but the IB never reaches UPDATED (stays
+        // INCREMENTAL_UPDATE_REQUIRED). We must NOT silently report success —
+        // otherwise the run would execute against a stale IB.
         IApplication app = mock(IApplication.class);
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
             .thenReturn(Optional.of(app));
         when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
         when(mgr.update(eq(app), any(), any(), any()))
-            .thenReturn(ApplicationUpdateState.FULL_UPDATE_REQUIRED);
+            .thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
 
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
             mockOpenProject(), APP_ID, mgr);
-        assertTrue("non-UPDATED post-state must yield an error", result.isPresent());
+        assertTrue("an IB that never applies must yield an error", result.isPresent());
         assertTrue("error must surface the final state",
-            result.get().contains("FULL_UPDATE_REQUIRED"));
+            result.get().contains("INCREMENTAL_UPDATE_REQUIRED"));
+        assertTrue("error must say the IB is out of sync",
+            result.get().contains("out of sync"));
         assertTrue("error must mention update_database fallback",
             result.get().contains("update_database"));
     }
@@ -172,19 +258,24 @@ public class LaunchLifecycleUtilsUpdateTest
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
             .thenReturn(Optional.of(app));
-        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
-        when(mgr.update(eq(app), any(), any(), any()))
-            .thenAnswer(inv -> {
-                // After update returns, switch getUpdateState() to first BEING_UPDATED,
-                // then UPDATED on the next poll.
-                AtomicInteger pollAfter = new AtomicInteger(0);
-                when(mgr.getUpdateState(app)).thenAnswer(i -> {
-                    int n = pollAfter.getAndIncrement();
-                    return n == 0 ? ApplicationUpdateState.BEING_UPDATED
-                        : ApplicationUpdateState.UPDATED;
-                });
+
+        // Entry read: needs update. update() returns BEING_UPDATED, then the poll
+        // sees BEING_UPDATED once more and finally UPDATED.
+        AtomicInteger reads = new AtomicInteger(0);
+        when(mgr.getUpdateState(app)).thenAnswer(inv -> {
+            int n = reads.getAndIncrement();
+            if (n == 0)
+            {
+                return ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED;
+            }
+            if (n == 1)
+            {
                 return ApplicationUpdateState.BEING_UPDATED;
-            });
+            }
+            return ApplicationUpdateState.UPDATED;
+        });
+        when(mgr.update(eq(app), any(), any(), any()))
+            .thenReturn(ApplicationUpdateState.BEING_UPDATED);
 
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
             mockOpenProject(), APP_ID, mgr);

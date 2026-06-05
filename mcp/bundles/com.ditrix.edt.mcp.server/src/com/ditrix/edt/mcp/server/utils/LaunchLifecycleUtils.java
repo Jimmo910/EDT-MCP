@@ -68,6 +68,149 @@ public final class LaunchLifecycleUtils
      */
     private static final ConcurrentMap<String, Object> KEY_LOCKS = new ConcurrentHashMap<>();
 
+    /** Production default for {@link #syncSettleWindowMs}: 5 seconds. */
+    static final long DEFAULT_SYNC_SETTLE_WINDOW_MS = 5000L;
+
+    /** Production default for {@link #syncApplyTimeoutMs}: 120 seconds. */
+    static final long DEFAULT_SYNC_APPLY_TIMEOUT_MS = 120_000L;
+
+    /** Production default for {@link #syncPollIntervalMs}: 500 ms. */
+    static final long DEFAULT_SYNC_POLL_INTERVAL_MS = 500L;
+
+    /**
+     * Bounded window (ms) during which, right after a forced derived-data
+     * recompute, we keep re-reading {@link IApplicationManager#getUpdateState}
+     * even when it already reads {@link ApplicationUpdateState#UPDATED}, so a
+     * lagging {@code …UPDATE_REQUIRED} desync flag has a chance to surface
+     * before we decide "no update needed" (bug #19925: the desync flag lags the
+     * just-regenerated extension {@code .cfe}, so an entry short-circuit on a
+     * stale {@code UPDATED} skips the update and the run executes a stale IB).
+     *
+     * <p>Mutable only so unit tests can shrink the timing windows for speed and
+     * determinism (see {@link #setSyncTimingsForTest}); production code never
+     * reassigns it.
+     */
+    static volatile long syncSettleWindowMs = DEFAULT_SYNC_SETTLE_WINDOW_MS;
+
+    /**
+     * Generous upper bound (ms) for blocking until the infobase has actually
+     * applied the configuration/extension changes — i.e. {@code getUpdateState}
+     * is observed to be {@link ApplicationUpdateState#UPDATED} after we issue
+     * {@link IApplicationManager#update}. {@code update(...)} may return before
+     * the DB application completes (async / {@code BEING_UPDATED}), so this poll
+     * is the real gate that prevents starting a run against a not-yet-applied IB.
+     *
+     * <p>Mutable only for tests (see {@link #setSyncTimingsForTest}).
+     */
+    static volatile long syncApplyTimeoutMs = DEFAULT_SYNC_APPLY_TIMEOUT_MS;
+
+    /**
+     * Poll interval (ms) for both the settle-before-decide window and the
+     * block-until-{@code UPDATED} wait. Half a second balances responsiveness
+     * against churn on {@code getUpdateState}.
+     *
+     * <p>Mutable only for tests (see {@link #setSyncTimingsForTest}).
+     */
+    static volatile long syncPollIntervalMs = DEFAULT_SYNC_POLL_INTERVAL_MS;
+
+    /**
+     * Test hook: overrides the infobase-sync timing windows so unit tests run
+     * fast and deterministically. Not part of the public API.
+     */
+    static void setSyncTimingsForTest(long settleWindowMs, long applyTimeoutMs, long pollIntervalMs)
+    {
+        syncSettleWindowMs = settleWindowMs;
+        syncApplyTimeoutMs = applyTimeoutMs;
+        syncPollIntervalMs = pollIntervalMs;
+    }
+
+    /** Test hook: restores the production sync timing windows. */
+    static void resetSyncTimingsForTest()
+    {
+        syncSettleWindowMs = DEFAULT_SYNC_SETTLE_WINDOW_MS;
+        syncApplyTimeoutMs = DEFAULT_SYNC_APPLY_TIMEOUT_MS;
+        syncPollIntervalMs = DEFAULT_SYNC_POLL_INTERVAL_MS;
+    }
+
+    /**
+     * Classification of an {@link ApplicationUpdateState} from the perspective
+     * of "is the infobase in sync with the (recomputed) project/extension
+     * configuration?". This is the same notion that raises EDT's interactive
+     * "Update database?" dialog. Kept as a small pure helper so the
+     * synced / needs-update / in-progress decision is unit-testable without an
+     * EDT runtime.
+     *
+     * <p>{@code getUpdateState} is the authoritative signal here: its Javadoc
+     * states it "shows whether infobase configuration has been updated and if
+     * any changes were made in project since then" (the EDT-side project↔IB
+     * sync — exactly the dialog trigger). {@code IApplicationManager.check(...)}
+     * detects a different thing — changes made in the IB <em>via Designer</em>,
+     * outside EDT — which is not the case bug #19925 is about, and it returns an
+     * {@code IStatus} rather than a state, so it is not a drop-in sync gate.
+     */
+    enum SyncCategory
+    {
+        /** Infobase matches the project: {@link ApplicationUpdateState#UPDATED}. */
+        SYNCED,
+        /**
+         * Infobase is out of sync and a (full or incremental) update is
+         * required: {@link ApplicationUpdateState#INCREMENTAL_UPDATE_REQUIRED}
+         * or {@link ApplicationUpdateState#FULL_UPDATE_REQUIRED}.
+         */
+        NEEDS_UPDATE,
+        /** An update is running right now: {@link ApplicationUpdateState#BEING_UPDATED}. */
+        IN_PROGRESS,
+        /**
+         * State is {@link ApplicationUpdateState#UNKNOWN} (or {@code null}).
+         * Treated conservatively as "not yet known to be synced" so the caller
+         * keeps waiting / does not claim a stale-green success.
+         */
+        UNKNOWN
+    }
+
+    /**
+     * Classifies an {@link ApplicationUpdateState} into a {@link SyncCategory}.
+     * Pure and null-safe ({@code null} → {@link SyncCategory#UNKNOWN}).
+     */
+    static SyncCategory classify(ApplicationUpdateState state)
+    {
+        if (state == null)
+        {
+            return SyncCategory.UNKNOWN;
+        }
+        switch (state)
+        {
+        case UPDATED:
+            return SyncCategory.SYNCED;
+        case INCREMENTAL_UPDATE_REQUIRED:
+        case FULL_UPDATE_REQUIRED:
+            return SyncCategory.NEEDS_UPDATE;
+        case BEING_UPDATED:
+            return SyncCategory.IN_PROGRESS;
+        case UNKNOWN:
+        default:
+            return SyncCategory.UNKNOWN;
+        }
+    }
+
+    /** {@code true} iff {@code state} means the IB is in sync (no update needed). */
+    static boolean isSynced(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.SYNCED;
+    }
+
+    /** {@code true} iff {@code state} means the IB requires a (full/incremental) update. */
+    static boolean needsUpdate(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.NEEDS_UPDATE;
+    }
+
+    /** {@code true} iff an update is currently in progress for the IB. */
+    static boolean isInProgress(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.IN_PROGRESS;
+    }
+
     /**
      * Set of {@link ILaunch} instances that any MCP tool currently owns via
      * the auto-chain. The auto-chain will refuse to terminate any launch in
@@ -549,11 +692,40 @@ public final class LaunchLifecycleUtils
 
     /**
      * Brings the given application's database to {@link ApplicationUpdateState#UPDATED}
-     * if needed, using the same programmatic path as {@code update_database}.
-     * Skips the work when the state is already {@code UPDATED} or {@code BEING_UPDATED}.
+     * if needed, using the same programmatic path as {@code update_database}, and
+     * <strong>blocks until the infobase has actually applied the change</strong>
+     * (the {@code .cfe}/configuration is live in the DB) before returning success.
      *
-     * <p>Returns {@code Optional.empty()} on success (or no-op); on failure,
-     * returns a populated error message.
+     * <p>This is the hard guarantee bug #19925 needs: never let a YAXUnit run start
+     * while the IB is out of sync with the just-recomputed extension configuration.
+     * The previous version trusted the very first {@code getUpdateState} read and
+     * short-circuited on {@code UPDATED}; but right after the forced derived-data
+     * recompute the EDT-side desync flag <em>lags</em> the regenerated {@code .cfe},
+     * so it can still read {@code UPDATED} for a moment — the update was skipped and
+     * the run executed the stale IB (a manual 1С launch at that instant shows the
+     * "update database?" dialog). We close that with two phases:
+     * <ol>
+     *   <li><strong>Settle before deciding "no update needed".</strong> If the state
+     *       reads {@code UPDATED} we re-poll for up to {@link #syncSettleWindowMs}
+     *       so a lagging {@code …UPDATE_REQUIRED} can surface; only if it stays
+     *       {@code UPDATED} for the whole window do we treat the IB as in sync.</li>
+     *   <li><strong>Block until applied.</strong> After issuing
+     *       {@link IApplicationManager#update}, poll {@code getUpdateState} until it
+     *       is {@code UPDATED} (treating {@code BEING_UPDATED} as "keep waiting") for
+     *       up to {@link #syncApplyTimeoutMs}. {@code update(...)} may return before
+     *       the DB application completes, so this poll — not its return value — is the
+     *       real gate.</li>
+     * </ol>
+     *
+     * <p>If sync is not observed within {@link #syncApplyTimeoutMs}, returns an
+     * explicit, actionable error so the caller ABORTS the run rather than producing a
+     * silent stale-green result. The authoritative signal is {@code getUpdateState}
+     * (the EDT-side project↔IB sync that raises the "update database?" dialog); see
+     * {@link SyncCategory}.
+     *
+     * <p>Returns {@code Optional.empty()} on success (IB observed {@code UPDATED});
+     * on failure, returns a populated error message. Null-safe (headless: a {@code null}
+     * {@code appManager}/application is reported, never thrown into the launch path).
      */
     public static Optional<String> updateApplicationIfNeeded(IProject project, String applicationId,
             IApplicationManager appManager)
@@ -575,28 +747,33 @@ public final class LaunchLifecycleUtils
                 return Optional.of("Application not found: " + applicationId); //$NON-NLS-1$
             }
             IApplication application = appOpt.get();
-            ApplicationUpdateState state = appManager.getUpdateState(application);
-            if (state == ApplicationUpdateState.UPDATED)
-            {
-                return Optional.empty();
-            }
-            if (state == ApplicationUpdateState.BEING_UPDATED)
+
+            // Phase A — settle before deciding "no update needed". Do NOT trust a
+            // stale UPDATED entry right after the recompute: the desync flag lags
+            // the just-regenerated .cfe, so let a pending …UPDATE_REQUIRED surface.
+            ApplicationUpdateState state = settleUpdateState(appManager, application);
+
+            if (isInProgress(state))
             {
                 // Another caller (or a UI gesture) is already updating this IB.
-                // Wait for it to settle into UPDATED — if we proceeded to launch
-                // now, the delegate could still hit a locked / half-updated IB.
-                long maxMillis = getDefaultTerminateTimeoutSeconds() * 1000L;
-                state = waitForUpdateSettled(appManager, application, maxMillis);
-                if (state == ApplicationUpdateState.UPDATED)
+                // Block until it actually applies — if we launched now, the run
+                // would execute a half-updated IB.
+                state = waitForApplied(appManager, application, syncApplyTimeoutMs);
+                if (isSynced(state))
                 {
                     return Optional.empty();
                 }
-                return Optional.of("Another update is in progress and did not " //$NON-NLS-1$
-                    + "settle within " + (maxMillis / 1000) + "s (final state: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + state + "). Retry shortly, or increase the " //$NON-NLS-1$
-                    + "`terminate_launch.timeoutSeconds` preference if your IB " //$NON-NLS-1$
-                    + "updates take longer.");
+                return Optional.of(staleInfobaseError(state));
             }
+
+            if (isSynced(state))
+            {
+                // Confirmed in sync across the settle window — genuine no-op.
+                return Optional.empty();
+            }
+
+            // Phase B — IB needs an update (or state is UNKNOWN). Issue the update,
+            // then BLOCK until the DB has actually applied the change.
             ExecutionContext context = new ExecutionContext();
             Shell shell = grabActiveShell();
             if (shell != null)
@@ -607,30 +784,25 @@ public final class LaunchLifecycleUtils
                 + ", stateBefore=" + state); //$NON-NLS-1$
             ApplicationUpdateState after = appManager.update(application,
                 ApplicationUpdateType.INCREMENTAL, context, new NullProgressMonitor());
-            Activator.logInfo("Pre-launch DB update completed: stateAfter=" + after); //$NON-NLS-1$
-            // Post-condition gate: the auto-chain promises the IB will be in
-            // UPDATED state before workingCopy.launch() runs, otherwise the
-            // launch delegate would still see "DB needs update" and pop its
-            // modal dialog — which is exactly what we are trying to avoid.
-            if (after == ApplicationUpdateState.UPDATED)
+            Activator.logInfo("Pre-launch DB update returned: stateAfter=" + after //$NON-NLS-1$
+                + " (now blocking until the IB reports UPDATED)"); //$NON-NLS-1$
+
+            // Post-condition gate: the auto-chain promises the IB is actually in
+            // UPDATED state (the .cfe applied) before workingCopy.launch() runs.
+            // appManager.update() may return UPDATED, BEING_UPDATED, or even a
+            // still-required state on the async path, so we always block-poll
+            // getUpdateState until UPDATED rather than trusting the return value.
+            if (!isSynced(after))
             {
+                after = waitForApplied(appManager, application, syncApplyTimeoutMs);
+            }
+            if (isSynced(after))
+            {
+                Activator.logInfo("Pre-launch DB update applied: IB is UPDATED for application=" //$NON-NLS-1$
+                    + applicationId);
                 return Optional.empty();
             }
-            if (after == ApplicationUpdateState.BEING_UPDATED)
-            {
-                // appManager.update() returned but the state machine still
-                // reports an update in progress (async path). Wait for it.
-                long maxMillis = getDefaultTerminateTimeoutSeconds() * 1000L;
-                after = waitForUpdateSettled(appManager, application, maxMillis);
-                if (after == ApplicationUpdateState.UPDATED)
-                {
-                    return Optional.empty();
-                }
-            }
-            return Optional.of("Database update finished with state " + after //$NON-NLS-1$
-                + " (expected UPDATED). Inspect the EDT problems view, " //$NON-NLS-1$
-                + "or call `update_database` with `fullUpdate=true` / " //$NON-NLS-1$
-                + "`autoRestructure=true` to handle restructurization, then retry."); //$NON-NLS-1$
+            return Optional.of(staleInfobaseError(after));
         }
         catch (ApplicationException e)
         {
@@ -640,16 +812,103 @@ public final class LaunchLifecycleUtils
     }
 
     /**
-     * Polls {@link IApplicationManager#getUpdateState} until it leaves
-     * {@link ApplicationUpdateState#BEING_UPDATED} or the deadline elapses.
-     * Used when another caller is mid-update — we must not start a launch
-     * against an IB whose update is still running.
+     * Builds the explicit, actionable "infobase is still out of sync" message
+     * returned when the IB does not reach {@link ApplicationUpdateState#UPDATED}
+     * within {@link #syncApplyTimeoutMs}. The point is to ABORT the run rather
+     * than execute it against a not-yet-applied IB (which would yield a stale
+     * green result).
      */
-    private static ApplicationUpdateState waitForUpdateSettled(IApplicationManager appManager,
+    private static String staleInfobaseError(ApplicationUpdateState finalState)
+    {
+        return "Infobase is still out of sync (DB requires update; extension changes " //$NON-NLS-1$
+            + "not yet applied) after " + (syncApplyTimeoutMs / 1000) //$NON-NLS-1$
+            + "s (final update state: " + finalState + ") — results would be stale, " //$NON-NLS-1$ //$NON-NLS-2$
+            + "so the run was refused. Retry the run; if it persists, call " //$NON-NLS-1$
+            + "`update_database` (optionally with `fullUpdate=true` / " //$NON-NLS-1$
+            + "`autoRestructure=true`) and inspect the EDT problems view."; //$NON-NLS-1$
+    }
+
+    /**
+     * Blocks until the given application's infobase is observed to be
+     * {@link ApplicationUpdateState#UPDATED} (the DB has actually applied the
+     * configuration/extension change), treating {@link ApplicationUpdateState#BEING_UPDATED}
+     * as "keep waiting", up to {@link #syncApplyTimeoutMs}. Public so
+     * {@code update_database} can reuse exactly the same blocking gate the YAXUnit
+     * auto-chain uses: {@code appManager.update(...)} can return before the DB
+     * application finishes, so callers must wait for this observed {@code UPDATED}
+     * before treating the IB as in sync.
+     *
+     * <p>Null-safe: a {@code null} {@code appManager}/{@code application} returns
+     * {@link ApplicationUpdateState#UNKNOWN} without throwing.
+     *
+     * @return the last observed state; {@link ApplicationUpdateState#UPDATED} on
+     *         success, otherwise the terminal/last state on timeout
+     */
+    public static ApplicationUpdateState waitForInfobaseApplied(IApplicationManager appManager,
+            IApplication application)
+    {
+        if (appManager == null || application == null)
+        {
+            return ApplicationUpdateState.UNKNOWN;
+        }
+        return waitForApplied(appManager, application, syncApplyTimeoutMs);
+    }
+
+    /**
+     * Settle-before-decide poll: when {@code getUpdateState} already reads
+     * {@link ApplicationUpdateState#UPDATED}, keep re-reading for up to
+     * {@link #syncSettleWindowMs} so a lagging {@code …UPDATE_REQUIRED} (the
+     * desync flag has not yet caught up with the freshly recomputed {@code .cfe})
+     * can surface. Returns as soon as a non-{@code UPDATED} state appears, or the
+     * last observed state when the window elapses.
+     *
+     * @return the settled state — {@code UPDATED} only if it held for the whole
+     *         window; otherwise the first non-{@code UPDATED} state observed
+     */
+    private static ApplicationUpdateState settleUpdateState(IApplicationManager appManager,
+            IApplication application)
+        throws ApplicationException
+    {
+        ApplicationUpdateState state = appManager.getUpdateState(application);
+        // Only the SYNCED reading is suspect (it may be a lagging stale entry).
+        // A NEEDS_UPDATE / IN_PROGRESS / UNKNOWN reading is already actionable.
+        if (!isSynced(state))
+        {
+            return state;
+        }
+        long deadline = System.currentTimeMillis() + syncSettleWindowMs;
+        while (System.currentTimeMillis() < deadline)
+        {
+            if (!sleep(syncPollIntervalMs))
+            {
+                return state;
+            }
+            ApplicationUpdateState next = appManager.getUpdateState(application);
+            if (!isSynced(next))
+            {
+                // The lagging desync flag has flipped — surface it so we update.
+                Activator.logInfo("Pre-launch: update-state settled to " + next //$NON-NLS-1$
+                    + " after an initial stale UPDATED reading"); //$NON-NLS-1$
+                return next;
+            }
+            state = next;
+        }
+        return state;
+    }
+
+    /**
+     * Blocks until {@link IApplicationManager#getUpdateState} is observed to be
+     * {@link ApplicationUpdateState#UPDATED} (the DB has actually applied the
+     * change), treating {@link ApplicationUpdateState#BEING_UPDATED} as "keep
+     * waiting", up to {@code maxMillis}. Any other terminal state
+     * ({@code …UPDATE_REQUIRED}, {@code UNKNOWN}) is returned immediately so the
+     * caller can surface it. Returns the last observed state on timeout.
+     */
+    private static ApplicationUpdateState waitForApplied(IApplicationManager appManager,
             IApplication application, long maxMillis)
     {
         long deadline = System.currentTimeMillis() + maxMillis;
-        ApplicationUpdateState state = ApplicationUpdateState.BEING_UPDATED;
+        ApplicationUpdateState state = ApplicationUpdateState.UNKNOWN;
         while (System.currentTimeMillis() < deadline)
         {
             try
@@ -661,21 +920,41 @@ public final class LaunchLifecycleUtils
                 Activator.logError("Error polling update state", e); //$NON-NLS-1$
                 return state;
             }
-            if (state != ApplicationUpdateState.BEING_UPDATED)
+            if (isSynced(state))
             {
                 return state;
             }
-            try
+            if (!isInProgress(state))
             {
-                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+                // A terminal …UPDATE_REQUIRED / UNKNOWN — the update did not take.
+                // Return so the caller reports it rather than spinning the window.
+                return state;
             }
-            catch (InterruptedException e)
+            if (!sleep(syncPollIntervalMs))
             {
-                Thread.currentThread().interrupt();
                 return state;
             }
         }
         return state;
+    }
+
+    /**
+     * Sleeps {@code millis}, restoring the interrupt flag and signalling abort on
+     * interruption. Returns {@code false} if interrupted (caller should stop
+     * polling), {@code true} otherwise.
+     */
+    private static boolean sleep(long millis)
+    {
+        try
+        {
+            Thread.sleep(millis);
+            return true;
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**

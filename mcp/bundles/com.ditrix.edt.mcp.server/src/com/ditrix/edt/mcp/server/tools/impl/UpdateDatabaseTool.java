@@ -105,6 +105,10 @@ public class UpdateDatabaseTool implements IMcpTool
             + "Before updating, the tool FORCES a derived-data recompute (recomputeAll) of the " //$NON-NLS-1$
             + "configuration and its dependent EXTENSION (.cfe) projects and waits for it to settle, " //$NON-NLS-1$
             + "so an edited extension's regenerated .cfe is loaded into the infobase (not left stale). " //$NON-NLS-1$
+            + "After issuing the update it WAITS until the infobase has actually applied the change " //$NON-NLS-1$
+            + "(polls the update state to UPDATED), because the update call can return before the DB " //$NON-NLS-1$
+            + "application completes; if the IB does not reach UPDATED in time it reports an error with " //$NON-NLS-1$
+            + "infobaseOutOfSync=true instead of a misleading success. " //$NON-NLS-1$
             + "Use updateScope to narrow this to the fast 'extension:<ProjectName>' path."; //$NON-NLS-1$
     }
 
@@ -443,27 +447,40 @@ public class UpdateDatabaseTool implements IMcpTool
             ApplicationUpdateState stateAfter = runUpdateWithTimeout(appManager, application,
                 updateType, context, timeoutSeconds, projectName, applicationId);
 
+            // appManager.update() may return before the DB has actually applied the
+            // change (async / BEING_UPDATED): the return value is NOT the real gate.
+            // Block until getUpdateState is observed UPDATED (bug #19925) so callers
+            // never see a stale "success" while the IB still requires update. Reuses
+            // the same blocking poll the YAXUnit auto-chain uses.
+            if (stateAfter != ApplicationUpdateState.UPDATED)
+            {
+                stateAfter = LaunchLifecycleUtils.waitForInfobaseApplied(appManager, application);
+            }
+            boolean applied = stateAfter == ApplicationUpdateState.UPDATED;
+
             // Build result
-            ToolResult result = ToolResult.success()
+            ToolResult result = (applied ? ToolResult.success() : ToolResult.error(
+                "Infobase is still out of sync after the update (final state: " //$NON-NLS-1$
+                    + stateAfter.name() + "). Extension/configuration changes are NOT yet " //$NON-NLS-1$
+                    + "applied to the DB, so a test run would be stale. Retry, or run with " //$NON-NLS-1$
+                    + "fullUpdate=true / autoRestructure=true and inspect the EDT problems view.")) //$NON-NLS-1$
                 .put("project", projectName) //$NON-NLS-1$
                 .put("applicationId", applicationId) //$NON-NLS-1$
                 .put("applicationName", application.getName()) //$NON-NLS-1$
                 .put("updateType", updateType.name()) //$NON-NLS-1$
                 .put("stateBefore", stateBefore.name()) //$NON-NLS-1$
-                .put("stateAfter", stateAfter.name()); //$NON-NLS-1$
+                .put("stateAfter", stateAfter.name()) //$NON-NLS-1$
+                .put("infobaseOutOfSync", !applied); //$NON-NLS-1$
 
             // Add status message based on result
-            if (stateAfter == ApplicationUpdateState.UPDATED)
+            if (applied)
             {
                 result.put("message", "Database updated successfully"); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            else if (stateAfter == ApplicationUpdateState.BEING_UPDATED)
-            {
-                result.put("message", "Update in progress"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
             else
             {
-                result.put("message", "Update completed with state: " + stateAfter.name()); //$NON-NLS-1$ //$NON-NLS-2$
+                result.put("message", "Update did not reach UPDATED (state: " //$NON-NLS-1$
+                    + stateAfter.name() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             return result.toJson();
