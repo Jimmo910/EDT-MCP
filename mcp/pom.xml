@@ -35,4 +35,5 @@
     <module>repositories</module>
   </modules>
 
+<version>1.34.1-SNAPSHOT</version>
 </project>
