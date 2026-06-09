@@ -763,9 +763,51 @@ public final class LaunchLifecycleUtils
      * <p>Returns {@code Optional.empty()} on success (IB observed {@code UPDATED});
      * on failure, returns a populated error message. Null-safe (headless: a {@code null}
      * {@code appManager}/application is reported, never thrown into the launch path).
+     *
+     * <p>This 3-arg overload runs WITHOUT the Phase-A settle wait — it is the plain
+     * "is the IB out of sync?" path used by {@code debug_launch} (and any caller that
+     * did <em>not</em> just force a derived-data recompute). On a genuinely up-to-date
+     * IB ({@code getUpdateState()==UPDATED}) it returns immediately, so a synced
+     * {@code debug_launch} never pays the settle window. The settle-before-decide wait
+     * (warranted only right after a forced recompute, where the cached {@code UPDATED}
+     * flag can lag the just-regenerated {@code .cfe}) is opt-in via the 4-arg overload
+     * with {@code settleAfterPossibleRecompute=true}.
      */
     public static Optional<String> updateApplicationIfNeeded(IProject project, String applicationId,
             IApplicationManager appManager)
+    {
+        return updateApplicationIfNeeded(project, applicationId, appManager, false);
+    }
+
+    /**
+     * Same contract as {@link #updateApplicationIfNeeded(IProject, String, IApplicationManager)},
+     * but with an explicit switch for the Phase-A settle-before-decide wait.
+     *
+     * <p>{@code settleAfterPossibleRecompute} controls the cost/safety trade-off of the
+     * entry {@code UPDATED} reading:
+     * <ul>
+     *   <li>{@code true} — the caller has just run a forced derived-data recompute
+     *       ({@code recomputeAndSettle}), so a cached {@code UPDATED} may LAG the
+     *       freshly regenerated {@code .cfe} (bug #19925). On an entry {@code UPDATED}
+     *       we therefore {@linkplain #awaitUpdateState await} a lagging
+     *       {@code …UPDATE_REQUIRED} event for up to {@link #syncSettleWindowMs} before
+     *       trusting "no update needed". This is the YAXUnit fresh-launch path.</li>
+     *   <li>{@code false} — no recompute happened this call, so a cached {@code UPDATED}
+     *       is authoritative: we return immediately (no settle window). This restores the
+     *       fast path for a plain {@code debug_launch} against an already-synced IB
+     *       (defect: D1's async benefit was undercut by an unconditional ~5s settle).</li>
+     * </ul>
+     *
+     * <p>The {@code BEING_UPDATED} (in-progress) wait and the post-update
+     * block-until-{@code UPDATED} gate are unaffected by this flag — both always run, so
+     * the stale-IB refusal and the half-applied-IB guard stay intact regardless.
+     *
+     * @param settleAfterPossibleRecompute {@code true} to wait out a possibly-lagging
+     *            {@code UPDATED} on entry (YAXUnit post-recompute path); {@code false} to
+     *            trust an entry {@code UPDATED} and return immediately (plain debug_launch)
+     */
+    public static Optional<String> updateApplicationIfNeeded(IProject project, String applicationId,
+            IApplicationManager appManager, boolean settleAfterPossibleRecompute)
     {
         if (appManager == null)
         {
@@ -809,8 +851,17 @@ public final class LaunchLifecycleUtils
 
             if (isSynced(state))
             {
-                // Suspect of lag: wait briefly for a lagging …UPDATE_REQUIRED event to
-                // arrive. If none does within the settle window, treat as in sync.
+                if (!settleAfterPossibleRecompute)
+                {
+                    // No recompute happened this call, so the cached UPDATED is
+                    // authoritative — return immediately (no settle window). This is the
+                    // plain debug_launch / update_database path: a synced IB must not pay
+                    // the ~5s settle wait the YAXUnit recompute path needs (defect D1).
+                    return Optional.empty();
+                }
+                // Post-recompute and suspect of lag: wait briefly for a lagging
+                // …UPDATE_REQUIRED event to arrive. If none does within the settle
+                // window, treat as in sync.
                 ApplicationUpdateState settled = awaitUpdateState(appManager, application,
                     s -> classify(s) == SyncCategory.NEEDS_UPDATE, syncSettleWindowMs);
                 if (!needsUpdate(settled))
@@ -1229,8 +1280,12 @@ public final class LaunchLifecycleUtils
             // narrows the recompute when only a specific extension changed.
             recomputeAndSettle(resolveUpdateScope(project, updateScope));
 
+            // settleAfterPossibleRecompute=true: we JUST forced a recompute, so a cached
+            // UPDATED may lag the freshly regenerated .cfe — wait out the settle window
+            // before trusting "no update needed" (bug #19925). The plain debug_launch
+            // path passes false (immediate return on UPDATED) to avoid that ~5s cost.
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
-                appManager);
+                appManager, true);
             if (updateErr.isPresent())
             {
                 return new PreLaunchResult(false, terminated, updateErr.get());

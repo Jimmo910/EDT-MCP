@@ -115,8 +115,29 @@ public class LaunchLifecycleUtilsUpdateTest
     @Test
     public void testStablyUpdatedIsNoOp() throws ApplicationException
     {
-        // getUpdateState reads UPDATED and KEEPS reading UPDATED across the whole
-        // settle window → genuinely in sync → no-op, no update issued.
+        // The settle path (settleAfterPossibleRecompute=true): getUpdateState reads
+        // UPDATED and KEEPS reading UPDATED across the whole settle window → genuinely
+        // in sync → no-op, no update issued.
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
+            mockOpenProject(), APP_ID, mgr, true);
+        assertFalse("stable UPDATED across the settle window must be a no-op", result.isPresent());
+        verify(mgr, never()).update(any(), any(), any(), any());
+    }
+
+    @Test
+    public void testUpdatedWithoutRecomputeReturnsImmediatelyNoOp() throws ApplicationException
+    {
+        // Defect D1: the plain debug_launch / update_database path (the 3-arg overload,
+        // settleAfterPossibleRecompute=false) must NOT wait the settle window on an
+        // already-synced IB. A single entry read of UPDATED short-circuits to a no-op
+        // with no further getUpdateState polling and no update() — restoring the fast
+        // debug_launch on a synced IB undercut by the unconditional settle wait.
         IApplication app = mock(IApplication.class);
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
@@ -125,16 +146,46 @@ public class LaunchLifecycleUtilsUpdateTest
 
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
             mockOpenProject(), APP_ID, mgr);
-        assertFalse("stable UPDATED across the settle window must be a no-op", result.isPresent());
+        assertFalse("an UPDATED IB on the no-recompute path must be an immediate no-op",
+            result.isPresent());
+        verify(mgr, never()).update(any(), any(), any(), any());
+        // Exactly one getUpdateState read (the cheap entry read) — no settle-window
+        // polling. The 3-arg path trusts the cached UPDATED.
+        verify(mgr, times(1)).getUpdateState(app);
+    }
+
+    @Test
+    public void testUpdatedNoRecomputeIgnoresLaterFlip() throws ApplicationException
+    {
+        // Complement to the lag test: on the no-recompute (false) path, even if a later
+        // read WOULD surface a flip to …UPDATE_REQUIRED, the method must already have
+        // returned on the first UPDATED — it never polls again, so no update() runs.
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
+            .thenReturn(Optional.of(app));
+        AtomicInteger reads = new AtomicInteger(0);
+        when(mgr.getUpdateState(app)).thenAnswer(inv -> {
+            int n = reads.getAndIncrement();
+            return n == 0 ? ApplicationUpdateState.UPDATED
+                : ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED;
+        });
+
+        Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
+            mockOpenProject(), APP_ID, mgr);
+        assertFalse("no-recompute path returns on the first UPDATED, ignoring a later flip",
+            result.isPresent());
         verify(mgr, never()).update(any(), any(), any(), any());
     }
 
     @Test
     public void testLaggingUpdatedThatFlipsTriggersUpdate() throws ApplicationException
     {
-        // The bug #19925 core: getUpdateState reads a STALE UPDATED right after the
-        // recompute, then flips to INCREMENTAL_UPDATE_REQUIRED inside the settle
-        // window. We must NOT short-circuit — we must run the update.
+        // The bug #19925 core, now exercised via the settle path (the YAXUnit
+        // fresh-launch overload, settleAfterPossibleRecompute=true): getUpdateState
+        // reads a STALE UPDATED right after the recompute, then flips to
+        // INCREMENTAL_UPDATE_REQUIRED inside the settle window. We must NOT
+        // short-circuit — we must run the update.
         IApplication app = mock(IApplication.class);
         IApplicationManager mgr = mock(IApplicationManager.class);
         when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
@@ -160,7 +211,7 @@ public class LaunchLifecycleUtilsUpdateTest
             any(ExecutionContext.class), any())).thenReturn(ApplicationUpdateState.UPDATED);
 
         Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
-            mockOpenProject(), APP_ID, mgr);
+            mockOpenProject(), APP_ID, mgr, true);
         assertFalse("a lagging UPDATED that flips must still update and succeed",
             result.isPresent());
         verify(mgr, times(1)).update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
