@@ -48,14 +48,19 @@ import com._1c.g5.v8.dt.platform.version.Version;
 
 /**
  * Shared writer for the editable FORM CONTENT model ({@code com._1c.g5.v8.dt.form.model.Form}, a
- * separate top object reached from a {@code BasicForm} mdo via {@code getForm()}). The whole form
- * package is touched REFLECTIVELY (by feature / classifier name) so this bundle needs no compile-time
- * dependency on the form model - the same technique the form-editing tools use.
+ * separate top object reached from a {@code BasicForm} mdo via {@code getForm()}).
+ *
+ * <p>Form-MEMBER editing (adding a form attribute, command or visual item, and binding event
+ * handlers) is performed REFLECTIVELY (by feature / classifier name) so those paths need no
+ * compile-time dependency on the form model - the same technique the form-editing tools use. Form-
+ * OBJECT creation ({@link #createForm}), in contrast, uses the typed {@code com._1c.g5.v8.dt.form.model}
+ * API ({@code Form}, {@code AutoCommandBar}, {@code FormFactory}, ...) to build the renderable content
+ * form with EDT's default structure.</p>
  *
  * <p>This is the canonical home for the form-write logic that {@code create_metadata} (and, until
- * they are removed, the {@code add_form_*} tools) use to add a form attribute, command or visual
- * item. Mutation MUST run inside a BM write transaction on the re-fetched content form; capturing the
- * content form's own FQN for {@code forceExportToDisk} is the caller's job.</p>
+ * they are removed, the {@code add_form_*} tools) use. Mutation MUST run inside a BM write transaction
+ * on the re-fetched content form; capturing the content form's own FQN for {@code forceExportToDisk}
+ * is the caller's job.</p>
  */
 public final class FormElementWriter
 {
@@ -407,6 +412,7 @@ public final class FormElementWriter
      * @param formName the programmatic Name of the new form (already validated)
      * @param synonymLanguage the resolved synonym language CODE, or {@code null} when no synonym
      * @param synonym the synonym text, or {@code null}
+     * @param comment the comment text to set on the MD-form, or {@code null}
      * @param setAsDefault when {@code true}, registers the form as the owner's default object form
      * @param mdFactory the MD model-object factory (creates the BasicForm)
      * @param formFactory the FORM model-object factory (creates the content Form), may be {@code null}
@@ -415,8 +421,9 @@ public final class FormElementWriter
      * @return the content form's own top-object FQN (serialized to {@code Form.form}), for force-export
      */
     public static String createForm(IBmTransaction tx, MdObject owner, String formName,
-        String synonymLanguage, String synonym, boolean setAsDefault, IModelObjectFactory mdFactory,
-        IModelObjectFactory formFactory, ITopObjectFqnGenerator fqnGenerator, Version version)
+        String synonymLanguage, String synonym, String comment, boolean setAsDefault,
+        IModelObjectFactory mdFactory, IModelObjectFactory formFactory,
+        ITopObjectFqnGenerator fqnGenerator, Version version)
     {
         EStructuralFeature formsFeature = owner.eClass().getEStructuralFeature("forms"); //$NON-NLS-1$
         if (formsFeature == null || !(formsFeature.getEType() instanceof EClass))
@@ -441,6 +448,10 @@ public final class FormElementWriter
         if (synonym != null && !synonym.isEmpty() && synonymLanguage != null)
         {
             mdForm.getSynonym().put(synonymLanguage, synonym);
+        }
+        if (comment != null && !comment.isEmpty())
+        {
+            mdForm.setComment(comment);
         }
 
         // (2) The content form, built by the FORM factory so it gets EDT's default structure

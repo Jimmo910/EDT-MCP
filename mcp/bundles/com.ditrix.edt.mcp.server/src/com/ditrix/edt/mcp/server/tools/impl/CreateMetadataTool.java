@@ -743,6 +743,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         final String ownerFqn = ((IBmObject)owner).bmGetFqn();
         final String formName = ref.formName;
         final String synonym = props.synonym;
+        final String comment = props.comment;
         final boolean fSetAsDefault = setAsDefault;
 
         final String contentFormFqn;
@@ -756,7 +757,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                     throw new RuntimeException("Owner object not found in transaction"); //$NON-NLS-1$
                 }
                 return FormElementWriter.createForm(tx, (MdObject)txOwner, formName, synonymLanguage,
-                    synonym, fSetAsDefault, mdFactory, formFactory, fqnGenerator, version);
+                    synonym, comment, fSetAsDefault, mdFactory, formFactory, fqnGenerator, version);
             });
         }
         catch (Exception e)
