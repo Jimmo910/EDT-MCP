@@ -1272,6 +1272,80 @@ public final class FormElementWriter
         return null;
     }
 
+    // ---- rebind (F3): change an EXISTING handler's procedure / a button's command ---------------
+
+    /**
+     * Re-points an EXISTING event handler on {@code container} (the form root or a form item) to a
+     * different BSL procedure: finds the handler bound to {@code eventName} (English or Russian,
+     * case-insensitive) and overwrites its procedure {@code name}. Does NOT bind a new event (that is
+     * {@code create_metadata} via {@link #createHandler}); a missing handler is reported so the caller
+     * can steer the user to create it. Reflective, so no compile-time form-model dependency. Call on
+     * the tx-bound form model.
+     *
+     * @param container the form root or the owning form item (already resolved on the tx-bound model)
+     * @param eventName the event whose handler to rebind (e.g. {@code OnChange})
+     * @param procName the new BSL handler procedure name (must be non-blank)
+     * @return {@code null} on success, or a human-readable error message
+     */
+    public static String rebindHandler(EObject container, String eventName, String procName)
+    {
+        EStructuralFeature handlersFeat = container.eClass().getEStructuralFeature("handlers"); //$NON-NLS-1$
+        if (!(handlersFeat instanceof EReference) || !handlersFeat.isMany())
+        {
+            return "The form element '" + container.eClass().getName() //$NON-NLS-1$
+                + "' cannot hold event handlers."; //$NON-NLS-1$
+        }
+        if (procName == null || procName.isEmpty())
+        {
+            return "Provide the new handler procedure name in the 'procedure' property " //$NON-NLS-1$
+                + "(e.g. {name:'procedure', value:'PriceOnChange'})."; //$NON-NLS-1$
+        }
+        EObject handler = findFormHandler(container, eventName);
+        if (handler == null)
+        {
+            return "No event handler for '" + eventName + "' exists on this element to rebind. Use " //$NON-NLS-1$ //$NON-NLS-2$
+                + "create_metadata on the handler FQN to bind it first."; //$NON-NLS-1$
+        }
+        setStringFeature(handler, FEATURE_NAME, procName);
+        return null;
+    }
+
+    /**
+     * Re-points an EXISTING button at a different (existing) form command: validates that
+     * {@code button} carries a {@code commandName} reference and that a {@link
+     * com._1c.g5.v8.dt.form.model.FormCommand} named {@code commandName} exists on {@code formModel},
+     * then sets the reference. A button's {@code commandName} targets a FormCommand (a form-model
+     * object, not an mdclass object), so it is not introspector-assignable and is rebound here.
+     * Reflective, so no compile-time form-model dependency. Call on the tx-bound form model.
+     *
+     * @param formModel the editable form content model (tx-bound)
+     * @param button the button form item (already resolved on the tx-bound model)
+     * @param commandName the name of the existing form command to point the button at
+     * @return {@code null} on success, or a human-readable error message
+     */
+    public static String rebindButtonCommand(EObject formModel, EObject button, String commandName)
+    {
+        EStructuralFeature cmdFeat = button.eClass().getEStructuralFeature("commandName"); //$NON-NLS-1$
+        if (!(cmdFeat instanceof EReference))
+        {
+            return "The form item '" + button.eClass().getName() //$NON-NLS-1$
+                + "' has no 'commandName' reference; only a Button runs a form command."; //$NON-NLS-1$
+        }
+        if (commandName == null || commandName.isEmpty())
+        {
+            return "Provide the form command to point the button at in the 'command' property " //$NON-NLS-1$
+                + "(e.g. {name:'command', value:'Refresh'})."; //$NON-NLS-1$
+        }
+        EObject command = findByName(referenceList(formModel, FEATURE_FORM_COMMANDS), commandName);
+        if (command == null)
+        {
+            return "Form command '" + commandName + "' not found - create it first " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(create_metadata on the form's Command FQN), then re-point the button at it."; //$NON-NLS-1$
+        }
+        button.eSet(cmdFeat, command);
+        return null;
+    }
+
     // ---- move / reorder (F2) --------------------------------------------------------------------
 
     /** Position spec prefixes (the integer / {@code first} / {@code last} forms have no prefix). */
