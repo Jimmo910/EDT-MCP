@@ -112,12 +112,26 @@ public class RunYaxunitTestsTool implements IMcpTool
             .stringArrayProperty("tests", "Test names in Module.Method format (array; a comma-separated string is also accepted).") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("timeout", "Polling window in seconds (default: 60); on expiry returns Pending.") //$NON-NLS-1$ //$NON-NLS-2$
             .booleanProperty("updateBeforeLaunch", //$NON-NLS-1$
-                "Auto-chain (default: true): terminate a live client and run a silent DB update first.") //$NON-NLS-1$
+                "Auto-chain (default: true): force-recompute the project + its extensions, terminate a " //$NON-NLS-1$
+                    + "live client and run a silent DB update first, so a freshly edited extension runs " //$NON-NLS-1$
+                    + "fresh (not stale). true also BYPASSES the cached junit.xml so the run is always fresh.") //$NON-NLS-1$
+            .stringProperty("updateScope", UPDATE_SCOPE_DESCRIPTION) //$NON-NLS-1$
             .booleanProperty("debug", //$NON-NLS-1$
                 "Default false: poll and return the report. true: launch in DEBUG mode so breakpoints " //$NON-NLS-1$
                     + "fire, return immediately and call wait_for_break next (ignores timeout).") //$NON-NLS-1$
             .build();
     }
+
+    /**
+     * Shared schema doc for the {@code updateScope} parameter (also forwarded by
+     * the {@code debug_yaxunit_tests} alias).
+     */
+    static final String UPDATE_SCOPE_DESCRIPTION =
+        "Which projects to rebuild+update before the run: 'all' (configuration + dependent " //$NON-NLS-1$
+            + "extensions, default), 'configuration', or 'extension:<ProjectName>' " //$NON-NLS-1$
+            + "(comma-separate several). Forces a derived-data recompute so a freshly edited " //$NON-NLS-1$
+            + "extension's .cfe is regenerated and loaded into the infobase before the run. " //$NON-NLS-1$
+            + "Only applies when updateBeforeLaunch=true."; //$NON-NLS-1$
 
     @Override
     public ResponseType getResponseType()
@@ -145,6 +159,7 @@ public class RunYaxunitTestsTool implements IMcpTool
         }
         boolean updateBeforeLaunch = JsonUtils.extractBooleanArgument(params, //$NON-NLS-1$
             "updateBeforeLaunch", true); //$NON-NLS-1$
+        String updateScope = JsonUtils.extractStringArgument(params, "updateScope"); //$NON-NLS-1$
         boolean debug = JsonUtils.extractBooleanArgument(params, "debug", false); //$NON-NLS-1$ //$NON-NLS-2$
 
         boolean hasName = configName != null && !configName.isEmpty();
@@ -165,7 +180,7 @@ public class RunYaxunitTestsTool implements IMcpTool
         purgeTerminatedLaunches();
 
         return runTests(configName, projectName, applicationId, extensions, modules, tests,
-            timeout, updateBeforeLaunch, debug);
+            timeout, updateBeforeLaunch, updateScope, debug);
     }
 
     /**
@@ -184,7 +199,7 @@ public class RunYaxunitTestsTool implements IMcpTool
      */
     private String runTests(String configName, String projectName, String applicationId,
             String extensions, String modules, String tests, int timeout, boolean updateBeforeLaunch,
-            boolean debug)
+            String updateScope, boolean debug)
     {
         try
         {
@@ -286,7 +301,8 @@ public class RunYaxunitTestsTool implements IMcpTool
             if (debug)
             {
                 return launchDebugMode(matchingConfig, project, projectName, applicationId,
-                    appManager, launchManager, extensions, modules, tests, updateBeforeLaunch);
+                    appManager, launchManager, extensions, modules, tests, updateBeforeLaunch,
+                    updateScope);
             }
 
             // Use the launch config name as the run-key root — stable across
@@ -318,9 +334,18 @@ public class RunYaxunitTestsTool implements IMcpTool
                 return buildPendingMessage(reportDir);
             }
 
-            // No active launch — return fresh cached result if available.
+            // No active launch — return a fresh cached result if available, BUT never
+            // when updateBeforeLaunch=true. With updateBeforeLaunch=true the caller is
+            // explicitly asking for a fresh run after a possible source edit: returning a
+            // cached junit here would skip BOTH the pre-launch recompute+DB sync (Phase 2)
+            // and the run itself, silently yielding a stale result for the just-edited code
+            // (e.g. a deleted/added test not reflected). The cache stays valid only for
+            // updateBeforeLaunch=false (an explicit "just fetch the last result").
+            // The non-blocking poll/fetch of an in-flight or just-finished launch goes
+            // through the ACTIVE_LAUNCHES path above, not this cache.
             File cached = findJunitXml(reportDir);
-            if (cached != null && (System.currentTimeMillis() - cached.lastModified()) < CACHE_TTL_MS)
+            if (!updateBeforeLaunch && cached != null
+                && (System.currentTimeMillis() - cached.lastModified()) < CACHE_TTL_MS)
             {
                 Activator.logInfo("Returning cached YAXUnit results from " + cached); //$NON-NLS-1$
                 return readResults(cached);
@@ -359,7 +384,7 @@ public class RunYaxunitTestsTool implements IMcpTool
                     {
                         int terminateTimeout = LaunchLifecycleUtils.getDefaultTerminateTimeoutSeconds();
                         preLaunch = LaunchLifecycleUtils.prepareForFreshLaunch(launchManager,
-                            project, applicationId, appManager, terminateTimeout);
+                            project, applicationId, appManager, terminateTimeout, updateScope);
                         if (!preLaunch.isOk())
                         {
                             return ToolResult.error("Pre-launch preparation failed: " //$NON-NLS-1$
@@ -470,7 +495,7 @@ public class RunYaxunitTestsTool implements IMcpTool
     private String launchDebugMode(ILaunchConfiguration matchingConfig, IProject project,
             String projectName, String applicationId, IApplicationManager appManager,
             ILaunchManager launchManager, String extensions, String modules, String tests,
-            boolean updateBeforeLaunch) throws IOException, CoreException
+            boolean updateBeforeLaunch, String updateScope) throws IOException, CoreException
     {
         // Native path separators: YAXUnit builds file:// URIs and breaks on forward slashes on Windows.
         Path reportDir = Paths.get(System.getProperty("java.io.tmpdir"), //$NON-NLS-1$
@@ -492,7 +517,7 @@ public class RunYaxunitTestsTool implements IMcpTool
             {
                 int terminateTimeout = LaunchLifecycleUtils.getDefaultTerminateTimeoutSeconds();
                 preLaunch = LaunchLifecycleUtils.prepareForFreshLaunch(launchManager, project,
-                    applicationId, appManager, terminateTimeout);
+                    applicationId, appManager, terminateTimeout, updateScope);
                 if (!preLaunch.isOk())
                 {
                     return ToolResult.error("Pre-launch preparation failed: " + preLaunch.getError() //$NON-NLS-1$

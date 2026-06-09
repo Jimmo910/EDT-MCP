@@ -28,6 +28,8 @@ import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.ILaunchConfigurationType;
 import org.eclipse.debug.core.ILaunchManager;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.PreLaunchResult;
@@ -49,6 +51,21 @@ public class LaunchLifecycleUtilsPrepareTest
 {
     private static final String PROJECT_NAME = "MyProject";
     private static final String RUNTIME_APP_ID = "real-app-uuid";
+
+    @Before
+    public void shrinkTimings()
+    {
+        // The up-to-date app manager reads UPDATED; without shrinking, the new
+        // settle-before-decide window (default 5s) would make each terminate test
+        // sleep needlessly. 20ms settle keeps these terminate-phase tests fast.
+        LaunchLifecycleUtils.setSyncTimingsForTest(20L, 200L, 5L);
+    }
+
+    @After
+    public void restoreTimings()
+    {
+        LaunchLifecycleUtils.resetSyncTimingsForTest();
+    }
 
     private static IProject mockOpenProject()
     {

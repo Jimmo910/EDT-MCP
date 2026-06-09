@@ -126,6 +126,41 @@ public class RunYaxunitTestsToolTest
     }
 
     @Test
+    public void testSchemaDeclaresUpdateScope()
+    {
+        // D2 (#19925): updateScope controls which projects are force-recomputed +
+        // updated before the run. Schema↔execute parity: execute() reads it too.
+        IMcpTool tool = new RunYaxunitTestsTool();
+        String schema = tool.getInputSchema();
+        assertTrue("schema must declare updateScope", schema.contains("\"updateScope\""));
+        assertTrue("updateScope doc must mention the extension:<Name> form",
+            schema.contains("extension:"));
+    }
+
+    @Test
+    public void testUpdateScopeDescriptionMentionsAllOptions()
+    {
+        // Pin the shared scope doc so the alias forwarding (debug_yaxunit_tests) and
+        // the run tool stay aligned on the accepted values.
+        String doc = RunYaxunitTestsTool.UPDATE_SCOPE_DESCRIPTION;
+        assertNotNull(doc);
+        assertTrue("must document 'all'", doc.contains("all"));
+        assertTrue("must document 'configuration'", doc.contains("configuration"));
+        assertTrue("must document the extension form", doc.contains("extension:"));
+    }
+
+    @Test
+    public void testSchemaDocumentsCacheBypassOnUpdateBeforeLaunch()
+    {
+        // The cache-bypass behaviour (updateBeforeLaunch=true bypasses the cached
+        // junit.xml so the run is always fresh) is surfaced in the updateBeforeLaunch
+        // doc so callers understand why a "fresh" run is forced.
+        String schema = new RunYaxunitTestsTool().getInputSchema();
+        assertTrue("updateBeforeLaunch doc must explain the cache bypass",
+            schema.toLowerCase().contains("bypass"));
+    }
+
+    @Test
     public void testGuideExplainsDebugMode()
     {
         String guide = new RunYaxunitTestsTool().getGuide();
