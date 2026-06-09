@@ -194,6 +194,38 @@ public class MetadataPropertyIntrospectorTest
     }
 
     @Test
+    public void testStyleItemValueIsStyleValueKind()
+    {
+        // A StyleItem's `value` is a single-valued containment ref to an mcore Value (Color / Font).
+        // It is assignable as the dedicated STYLE_VALUE kind (the generic containment-ref filter would
+        // otherwise drop it), so modify_metadata can set the color / font.
+        PropertyInfo value = MetadataPropertyIntrospector.find(
+            MdClassFactory.eINSTANCE.createStyleItem(), "value"); //$NON-NLS-1$
+        assertNotNull("a StyleItem's value must be assignable", value); //$NON-NLS-1$
+        assertTrue("value must be the STYLE_VALUE kind", value.valueKind == ValueKind.STYLE_VALUE); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testStyleItemColorValueRendersCurrent()
+    {
+        // After setting a ColorValue, the assignable "Current" must render the color (RGB / Auto),
+        // proving the STYLE_VALUE current-render path is wired.
+        com._1c.g5.v8.dt.metadata.mdclass.StyleItem item = MdClassFactory.eINSTANCE.createStyleItem();
+        com._1c.g5.v8.dt.mcore.ColorValue cv = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createColorValue();
+        com._1c.g5.v8.dt.mcore.ColorDef def = com._1c.g5.v8.dt.mcore.McoreFactory.eINSTANCE.createColorDef();
+        def.setRed(255);
+        def.setGreen(0);
+        def.setBlue(0);
+        cv.setValue(def);
+        item.setValue(cv);
+        PropertyInfo value = MetadataPropertyIntrospector.find(item, "value"); //$NON-NLS-1$
+        assertNotNull(value);
+        assertNotNull("the current color must render", value.currentValue); //$NON-NLS-1$
+        assertTrue("the current must show the RGB color, got: " + value.currentValue, //$NON-NLS-1$
+            value.currentValue.contains("RGB(255, 0, 0)")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testAccountingRegisterChartOfAccountsIsSingleReference()
     {
         PropertyInfo coa = MetadataPropertyIntrospector.find(
