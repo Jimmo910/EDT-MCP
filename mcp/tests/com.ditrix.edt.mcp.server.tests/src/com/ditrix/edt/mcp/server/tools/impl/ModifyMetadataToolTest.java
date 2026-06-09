@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.tools.impl;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -51,6 +52,20 @@ public class ModifyMetadataToolTest
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"fqn\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"properties\"")); //$NON-NLS-1$
+        // M3: the ё->е normalization toggle must be declared (execute() reads it; schema parity).
+        assertTrue("schema must declare the normalizeYo toggle", //$NON-NLS-1$
+            schema.contains("\"normalizeYo\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNormalizeYoIsOptional()
+    {
+        String schema = new ModifyMetadataTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("normalizeYo must not be required (defaults true)", //$NON-NLS-1$
+            tail.contains("\"normalizeYo\"")); //$NON-NLS-1$
     }
 
     @Test

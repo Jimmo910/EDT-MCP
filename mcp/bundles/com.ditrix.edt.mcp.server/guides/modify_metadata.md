@@ -8,6 +8,7 @@ Sets one or more properties of a metadata node addressed by a 1C full-name FQN (
 - `projectName` (required) - EDT project name.
 - `fqn` (required) - full-name FQN of the node.
 - `properties` (required) - array of `{name, value, language?}`. `name` is the property name; `value` the new value; `language` the CODE for a synonym (default: config default).
+- `normalizeYo` (optional, default true) - normalize the Russian letter `ё`->`е` / `Ё`->`Е` in any synonym / comment / title and other localized-string or free-text value being set (matches the 1C standard `mdo-ru-name-unallowed-letter`); set `false` to keep `ё` exactly as supplied. The result lists the rewritten properties under `normalized`.
 
 ## Not supported here
 - `name` (rename): refused - use rename_metadata_object, which cascades the rename across BSL code, forms and metadata.
@@ -31,7 +32,7 @@ A FORM member is addressed like its create FQN: `Catalog.X.Form.F.<Kind>.Name` (
 - Set a form attribute's type: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Attribute.Total', properties:[{name:'type', value:{types:[{kind:'Number', precision:10, scale:2}]}}]}`
 
 ## Result
-JSON with `action='modified'`, the normalized `fqn`, the `applied` property names, and `persisted`.
+JSON with `action='modified'`, the normalized `fqn`, the `applied` property names, `persisted`, and (when the ё->е normalization rewrote anything) the list of `normalized` properties.
 
 ## Reverting (no undo)
 There is no automatic undo: to revert a change, call modify_metadata again with the previous value (read the current value first with get_metadata_details). modify_metadata is intentionally NOT confirm-gated because it is reversible that way; only the destructive / high-blast-radius writes (delete_metadata, rename_metadata_object, update_database, delete_project) are gated with a confirm-preview.

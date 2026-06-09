@@ -41,6 +41,7 @@ from harness import (
     assert_no_diff,
     poll_diff_contains,
     wait_for_project_ready,
+    diff,
     e2e_test,
     PROJECT,
 )
@@ -594,6 +595,62 @@ def test_create_form_button_missing_command_is_error():
     e = assert_error(r, "button bound to a missing command")
     assert_error_quality(e, names=["NoSuchCmd_zz"], suggests=["not found"],
                          ctx="a button bound to a missing command is a clean error")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ё->е normalization (M3) — the Name leaf + synonym are normalized at the parse step
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_normalizes_yo_in_name_and_synonym_by_default():
+    # Default normalizeYo=true: 'ё' in the NAME leaf and the synonym is rewritten to 'е' at the parse
+    # step, BEFORE identifier validation, so the std474 mdo-ru-name-unallowed-letter issue never
+    # arises. The stored Name and synonym must be the 'е'-form on disk.
+    # "Серёжка" -> "Серёжка"/"Сережка" ; synonym "Тест отчёт" -> "Тест отчет".
+    name_yo = "Серёжка"      # contains ё
+    name_ye = "Сережка"           # expected stored form
+    syn_yo = "Тест отчёт"    # contains ё
+    syn_ye = "Тест отчет"         # expected stored form
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog." + name_yo,
+        "properties": [{"name": "synonym", "value": syn_yo, "language": "ru"}],
+    })
+    assert_ok(r, "create a Catalog whose Name + synonym carry ё (default normalizeYo)")
+    assert r.structured.get("action") == "created", "must report created: %r" % (r.structured,)
+    # The result echoes the normalized Name and reports which fields were rewritten.
+    assert r.structured.get("name") == name_ye, \
+        "the stored Name must be the е-form: %r" % (r.structured,)
+    assert r.structured.get("fqn") == "Catalog." + name_ye, \
+        "the FQN leaf must be normalized to the е-form: %r" % (r.structured,)
+    normalized = r.structured.get("normalized") or []
+    assert "name" in normalized and "synonym" in normalized, \
+        "the normalization report must list name + synonym: %r" % (r.structured,)
+    # On disk the new object's .mdo carries the е-form Name (and never the ё-form).
+    poll_diff_contains("<name>%s</name>" % name_ye,
+                       ctx="the normalized (е-form) Name must land in the new object's .mdo")
+    assert_not_contains(diff(), name_yo, "the ё-form Name must NOT appear on disk under default normalize")
+    assert_contains(diff(), syn_ye, "the synonym must be stored in its normalized (е-form) on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_preserves_yo_when_normalize_disabled():
+    # normalizeYo=false: the 'ё' is kept exactly. 'ё' is still a valid 1C identifier character (the
+    # std474 issue is an advisory, not a hard reject), so the create succeeds and stores the ё-form.
+    name_yo = "Полёт"  # contains ё
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog." + name_yo,
+        "normalizeYo": False,
+    })
+    assert_ok(r, "create a Catalog whose Name carries ё (normalizeYo=false)")
+    assert r.structured.get("name") == name_yo, \
+        "with normalizeYo=false the ё-form Name must be preserved: %r" % (r.structured,)
+    # No field was rewritten, so the report must be absent/empty.
+    assert not (r.structured.get("normalized") or []), \
+        "no normalization must be reported when disabled: %r" % (r.structured,)
+    poll_diff_contains("<name>%s</name>" % name_yo,
+                       ctx="the ё-form Name must be stored verbatim when normalizeYo=false")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -24,9 +24,11 @@ from harness import (
     assert_error,
     assert_error_quality,
     assert_contains,
+    assert_not_contains,
     assert_no_diff,
     poll_diff_contains,
     wait_for_project_ready,
+    diff,
     e2e_test,
     PROJECT,
 )
@@ -79,6 +81,47 @@ def test_set_synonym_with_language():
     assert_ok(r, "set synonym on Catalog.Catalog")
     assert "synonym" in (r.structured.get("applied") or []), "synonym must be applied: %r" % (r.structured,)
     poll_diff_contains("E2ESynonymMod", ctx="the synonym must land on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ё->е normalization (M3) — localized-string / free-text values are normalized at parse
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_normalizes_yo_in_synonym_and_comment_by_default():
+    # Default normalizeYo=true: the synonym + comment values are rewritten 'ё'->'е' at the parse step,
+    # so they are stored compliant with mdo-ru-name-unallowed-letter.
+    syn_yo, syn_ye = "Серёжки", "Сережки"        # synonym with ё / expected
+    com_yo, com_ye = "Полётный журнал", "Полетный журнал"  # comment with ё / expected
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "properties": [
+            {"name": "synonym", "value": syn_yo, "language": "ru"},
+            {"name": "comment", "value": com_yo},
+        ],
+    })
+    assert_ok(r, "set synonym + comment carrying ё on Catalog.Catalog (default normalizeYo)")
+    normalized = r.structured.get("normalized") or []
+    assert "synonym" in normalized and "comment" in normalized, \
+        "the normalization report must list synonym + comment: %r" % (r.structured,)
+    poll_diff_contains(syn_ye, ctx="the synonym must be stored in its normalized (е-form) on disk")
+    assert_contains(diff(), com_ye, "the comment must be stored in its normalized (е-form) on disk")
+    assert_not_contains(diff(), syn_yo, "the ё-form synonym must NOT appear on disk under default normalize")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_modify_preserves_yo_when_normalize_disabled():
+    # normalizeYo=false: the comment keeps its 'ё' exactly as supplied.
+    com_yo = "Расчёт стоимости"  # contains ё
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog",
+        "normalizeYo": False,
+        "properties": [{"name": "comment", "value": com_yo}],
+    })
+    assert_ok(r, "set a comment carrying ё with normalizeYo=false")
+    assert not (r.structured.get("normalized") or []), \
+        "no normalization must be reported when disabled: %r" % (r.structured,)
+    poll_diff_contains(com_yo, ctx="the ё-form comment must be stored verbatim when normalizeYo=false")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")

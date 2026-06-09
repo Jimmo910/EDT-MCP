@@ -40,6 +40,7 @@ import com.ditrix.edt.mcp.server.tools.base.AbstractMetadataWriteTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormStructureReader;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver.CreateTarget;
@@ -101,6 +102,11 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             .booleanProperty("expectedNotExists", //$NON-NLS-1$
                 "Optional stale-intent guard (default false): assert the node does not yet exist for " //$NON-NLS-1$
                 + "a sharper precondition error. A real duplicate is always rejected anyway.") //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in the new node's NAME (the trailing " //$NON-NLS-1$
+                + "FQN segment) and in any synonym / comment value (default true). 'ё' in a Name is " //$NON-NLS-1$
+                + "flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input " //$NON-NLS-1$
+                + "stores a compliant name. Set false to keep 'ё' exactly as supplied.") //$NON-NLS-1$
             .enumProperty("commonModuleKind", //$NON-NLS-1$
                 "CommonModule top-object only. Selects a standards-compliant flag combination the " //$NON-NLS-1$
                 + "common-module-type validator accepts (no warning), instead of a bare module: " //$NON-NLS-1$
@@ -143,6 +149,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             .booleanProperty("persisted", "Whether the change was exported to disk") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("synonym", "Display name written, when a synonym property was provided") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("language", "Language code the synonym was written for") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("normalized", //$NON-NLS-1$
+                "Fields whose value was rewritten by the 'ё'->'е' normalization (when any)") //$NON-NLS-1$
             .stringProperty("commonModuleKind", //$NON-NLS-1$
                 "Resolved CommonModule kind, when a CommonModule was created") //$NON-NLS-1$
             .stringProperty("targetNamespace", //$NON-NLS-1$
@@ -162,12 +170,19 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String fqn = JsonUtils.extractStringArgument(params, "fqn"); //$NON-NLS-1$
         boolean expectedNotExists = JsonUtils.extractBooleanArgument(params, "expectedNotExists", false); //$NON-NLS-1$
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
         List<JsonObject> properties = JsonUtils.extractObjectArray(params, "properties"); //$NON-NLS-1$
+
+        // Normalize 'ё'->'е' at the PARSE step, BEFORE identifier validation, so a Name carrying the
+        // letter 'ё' (which the 1C standard mdo-ru-name-unallowed-letter rejects) is stored compliant.
+        // Only the NAME (the trailing FQN segment) and synonym / comment values are touched here; the
+        // type / kind tokens of the FQN are left exactly as supplied.
+        MdNameNormalizer.Report normReport = new MdNameNormalizer.Report(normalizeYo);
 
         // A FQN that addresses a FORM's content (e.g. Catalog.X.Form.F.Command.C) is handled by a
         // dedicated branch: form members live on the editable Form content model (a cross-model hop),
         // not the mdclass tree, and take 'title'/'parent' properties rather than synonym/comment.
-        String normFqn = MetadataTypeUtils.normalizeFqn(fqn);
+        String normFqn = normalizeLeafName(MetadataTypeUtils.normalizeFqn(fqn), normReport);
         FormElementWriter.FormMemberRef formRef = FormElementWriter.parse(normFqn);
         if (formRef != null)
         {
@@ -175,12 +190,13 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             {
                 return createFormHandler(projectName, normFqn, formRef, properties);
             }
-            return createFormMember(projectName, normFqn, formRef, properties);
+            return createFormMember(projectName, normFqn, formRef, properties, normReport);
         }
 
-        // Parse the supported properties (synonym/comment); reject anything else early.
+        // Parse the supported properties (synonym/comment); reject anything else early. The synonym /
+        // comment values are 'ё'->'е' normalized through the same report as the Name.
         Props props = new Props();
-        String propErr = parseProperties(properties, props);
+        String propErr = parseProperties(properties, props, normReport);
         if (propErr != null)
         {
             return propErr;
@@ -254,16 +270,16 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         if (target.topLevel)
         {
             return createTopLevel(project, config, projectName, target, normFqn, props, synonymLanguage,
-                typeSpecific);
+                typeSpecific, normReport);
         }
-        return createMember(project, projectName, target, normFqn, props, synonymLanguage);
+        return createMember(project, projectName, target, normFqn, props, synonymLanguage, normReport);
     }
 
     // ---- top-level creation (mirrors the former create_metadata_object) -------------------------
 
     private String createTopLevel(IProject project, Configuration config, String projectName,
         CreateTarget target, String normFqn, Props props, String synonymLanguage,
-        TypeSpecific typeSpecific)
+        TypeSpecific typeSpecific, MdNameNormalizer.Report normReport)
     {
         // Any configuration top-level type resolved by MetadataTypeUtils is attempted: the EDT
         // model-object factory produces the EDT "New"-wizard default content. A type the factory
@@ -343,13 +359,14 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             dirty.add(configFqn);
         }
         boolean persisted = BmTransactions.forceExportToDisk(project, dirty);
-        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, typeSpecific);
+        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, typeSpecific,
+            normReport);
     }
 
     // ---- member creation (mirrors the former add_metadata_attribute, generalized) ---------------
 
     private String createMember(IProject project, String projectName, CreateTarget target,
-        String normFqn, Props props, String synonymLanguage)
+        String normFqn, Props props, String synonymLanguage, MdNameNormalizer.Report normReport)
     {
         // Members are created inside a write transaction. Only TOP objects are re-fetchable by
         // bmId, so we re-fetch the TOP object and re-navigate to the leaf's owner BY NAME inside the
@@ -451,7 +468,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         }
 
         boolean persisted = BmTransactions.forceExportToDisk(project, topFqn);
-        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, null);
+        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, null, normReport);
     }
 
     // ---- form-content member creation (the cross-model hop into the editable Form) ---------------
@@ -463,7 +480,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
      * and the content form's OWN FQN is force-exported (it serializes to {@code Form.form}).
      */
     private String createFormMember(String projectName, String normFqn,
-        FormElementWriter.FormMemberRef ref, List<JsonObject> properties)
+        FormElementWriter.FormMemberRef ref, List<JsonObject> properties,
+        MdNameNormalizer.Report normReport)
     {
         FormElementWriter.Kind kind = FormElementWriter.kindForToken(ref.kindToken);
         if (kind == null)
@@ -494,7 +512,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             switch (pName.toLowerCase())
             {
                 case "title": //$NON-NLS-1$
-                    titleVal = asString(prop.get("value")); //$NON-NLS-1$
+                    titleVal = normReport.apply("title", asString(prop.get("value"))); //$NON-NLS-1$ //$NON-NLS-2$
                     titleLang = asString(prop.get("language")); //$NON-NLS-1$
                     break;
                 case "parent": //$NON-NLS-1$
@@ -603,13 +621,14 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
             && BmTransactions.forceExportToDisk(project, contentFormFqn);
 
-        return ToolResult.success()
+        ToolResult formResult = ToolResult.success()
             .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("kind", createdKind[0] != null ? createdKind[0] : fKind.name()) //$NON-NLS-1$
             .put("name", name) //$NON-NLS-1$
-            .put("persisted", persisted) //$NON-NLS-1$
-            .put("message", "Created " + normFqn).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+            .put("persisted", persisted); //$NON-NLS-1$
+        addNormalization(formResult, normReport);
+        return formResult.put("message", "Created " + normFqn).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -778,7 +797,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
      * Parses the {@code properties} array into the supported {@link Props}. Returns a JSON error
      * string when a property is malformed or unsupported, or {@code null} on success.
      */
-    private String parseProperties(List<JsonObject> properties, Props out)
+    private String parseProperties(List<JsonObject> properties, Props out,
+        MdNameNormalizer.Report normReport)
     {
         for (JsonObject prop : properties)
         {
@@ -791,11 +811,11 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             switch (name.toLowerCase())
             {
                 case "synonym": //$NON-NLS-1$
-                    out.synonym = value;
+                    out.synonym = normReport.apply("synonym", value); //$NON-NLS-1$
                     out.language = asString(prop.get("language")); //$NON-NLS-1$
                     break;
                 case "comment": //$NON-NLS-1$
-                    out.comment = value;
+                    out.comment = normReport.apply("comment", value); //$NON-NLS-1$
                     break;
                 default:
                     return ToolResult.error("Property '" + name + "' is not supported yet in " //$NON-NLS-1$ //$NON-NLS-2$
@@ -870,7 +890,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
     }
 
     private String success(String fqn, EClass kind, String name, boolean persisted, Props props,
-        String synonymLanguage, TypeSpecific typeSpecific)
+        String synonymLanguage, TypeSpecific typeSpecific, MdNameNormalizer.Report normReport)
     {
         ToolResult result = ToolResult.success()
             .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
@@ -893,9 +913,41 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 result.put("targetNamespace", typeSpecific.xdtoNamespace); //$NON-NLS-1$
             }
         }
+        addNormalization(result, normReport);
         return result
             .put("message", "Created " + fqn) //$NON-NLS-1$ //$NON-NLS-2$
             .toJson();
+    }
+
+    /**
+     * Normalizes 'ё'->'е' / 'Ё'->'Е' in the LEAF segment of a (normalized) FQN - the trailing
+     * segment that becomes the new node's programmatic Name - leaving every preceding segment (the
+     * type / kind tokens and the owner Names) untouched. Records the change as the "name" field on the
+     * report. For a single-token FQN (malformed, handled downstream) the whole token is the leaf.
+     */
+    private static String normalizeLeafName(String normFqn, MdNameNormalizer.Report normReport)
+    {
+        if (normFqn == null || normFqn.isEmpty())
+        {
+            return normFqn;
+        }
+        int dot = normFqn.lastIndexOf('.');
+        String leaf = dot >= 0 ? normFqn.substring(dot + 1) : normFqn;
+        String normalizedLeaf = normReport.apply("name", leaf); //$NON-NLS-1$
+        if (normalizedLeaf == leaf)
+        {
+            return normFqn;
+        }
+        return dot >= 0 ? normFqn.substring(0, dot + 1) + normalizedLeaf : normalizedLeaf;
+    }
+
+    /** Adds the {@code normalized} report field to a result when the normalization rewrote anything. */
+    private static void addNormalization(ToolResult result, MdNameNormalizer.Report normReport)
+    {
+        if (normReport.hasChanges())
+        {
+            result.put("normalized", normReport.normalizedFields()); //$NON-NLS-1$
+        }
     }
 
     /**

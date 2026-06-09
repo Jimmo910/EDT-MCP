@@ -61,6 +61,9 @@ public class CreateMetadataToolTest
         assertTrue(schema.contains("\"fqn\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"properties\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"expectedNotExists\"")); //$NON-NLS-1$
+        // M3: the ё->е normalization toggle must be declared (execute() reads it; schema parity).
+        assertTrue("schema must declare the normalizeYo toggle", //$NON-NLS-1$
+            schema.contains("\"normalizeYo\"")); //$NON-NLS-1$
         // M2: create-time-only, type-specific options.
         assertTrue(schema.contains("\"commonModuleKind\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"serverCall\"")); //$NON-NLS-1$
@@ -86,6 +89,17 @@ public class CreateMetadataToolTest
         // returnValuesReuse is likewise a closed enum.
         assertTrue("returnValuesReuse must offer DuringSession", //$NON-NLS-1$
             schema.contains("\"DuringSession\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testNormalizeYoIsOptional()
+    {
+        String schema = new CreateMetadataTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("normalizeYo must not be required (defaults true)", //$NON-NLS-1$
+            tail.contains("\"normalizeYo\"")); //$NON-NLS-1$
     }
 
     @Test
