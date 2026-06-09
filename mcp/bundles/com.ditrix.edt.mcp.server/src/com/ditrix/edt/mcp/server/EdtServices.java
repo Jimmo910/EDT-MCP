@@ -78,6 +78,16 @@ public class EdtServices
     private ServiceTracker<Object, Object> projectInformationApiTracker;
 
     /**
+     * EDT's debug-server target manager, tracked by String class name and called
+     * via reflection — keeps this bundle independent of the (possibly internal)
+     * debug-core manager type and degrades gracefully when the service is not
+     * registered. Enumerates 1C debug-server targets, including sessions started
+     * from the EDT UI ("Debug As") that the generic {@code ILaunchManager} view
+     * does not surface.
+     */
+    private ServiceTracker<Object, Object> runtimeDebugClientTargetManagerTracker;
+
+    /**
      * Opens all service trackers in the same order the activator used to open
      * them. Behaviour-preserving extraction of the tracker initialization block
      * from {@code Activator.start(BundleContext)}.
@@ -148,6 +158,10 @@ public class EdtServices
         projectInformationApiTracker = new ServiceTracker<>(
             context, "com.e1c.langtool.v8.dt.cli.api.IProjectInformationApi", null); //$NON-NLS-1$
         projectInformationApiTracker.open();
+
+        runtimeDebugClientTargetManagerTracker = new ServiceTracker<>(
+            context, "com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTargetManager", null); //$NON-NLS-1$
+        runtimeDebugClientTargetManagerTracker.open();
     }
 
     /**
@@ -252,6 +266,11 @@ public class EdtServices
         {
             projectInformationApiTracker.close();
             projectInformationApiTracker = null;
+        }
+        if (runtimeDebugClientTargetManagerTracker != null)
+        {
+            runtimeDebugClientTargetManagerTracker.close();
+            runtimeDebugClientTargetManagerTracker = null;
         }
     }
 
@@ -710,5 +729,32 @@ public class EdtServices
             return null;
         }
         return projectInformationApiTracker.getService();
+    }
+
+    /**
+     * Returns the EDT {@code IRuntimeDebugClientTargetManager} — typed as
+     * {@code Object} to avoid a compile-time / Import-Package dependency on the
+     * (possibly internal) debug-core manager type — looked up as an OSGi service
+     * by class name and called via reflection ({@code listDebugTargets()}).
+     * <p>
+     * EDT's wiring framework registers its Guice singletons as OSGi services, so
+     * the state-bearing manager singleton is reachable via the service tracker
+     * without touching the non-exported {@code DebugCorePlugin} (which, unlike
+     * {@code FormPlugin}/{@code MdPlugin}, exposes no {@code getInjector()}). This
+     * manager enumerates debug-server targets, including sessions a user started
+     * from the EDT UI ("Debug As"), which the generic
+     * {@link org.eclipse.debug.core.ILaunchManager} view does not surface.
+     *
+     * @return the manager instance (as Object), or {@code null} if the service is
+     *         not registered (e.g. headless test runtime or an EDT build that does
+     *         not register it)
+     */
+    public Object getRuntimeDebugClientTargetManager()
+    {
+        if (runtimeDebugClientTargetManagerTracker == null)
+        {
+            return null;
+        }
+        return runtimeDebugClientTargetManagerTracker.getService();
     }
 }

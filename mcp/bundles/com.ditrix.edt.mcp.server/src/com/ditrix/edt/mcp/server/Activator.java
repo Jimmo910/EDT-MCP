@@ -375,6 +375,21 @@ public class Activator extends AbstractUIPlugin
     }
 
     /**
+     * Returns the EDT {@code IRuntimeDebugClientTargetManager} — typed as
+     * {@code Object}, callers invoke {@code listDebugTargets()} via reflection.
+     * Used by {@code DebugServerTargetSupport} to surface 1C debug-server targets
+     * (including EDT-UI-started "Debug As" sessions) that the generic
+     * {@link org.eclipse.debug.core.ILaunchManager} view does not expose. Returns
+     * {@code null} when the service is not registered.
+     *
+     * @return the manager instance (as Object), or {@code null} if not available
+     */
+    public Object getRuntimeDebugClientTargetManager()
+    {
+        return services.getRuntimeDebugClientTargetManager();
+    }
+
+    /**
      * Returns the IGroupService for group operations.
      * Used for virtual folder groups in the Navigator.
      * 

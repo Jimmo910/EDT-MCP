@@ -16,7 +16,9 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 
 /**
  * Steps a suspended thread (over / into / out) and waits for the next SUSPEND
@@ -65,6 +67,7 @@ public class StepTool implements IMcpTool
             .integerProperty("threadId", "Id of the suspended thread") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("threadName", "Name of the suspended thread") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("applicationId", "Application id of the debug session") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("serverTarget", "True if stepping a 1C debug-server target") //$NON-NLS-1$ //$NON-NLS-2$
             .objectArrayProperty("frames", "Stack frames: frameIndex, frameRef, name, line, modulePath, project") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("topFrameRef", "Stable ref of the top stack frame") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
@@ -104,7 +107,14 @@ public class StepTool implements IMcpTool
         }
         IStep stepper = (IStep) thread;
 
-        String appId = DebugSessionRegistry.findApplicationIdFor(thread);
+        // A server thread's owning IDebugTarget is a 1C debug-server target whose
+        // getLaunch() does not carry the runtime-client ATTR_APPLICATION_ID, so
+        // findApplicationIdFor returns null/wrong. Detect the server case from the
+        // thread's debug target and address it by its minted ServerApplication id.
+        DebugServerTargetSupport.ServerTarget serverTarget = serverTargetOf(thread);
+        String appId = serverTarget != null
+            ? serverTarget.applicationId
+            : DebugSessionRegistry.findApplicationIdFor(thread);
         if (appId == null)
         {
             return ToolResult.error("could not determine applicationId for thread").toJson(); //$NON-NLS-1$
@@ -144,8 +154,32 @@ public class StepTool implements IMcpTool
                     return ToolResult.error("unknown kind: " + kind).toJson(); //$NON-NLS-1$
             }
 
-            DebugSessionRegistry.SuspendSnapshot snapshot =
-                registry.waitForSuspend(appId, timeout * 1000L);
+            DebugSessionRegistry.SuspendSnapshot snapshot;
+            if (serverTarget != null)
+            {
+                // Server target: poll the live model for the re-suspend (its SUSPEND
+                // events do not reliably key into the launch-based registry), then
+                // inject so the shared snapshot response works unchanged. Brief settle
+                // first so the step transition (resume → step → suspend) registers and
+                // the poll does not catch the pre-step suspended state.
+                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+                IThread reSuspended = DebugServerTargetSupport.pollForSuspendedThread(
+                    serverTarget.target, timeout * 1000L, LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+                if (reSuspended == null)
+                {
+                    return ToolResult.success()
+                        .put("hit", false) //$NON-NLS-1$
+                        .put("reason", "timeout") //$NON-NLS-1$ //$NON-NLS-2$
+                        .put("serverTarget", true) //$NON-NLS-1$
+                        .toJson();
+                }
+                registry.injectSuspend(appId, reSuspended);
+                snapshot = registry.getSnapshot(appId);
+            }
+            else
+            {
+                snapshot = registry.waitForSuspend(appId, timeout * 1000L);
+            }
             if (snapshot == null)
             {
                 return ToolResult.success()
@@ -165,6 +199,38 @@ public class StepTool implements IMcpTool
             Activator.logError("Error in step", e); //$NON-NLS-1$
             return ToolResult.error(e.getMessage()).toJson(); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Returns the debug-server target that owns the given thread (by identity of
+     * the thread's {@link org.eclipse.debug.core.model.IDebugTarget}), or
+     * {@code null} when the thread belongs to an ordinary Eclipse launch.
+     *
+     * @param thread the suspended thread being stepped
+     * @return the owning server target, or {@code null}
+     */
+    private static DebugServerTargetSupport.ServerTarget serverTargetOf(IThread thread)
+    {
+        try
+        {
+            org.eclipse.debug.core.model.IDebugTarget owner = thread.getDebugTarget();
+            if (owner == null)
+            {
+                return null;
+            }
+            for (DebugServerTargetSupport.ServerTarget st : DebugServerTargetSupport.listServerTargets())
+            {
+                if (st.target == owner)
+                {
+                    return st;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // best-effort — treat as a non-server thread
+        }
+        return null;
     }
 
     /**
