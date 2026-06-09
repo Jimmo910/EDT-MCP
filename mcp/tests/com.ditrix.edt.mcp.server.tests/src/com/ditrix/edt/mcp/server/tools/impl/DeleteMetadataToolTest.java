@@ -87,8 +87,8 @@ public class DeleteMetadataToolTest
     {
         String desc = new DeleteMetadataTool().getDescription();
         assertNotNull(desc);
-        assertTrue("description should point to get_tool_guide", //$NON-NLS-1$
-            desc.contains("get_tool_guide('delete_metadata')")); //$NON-NLS-1$
+        assertTrue("description should mention the force override", //$NON-NLS-1$
+            desc.toLowerCase().contains("force")); //$NON-NLS-1$
     }
 
     @Test
