@@ -62,6 +62,9 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             + "command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all " //$NON-NLS-1$
             + "references in BSL code, forms and other metadata. Two-phase: call without confirm to " //$NON-NLS-1$
             + "preview what would be removed, then confirm=true to apply (deletion is hard to reverse). " //$NON-NLS-1$
+            + "If the node is still referenced by metadata the refactoring cannot auto-clean, a " //$NON-NLS-1$
+            + "confirm=true delete is BLOCKED and the referencing objects are listed; pass force=true " //$NON-NLS-1$
+            + "to delete anyway (those references are left dangling). " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('delete_metadata')."; //$NON-NLS-1$
     }
 
@@ -77,6 +80,11 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
                 + "Russian; the Name parts are the programmatic Name, not the synonym).", true) //$NON-NLS-1$
             .booleanProperty("confirm", //$NON-NLS-1$
                 "true = execute the deletion; default false = preview only.") //$NON-NLS-1$
+            .booleanProperty("force", //$NON-NLS-1$
+                "true = delete even when the node is still referenced by other metadata that the " //$NON-NLS-1$
+                + "refactoring cannot auto-clean (those incoming references are left dangling). " //$NON-NLS-1$
+                + "Default false = on confirm=true the deletion is BLOCKED and the referencing " //$NON-NLS-1$
+                + "objects are listed (independent of 'confirm', which is the preview gate).") //$NON-NLS-1$
             .build();
     }
 
@@ -85,12 +93,18 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     {
         return JsonSchemaBuilder.object()
             .booleanProperty("success", "Whether the request succeeded", true) //$NON-NLS-1$ //$NON-NLS-2$
-            .stringProperty("action", "Either 'preview' or 'executed'") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("action", "Either 'preview', 'executed' or 'blocked'") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("fqn", "FQN of the node targeted for deletion") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("refactoringTitle", "Title of the delete refactoring (preview)") //$NON-NLS-1$ //$NON-NLS-2$
             .objectArrayProperty("items", "Metadata items the deletion would remove (preview)") //$NON-NLS-1$ //$NON-NLS-2$
             .objectArrayProperty("affectedReferences", "References that would be affected (preview)") //$NON-NLS-1$ //$NON-NLS-2$
             .integerProperty("affectedReferencesCount", "Count of affected references (preview)") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("blocking", "Whether the listed affected references are BLOCKING (the " //$NON-NLS-1$ //$NON-NLS-2$
+                + "refactoring cannot auto-clean them; a confirm=true delete is refused unless force=true)") //$NON-NLS-1$
+            .objectArrayProperty("blockingReferences", "Incoming references that block the delete " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(action='blocked'), or that were left dangling when force=true (action='executed')") //$NON-NLS-1$
+            .integerProperty("blockingReferencesCount", "Count of blocking references") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("forced", "Whether the delete was forced past blocking references") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("message", "Human-readable description of the result") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -106,6 +120,7 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String fqn = JsonUtils.extractStringArgument(params, "fqn"); //$NON-NLS-1$
         boolean confirm = JsonUtils.extractBooleanArgument(params, "confirm", false); //$NON-NLS-1$
+        boolean force = JsonUtils.extractBooleanArgument(params, "force", false); //$NON-NLS-1$
 
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -149,13 +164,12 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to create delete refactoring for: " + normFqn).toJson(); //$NON-NLS-1$
         }
 
-        return confirm ? performDelete(normFqn, refactoring) : buildPreview(normFqn, refactoring);
+        return confirm ? performDelete(normFqn, refactoring, force) : buildPreview(normFqn, refactoring);
     }
 
     private String buildPreview(String fqn, IRefactoring refactoring)
     {
         List<Map<String, Object>> allItems = new ArrayList<>();
-        List<Map<String, Object>> allProblems = new ArrayList<>();
 
         String title = refactoring.getTitle();
 
@@ -172,69 +186,198 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             }
         }
 
-        RefactoringStatus status = refactoring.getStatus();
-        if (status != null)
-        {
-            Collection<IRefactoringProblem> problems = status.getProblems();
-            if (problems != null)
-            {
-                for (IRefactoringProblem problem : problems)
-                {
-                    Map<String, Object> problemMap = new java.util.LinkedHashMap<>();
-                    if (problem instanceof CleanReferenceProblem crp)
-                    {
-                        EObject refObj = crp.getReferencingObject();
-                        if (refObj instanceof IBmObject bmObj)
-                        {
-                            problemMap.put("referencingObject", bmObj.bmGetFqn()); //$NON-NLS-1$
-                        }
-                        EStructuralFeature feat = crp.getReference();
-                        if (feat != null)
-                        {
-                            problemMap.put("reference", feat.getName()); //$NON-NLS-1$
-                        }
-                    }
-                    EObject obj = problem.getObject();
-                    if (obj instanceof IBmObject bmObj)
-                    {
-                        problemMap.put("targetObject", bmObj.bmGetFqn()); //$NON-NLS-1$
-                    }
-                    if (!problemMap.isEmpty())
-                    {
-                        allProblems.add(problemMap);
-                    }
-                }
-            }
-        }
+        // Incoming references EDT could not clean automatically — these BLOCK a confirm=true delete
+        // unless force=true is also passed (mirrors the EDT/Configurator UI's pre-delete check).
+        List<Map<String, Object>> blocking = collectBlockingProblems(refactoring);
+        boolean hasBlocking = !blocking.isEmpty();
+
+        String message = hasBlocking
+            ? "Preview of delete refactoring. This node is referenced by " + blocking.size() //$NON-NLS-1$
+                + " object(s) the refactoring CANNOT auto-clean: a confirm=true delete will be BLOCKED " //$NON-NLS-1$
+                + "unless force=true is also passed (force leaves these references dangling)." //$NON-NLS-1$
+            : "Preview of delete refactoring. References listed above will be cleaned up. " //$NON-NLS-1$
+                + "Call with confirm=true to apply."; //$NON-NLS-1$
 
         return ToolResult.success()
             .put("action", "preview") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", fqn) //$NON-NLS-1$
             .put("refactoringTitle", title) //$NON-NLS-1$
             .put("items", allItems) //$NON-NLS-1$
-            .put("affectedReferences", allProblems) //$NON-NLS-1$
-            .put("affectedReferencesCount", allProblems.size()) //$NON-NLS-1$
-            .put("message", "Preview of delete refactoring. References listed above will be cleaned " //$NON-NLS-1$ //$NON-NLS-2$
-                + "up. Call with confirm=true to apply.") //$NON-NLS-1$
+            .put("affectedReferences", blocking) //$NON-NLS-1$
+            .put("affectedReferencesCount", blocking.size()) //$NON-NLS-1$
+            .put("blocking", hasBlocking) //$NON-NLS-1$
+            .put("blockingReferences", blocking) //$NON-NLS-1$
+            .put("blockingReferencesCount", blocking.size()) //$NON-NLS-1$
+            .put("message", message) //$NON-NLS-1$
             .toJson();
     }
 
-    private String performDelete(String fqn, IRefactoring refactoring)
+    private String performDelete(String fqn, IRefactoring refactoring, boolean force)
     {
+        // EDT's own reference check: if the node is still referenced by metadata the refactoring
+        // cannot auto-clean and the caller did not force, refuse the delete and report the
+        // referencing objects (mirrors the UI). 'confirm' is the preview gate; 'force' overrides
+        // this reference block — the two are intentionally distinct.
+        List<Map<String, Object>> blocking = collectBlockingProblems(refactoring);
+        if (!blocking.isEmpty() && !force)
+        {
+            return ToolResult.error("Cannot delete '" + fqn + "': it is still referenced by " //$NON-NLS-1$ //$NON-NLS-2$
+                    + blocking.size() + " object(s) that the refactoring cannot auto-clean. Remove the " //$NON-NLS-1$
+                    + "references first, or call again with force=true to delete anyway (the references " //$NON-NLS-1$
+                    + "will be left dangling).") //$NON-NLS-1$
+                .put("action", "blocked") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("fqn", fqn) //$NON-NLS-1$
+                .put("blocking", true) //$NON-NLS-1$
+                .put("blockingReferences", blocking) //$NON-NLS-1$
+                .put("blockingReferencesCount", blocking.size()) //$NON-NLS-1$
+                .toJson();
+        }
+
         try
         {
             refactoring.perform();
-            return ToolResult.success()
+            ToolResult result = ToolResult.success()
                 .put("action", "executed") //$NON-NLS-1$ //$NON-NLS-2$
                 .put("fqn", fqn) //$NON-NLS-1$
-                .put("message", "Delete refactoring completed successfully.") //$NON-NLS-1$ //$NON-NLS-2$
-                .toJson();
+                .put("forced", force); //$NON-NLS-1$
+            if (!blocking.isEmpty())
+            {
+                result.put("blockingReferences", blocking) //$NON-NLS-1$
+                    .put("blockingReferencesCount", blocking.size()) //$NON-NLS-1$
+                    .put("message", "Delete refactoring completed (forced). " + blocking.size() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " incoming reference(s) were left dangling."); //$NON-NLS-1$
+            }
+            else
+            {
+                result.put("message", "Delete refactoring completed successfully."); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return result.toJson();
         }
         catch (Exception e)
         {
             Activator.logError("Error performing delete refactoring", e); //$NON-NLS-1$
             return ToolResult.error("Delete failed: " + e.getMessage()).toJson(); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Collects the refactoring's BLOCKING problems — the incoming references EDT could not resolve
+     * automatically. This is the same set the EDT/Configurator UI renders before a delete. A
+     * {@link CleanReferenceProblem} carries the referencing object and the feature through which it
+     * points at the node being deleted; other problem kinds only carry the target object. A non-empty
+     * result means the deletion is unsafe without force. Never throws on a single odd problem.
+     */
+    private static List<Map<String, Object>> collectBlockingProblems(IRefactoring refactoring)
+    {
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        RefactoringStatus status = refactoring.getStatus();
+        if (status == null)
+        {
+            return result;
+        }
+        Collection<IRefactoringProblem> problems = status.getProblems();
+        if (problems == null)
+        {
+            return result;
+        }
+
+        for (IRefactoringProblem problem : problems)
+        {
+            Map<String, Object> problemMap = new java.util.LinkedHashMap<>();
+            problemMap.put("problemType", problem.getClass().getSimpleName()); //$NON-NLS-1$
+            // Best-effort description; never let a single odd problem abort the whole check.
+            try
+            {
+                if (problem instanceof CleanReferenceProblem crp)
+                {
+                    EObject refObj = crp.getReferencingObject();
+                    if (refObj instanceof IBmObject bmObj)
+                    {
+                        String refFqn = bmFqnSafe(bmObj);
+                        if (refFqn != null)
+                        {
+                            problemMap.put("referencingObject", refFqn); //$NON-NLS-1$
+                        }
+                    }
+                    EStructuralFeature feat = crp.getReference();
+                    if (feat != null)
+                    {
+                        problemMap.put("reference", feat.getName()); //$NON-NLS-1$
+                    }
+                }
+                EObject obj = problem.getObject();
+                if (obj instanceof IBmObject bmObj)
+                {
+                    String tgtFqn = bmFqnSafe(bmObj);
+                    if (tgtFqn != null)
+                    {
+                        problemMap.put("targetObject", tgtFqn); //$NON-NLS-1$
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Activator.logError("Error describing refactoring problem", e); //$NON-NLS-1$
+            }
+            result.add(problemMap);
+        }
+        return result;
+    }
+
+    /**
+     * Returns a human-readable FQN for a BM object. {@code bmGetFqn()} is only legal on top objects,
+     * so for a nested object (e.g. a register dimension or a type item that holds the reference) we
+     * climb to the owning top object and append the nested element's name when one is available.
+     * Never throws.
+     */
+    private static String bmFqnSafe(IBmObject obj)
+    {
+        if (obj == null)
+        {
+            return null;
+        }
+        try
+        {
+            if (obj.bmIsTop())
+            {
+                return obj.bmGetFqn();
+            }
+        }
+        catch (Exception e)
+        {
+            // fall through to top-object resolution
+        }
+
+        String localName = null;
+        if (obj instanceof MdObject mdo)
+        {
+            localName = mdo.getName();
+        }
+        else if (obj instanceof org.eclipse.emf.ecore.ENamedElement ene)
+        {
+            localName = ene.getName();
+        }
+
+        try
+        {
+            IBmObject top = obj.bmGetTopObject();
+            if (top != null && top != obj)
+            {
+                String topFqn = top.bmGetFqn();
+                if (topFqn != null)
+                {
+                    return (localName != null && !localName.isEmpty())
+                        ? topFqn + " (" + localName + ")" //$NON-NLS-1$ //$NON-NLS-2$
+                        : topFqn;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            // ignore — fall back to the local name (or null)
+        }
+        return localName;
     }
 
     // ==================== FORM members (cross-model hop) ====================

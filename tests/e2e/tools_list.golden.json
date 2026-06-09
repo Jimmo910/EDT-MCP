@@ -359,11 +359,15 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Delete a metadata node (object or member, including a FORM member - item / attribute / command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all references in BSL code, forms and other metadata. Two-phase: call without confirm to preview what would be removed, then confirm=true to apply (deletion is hard to reverse). Full parameters and examples: call get_tool_guide('delete_metadata').",
+    "description": "Delete a metadata node (object or member, including a FORM member - item / attribute / command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all references in BSL code, forms and other metadata. Two-phase: call without confirm to preview what would be removed, then confirm=true to apply (deletion is hard to reverse). If the node is still referenced by metadata the refactoring cannot auto-clean, a confirm=true delete is BLOCKED and the referencing objects are listed; pass force=true to delete anyway (those references are left dangling). Full parameters and examples: call get_tool_guide('delete_metadata').",
     "inputSchema": {
       "properties": {
         "confirm": {
           "description": "true = execute the deletion; default false = preview only.",
+          "type": "boolean"
+        },
+        "force": {
+          "description": "true = delete even when the node is still referenced by other metadata that the refactoring cannot auto-clean (those incoming references are left dangling). Default false = on confirm=true the deletion is BLOCKED and the referencing objects are listed (independent of 'confirm', which is the preview gate).",
           "type": "boolean"
         },
         "fqn": {
@@ -385,7 +389,7 @@
     "outputSchema": {
       "properties": {
         "action": {
-          "description": "Either 'preview' or 'executed'",
+          "description": "Either 'preview', 'executed' or 'blocked'",
           "type": "string"
         },
         "affectedReferences": {
@@ -399,9 +403,28 @@
           "description": "Count of affected references (preview)",
           "type": "integer"
         },
+        "blocking": {
+          "description": "Whether the listed affected references are BLOCKING (the refactoring cannot auto-clean them; a confirm=true delete is refused unless force=true)",
+          "type": "boolean"
+        },
+        "blockingReferences": {
+          "description": "Incoming references that block the delete (action='blocked'), or that were left dangling when force=true (action='executed')",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blockingReferencesCount": {
+          "description": "Count of blocking references",
+          "type": "integer"
+        },
         "fqn": {
           "description": "FQN of the node targeted for deletion",
           "type": "string"
+        },
+        "forced": {
+          "description": "Whether the delete was forced past blocking references",
+          "type": "boolean"
         },
         "items": {
           "description": "Metadata items the deletion would remove (preview)",
