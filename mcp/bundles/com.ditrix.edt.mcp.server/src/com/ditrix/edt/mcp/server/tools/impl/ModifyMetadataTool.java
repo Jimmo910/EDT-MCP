@@ -72,7 +72,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             + "attribute / command) addressed by a 1C full-name FQN, as " //$NON-NLS-1$
             + "properties=[{name, value, language?}]. Each property is validated (it must be " //$NON-NLS-1$
             + "assignable, and an enum value must be one of the allowed literals) with an actionable " //$NON-NLS-1$
-            + "error. Discover assignable properties + allowed values with " //$NON-NLS-1$
+            + "error. Move/reorder a FORM ITEM with the 'parent' (a group name, or the form name for " //$NON-NLS-1$
+            + "the form root) and/or 'position' ('first'/'last'/'before:<name>'/'after:<name>'/index) " //$NON-NLS-1$
+            + "properties. Discover assignable properties + allowed values with " //$NON-NLS-1$
             + "get_metadata_details(assignable:true). To rename, use rename_metadata_object. " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('modify_metadata')."; //$NON-NLS-1$
     }
@@ -109,6 +111,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             .booleanProperty("persisted", "Whether the change was exported to disk") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty("normalized", //$NON-NLS-1$
                 "Properties whose value was rewritten by the 'ё'->'е' normalization (when any)") //$NON-NLS-1$
+            .stringProperty("destination", //$NON-NLS-1$
+                "Where a moved form item ended up (when 'parent'/'position' moved a form item), e.g. " //$NON-NLS-1$
+                + "\"group 'Main' at index 1\"") //$NON-NLS-1$
             .stringProperty("message", "Human-readable confirmation message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -302,6 +307,15 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                 + "create_metadata to add a handler or delete_metadata to remove it.").toJson(); //$NON-NLS-1$
         }
 
+        // A MOVE / REORDER is expressed through the 'parent' and/or 'position' properties on a form
+        // ITEM (a field / group / decoration / button / table - anything in the items tree). It is a
+        // structural re-parent/reorder, not an eSet property change, so it is routed to its own branch
+        // (and must not be mixed with ordinary property changes in the same call).
+        if (hasMoveProperty(properties))
+        {
+            return moveFormItem(ctx, normFqn, ref, properties);
+        }
+
         Configuration config = ctx.config;
         IV8ProjectManager v8ProjectManager = Activator.getDefault().getV8ProjectManager();
         IV8Project v8Project = v8ProjectManager != null ? v8ProjectManager.getProject(ctx.project) : null;
@@ -409,6 +423,191 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         addNormalization(result, normReport);
         return result
             .put("message", "Modified " + normFqn + " (" + String.join(", ", applied) + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            .toJson();
+    }
+
+    /**
+     * The move property names (the structural re-parent / reorder of a form item): {@code parent}
+     * (the destination group, or the form name / blank for the form root) and {@code position}
+     * (the destination order: {@code first} / {@code last} / {@code before:<name>} / {@code after:<name>}
+     * / a 0-based integer index). They are bilingual: ru {@code roditel} / ru {@code poziciya}.
+     */
+    private static final String PROP_PARENT = "parent"; //$NON-NLS-1$
+    private static final String PROP_POSITION = "position"; //$NON-NLS-1$
+    // ru "родитель" (roditel) / "позиция" (poziciya) - pure-ASCII source (matching the rest of the project).
+    private static final String RU_PROP_PARENT = cp(0x0440, 0x043e, 0x0434, 0x0438, 0x0442, 0x0435, 0x043b, 0x044c);
+    private static final String RU_PROP_POSITION =
+        cp(0x043f, 0x043e, 0x0437, 0x0438, 0x0446, 0x0438, 0x044f);
+
+    /** Whether a property NAME is the {@code parent} move property (English or Russian). */
+    private static boolean isParentProp(String name)
+    {
+        return PROP_PARENT.equalsIgnoreCase(name) || RU_PROP_PARENT.equalsIgnoreCase(name);
+    }
+
+    /** Whether a property NAME is the {@code position} move property (English or Russian). */
+    private static boolean isPositionProp(String name)
+    {
+        return PROP_POSITION.equalsIgnoreCase(name) || RU_PROP_POSITION.equalsIgnoreCase(name);
+    }
+
+    /** Whether any property in the list is a move property ({@code parent} / {@code position}). */
+    private static boolean hasMoveProperty(List<JsonObject> properties)
+    {
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (isParentProp(name) || isPositionProp(name))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Builds a string from BMP code points (keeps this source pure ASCII, like FormElementWriter). */
+    private static String cp(int... codePoints)
+    {
+        StringBuilder sb = new StringBuilder(codePoints.length);
+        for (int c : codePoints)
+        {
+            sb.append((char)c);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Moves / reorders a form ITEM addressed by {@code ref} (a field / group / decoration / button /
+     * table), expressed as the {@code parent} and/or {@code position} move properties. Resolves the
+     * MD-form, opens ONE BM write transaction on the re-fetched content form, re-parents / reorders the
+     * item via {@link FormElementWriter#moveItem} (which rejects an ambiguous / missing item, a
+     * non-group parent and a group-into-its-own-descendant cycle, rolling the tx back), then
+     * force-exports the CONTENT form to its {@code Form.form} on disk - the same persistence path the
+     * property-modify branch uses. Position semantics match the dedicated move primitive exactly (the
+     * integer index is the desired FINAL 0-based position).
+     */
+    private String moveFormItem(ProjectContext ctx, String normFqn,
+        FormElementWriter.FormMemberRef ref, List<JsonObject> properties)
+    {
+        // A move addresses a form ITEM only - never an attribute / command (which are not in the items
+        // tree and have no position / parent).
+        FormElementWriter.Kind kind = FormElementWriter.kindForToken(ref.kindToken);
+        if (kind == FormElementWriter.Kind.ATTRIBUTE || kind == FormElementWriter.Kind.COMMAND)
+        {
+            return ToolResult.error("'parent' / 'position' move a form ITEM (field / group / " //$NON-NLS-1$
+                + "decoration / button / table); a form " + ref.kindToken + " is not positioned. " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Address the item by its FQN, e.g. 'Type.Object.Form.FormName.Field.Price'.").toJson(); //$NON-NLS-1$
+        }
+
+        // A move is structural - it must not be mixed with ordinary property changes in one call.
+        String targetParent = null;
+        boolean hasParent = false;
+        String position = null;
+        boolean hasPosition = false;
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (isParentProp(name))
+            {
+                targetParent = asString(prop.get("value")); //$NON-NLS-1$
+                hasParent = true;
+            }
+            else if (isPositionProp(name))
+            {
+                position = asString(prop.get("value")); //$NON-NLS-1$
+                hasPosition = true;
+            }
+            else
+            {
+                return ToolResult.error("A move ('parent' / 'position') cannot be combined with other " //$NON-NLS-1$
+                    + "property changes ('" + name + "') in one call. Move the item first, then modify " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "its properties in a separate call.").toJson(); //$NON-NLS-1$
+            }
+        }
+        if (!hasParent && !hasPosition)
+        {
+            return ToolResult.error("Nothing to move: provide 'parent' (to re-parent) and/or " //$NON-NLS-1$
+                + "'position' (to reorder).").toJson(); //$NON-NLS-1$
+        }
+        // A re-parent with no explicit position appends to the destination (position stays null); a pure
+        // reorder keeps the current parent (targetParent stays null).
+        final String targetParentFinal = hasParent ? (targetParent == null ? "" : targetParent) : null; //$NON-NLS-1$
+        final String positionFinal = position;
+
+        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
+        if (mdForm == null || !(mdForm instanceof IBmObject))
+        {
+            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form item as " //$NON-NLS-1$ //$NON-NLS-2$
+                + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name'.").toJson(); //$NON-NLS-1$
+        }
+        final String mdFormName = mdForm.getName();
+
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(ctx.project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
+        }
+
+        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
+        final String itemName = ref.name;
+        final String[] destination = new String[1];
+        final String contentFormFqn;
+        try
+        {
+            contentFormFqn = BmTransactions.<String>write(bmModel, "MoveFormItem", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
+                if (txMdForm == null)
+                {
+                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+                }
+                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
+                if (formModel == null)
+                {
+                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
+                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
+                        + "built)").toJson());
+                }
+                destination[0] =
+                    FormElementWriter.moveItem(formModel, itemName, targetParentFinal, positionFinal, mdFormName);
+                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
+            });
+        }
+        catch (Exception e)
+        {
+            String validationJson = FormValidationException.jsonOf(e);
+            if (validationJson != null)
+            {
+                return validationJson;
+            }
+            Activator.logError("Error moving form item", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to move form item: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
+            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
+
+        List<String> applied = new ArrayList<>();
+        if (hasParent)
+        {
+            applied.add(PROP_PARENT);
+        }
+        if (hasPosition)
+        {
+            applied.add(PROP_POSITION);
+        }
+        return ToolResult.success()
+            .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("applied", applied) //$NON-NLS-1$
+            .put("persisted", persisted) //$NON-NLS-1$
+            .put("destination", destination[0]) //$NON-NLS-1$
+            .put("message", "Moved form item '" + itemName + "' to " + destination[0]) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             .toJson();
     }
 

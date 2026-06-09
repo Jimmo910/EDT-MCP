@@ -9,6 +9,12 @@ package com.ditrix.edt.mcp.server.utils;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import org.junit.Test;
 
@@ -250,5 +256,94 @@ public class FormElementWriterTest
         // A plain top object / null is not a form-object create.
         assertNull(FormElementWriter.parseFormObjectCreate("Catalog.Products")); //$NON-NLS-1$
         assertNull(FormElementWriter.parseFormObjectCreate(null));
+    }
+
+    // ---- move / reorder position resolution (F2) -------------------------------------------------
+
+    private static final List<String> SIBLINGS = Arrays.asList("A", "B", "C"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+    @Test
+    public void testPositionLastAndDefault()
+    {
+        // null / blank / "last" -> the end (the dest list already EXCLUDES the moved item).
+        assertEquals(3, FormElementWriter.resolveMovePosition(null, SIBLINGS, "X")); //$NON-NLS-1$
+        assertEquals(3, FormElementWriter.resolveMovePosition("", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(3, FormElementWriter.resolveMovePosition("last", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(3, FormElementWriter.resolveMovePosition("LAST", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testPositionFirst()
+    {
+        assertEquals(0, FormElementWriter.resolveMovePosition("first", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(0, FormElementWriter.resolveMovePosition("First", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testPositionBeforeAndAfter()
+    {
+        // before:<name> = the sibling's own index; after:<name> = its index + 1 (case-insensitive).
+        assertEquals(0, FormElementWriter.resolveMovePosition("before:A", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, FormElementWriter.resolveMovePosition("before:B", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(1, FormElementWriter.resolveMovePosition("after:A", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(3, FormElementWriter.resolveMovePosition("after:C", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(2, FormElementWriter.resolveMovePosition("BEFORE:c", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testPositionInteger()
+    {
+        // A plain integer is the desired FINAL 0-based index as-is (no off-by-one compensation).
+        assertEquals(0, FormElementWriter.resolveMovePosition("0", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(2, FormElementWriter.resolveMovePosition(" 2 ", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        // An index beyond the list end is returned verbatim; moveItem() then clamps it to the end.
+        assertEquals(9, FormElementWriter.resolveMovePosition("9", SIBLINGS, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testPositionMalformedRejected()
+    {
+        assertMoveError("nonsense", SIBLINGS, "X", "Invalid position"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertMoveError("-1", SIBLINGS, "X", "zero or positive"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testPositionUnknownSiblingRejected()
+    {
+        assertMoveError("before:Z", SIBLINGS, "X", "not found"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertMoveError("after:", SIBLINGS, "X", "missing a sibling name"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testPositionCannotReferenceMovedItem()
+    {
+        // A before:/after: must not name the moved item itself (it is absent from the dest list anyway).
+        assertMoveError("before:B", SIBLINGS, "B", "the moved item itself"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertMoveError("after:b", SIBLINGS, "B", "the moved item itself"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    @Test
+    public void testPositionFirstLastOnEmptyDest()
+    {
+        // Into an empty group both first and last resolve to index 0.
+        List<String> empty = Collections.emptyList();
+        assertEquals(0, FormElementWriter.resolveMovePosition("first", empty, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(0, FormElementWriter.resolveMovePosition("last", empty, "X")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(0, FormElementWriter.resolveMovePosition(null, empty, "X")); //$NON-NLS-1$
+    }
+
+    private static void assertMoveError(String position, List<String> dest, String moved, String fragment)
+    {
+        try
+        {
+            FormElementWriter.resolveMovePosition(position, dest, moved);
+            fail("expected a RuntimeException for position '" + position + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (RuntimeException e)
+        {
+            assertNotNull(e.getMessage());
+            assertTrue("message should mention '" + fragment + "' but was: " + e.getMessage(), //$NON-NLS-1$ //$NON-NLS-2$
+                e.getMessage().contains(fragment));
+        }
     }
 }
