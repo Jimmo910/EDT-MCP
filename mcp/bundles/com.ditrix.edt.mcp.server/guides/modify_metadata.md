@@ -22,7 +22,16 @@ A reference property to another metadata object is set by FQN: a SINGLE referenc
 ## Form members
 A FORM member is addressed like its create FQN: `Catalog.X.Form.F.<Kind>.Name` (or `CommonForm.F.<Kind>.Name`), Kind = Attribute / Command / Field / Button / Group / Decoration / Table. The same assignable properties apply: an item's `title` (bilingual; defaults to the config language when `language` is omitted), `visible`, `readOnly` (fields / groups / tables only) and any other assignable scalar / boolean / enum the item carries. NB `type` is context-dependent: on a form ATTRIBUTE it aliases the data `valueType` (same `{types:[...]}` shape as an mdclass attribute); on a form FIELD / Button / Decoration it is the display-kind ENUM (InputField / LabelField / ...). A wrong property name is rejected WITH the member's assignable list. The form item `id` cannot be set (auto-allocated); modifying an event handler is not supported (create/delete it). The change persists to the form's `Form.form` on disk.
 
+## Moving / reordering a form item
+A FORM ITEM (a field / group / decoration / button / table - anything in the form's items tree) is RE-PARENTED and/or REORDERED with two move properties on `properties`:
+- `parent` - the destination: an existing GROUP name to nest the item inside, or the FORM name (or an empty string) to move it to the form ROOT. Omit `parent` to keep the current parent (a pure reorder).
+- `position` - the destination order among the children: `first`, `last`, `before:<siblingName>`, `after:<siblingName>`, or a 0-based integer INDEX. The integer index is the desired FINAL position "as you see it" (reordering within the same container is not off-by-one). Omit `position` to append to the end of the destination.
+A move is structural, so it CANNOT be combined with ordinary property changes in the same call (move first, then modify). `parent`/`position` apply to an ITEM only - a form Attribute / Command is not positioned. A group cannot be moved into ITSELF or one of its own descendants (a cycle); an ambiguous / missing item or target group is a clean error. The move force-exports the form's `Form.form` to disk; the result carries a `destination` describing where the item ended up.
+
 ## Examples
+- Move a field into a group: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Field.Price', properties:[{name:'parent', value:'PriceGroup'}]}`
+- Reorder a field to the top of its container: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Field.Price', properties:[{name:'position', value:'first'}]}`
+- Move a field back to the form root, after another item: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Field.Price', properties:[{name:'parent', value:'ItemForm'}, {name:'position', value:'after:Description'}]}`
 - Set a comment: `{projectName:'P', fqn:'Catalog.Products', properties:[{name:'comment', value:'Goods'}]}`
 - Set a synonym: `{projectName:'P', fqn:'Catalog.Products', properties:[{name:'synonym', value:'Goods', language:'en'}]}`
 - Set an enum on an attribute: `{projectName:'P', fqn:'Catalog.Products.Attribute.Weight', properties:[{name:'indexing', value:'Index'}]}`
@@ -32,7 +41,7 @@ A FORM member is addressed like its create FQN: `Catalog.X.Form.F.<Kind>.Name` (
 - Set a form attribute's type: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Attribute.Total', properties:[{name:'type', value:{types:[{kind:'Number', precision:10, scale:2}]}}]}`
 
 ## Result
-JSON with `action='modified'`, the normalized `fqn`, the `applied` property names, `persisted`, and (when the ё->е normalization rewrote anything) the list of `normalized` properties.
+JSON with `action='modified'`, the normalized `fqn`, the `applied` property names, `persisted`, and (when the ё->е normalization rewrote anything) the list of `normalized` properties. A move additionally returns `destination` (where the moved item ended up, e.g. `group 'Main' at index 1`).
 
 ## Reverting (no undo)
 There is no automatic undo: to revert a change, call modify_metadata again with the previous value (read the current value first with get_metadata_details). modify_metadata is intentionally NOT confirm-gated because it is reversible that way; only the destructive / high-blast-radius writes (delete_metadata, rename_metadata_object, update_database, delete_project) are gated with a confirm-preview.

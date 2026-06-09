@@ -578,3 +578,187 @@ def test_nonexistent_node_is_error():
     e = assert_error(r, "nonexistent node")
     assert_error_quality(e, names=[bad], suggests=["not found", "get_metadata_objects"])
     assert_no_diff("a rejected modify must change nothing")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Happy / negative — MOVE / REORDER a form item (F2): the 'parent' / 'position'
+# move properties re-parent / reorder an item in the form's items tree.
+# Fixture: Catalog.Catalog has a managed form "ItemForm".
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _seed_form_group(grp):
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group." + grp})
+    assert_ok(r, "seed form group " + grp)
+    wait_for_project_ready()
+
+
+def _form_structure_text():
+    """The rendered form structure (the items outline) from get_metadata_details."""
+    r = call("get_metadata_details",
+             {"projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_ok(r, "read ItemForm structure")
+    return r.text
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_field_into_group():
+    # Create a group + a bound field at the form root, then move the field INTO the group:
+    # the field must appear nested under the group in the structure read-back.
+    _seed_form_group("MoveGrp")
+    _seed_form_field("MoveAttr", "MoveFld")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.MoveFld",
+        "properties": [{"name": "parent", "value": "MoveGrp"}],
+    })
+    assert_ok(r, "move the field into the group")
+    assert r.structured.get("action") == "modified", "must report modified: %r" % (r.structured,)
+    assert "parent" in (r.structured.get("applied") or []), "parent must be applied: %r" % (r.structured,)
+    assert "MoveGrp" in (r.structured.get("destination") or ""), \
+        "destination must name the target group: %r" % (r.structured,)
+    # The structure outline indents children under their parent; the field is now under the group.
+    text = _form_structure_text()
+    assert_contains(text, "MoveGrp", "the group must be in the structure")
+    g = text.index("MoveGrp")
+    f = text.index("MoveFld")
+    assert f > g, "the moved field must be listed AFTER (nested under) its new parent group:\n%s" % text
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_reorder_field_first_at_root():
+    # Two fields at the form root; reorder the second to 'first' -> it precedes the first in the outline.
+    _seed_form_field("OrdAttr1", "OrdFld1")
+    _seed_form_field("OrdAttr2", "OrdFld2")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.OrdFld2",
+        "properties": [{"name": "position", "value": "first"}],
+    })
+    assert_ok(r, "reorder OrdFld2 to first")
+    assert "position" in (r.structured.get("applied") or []), "position must be applied: %r" % (r.structured,)
+    assert "index 0" in (r.structured.get("destination") or ""), \
+        "destination must report index 0: %r" % (r.structured,)
+    text = _form_structure_text()
+    assert text.index("OrdFld2") < text.index("OrdFld1"), \
+        "OrdFld2 must now precede OrdFld1 in the form outline:\n%s" % text
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_reorder_before_sibling_persists_to_disk():
+    # 'before:<sibling>' lands the moved field at the sibling's index; verify it persists to .form.
+    _seed_form_field("BefAttrA", "BefFldA")
+    _seed_form_field("BefAttrB", "BefFldB")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BefFldB",
+        "properties": [{"name": "position", "value": "before:BefFldA"}],
+    })
+    assert_ok(r, "reorder BefFldB before BefFldA")
+    assert r.structured.get("persisted") is True, \
+        "the move must force-export the .form to disk: %r" % (r.structured,)
+    poll_diff_contains("BefFldB", ctx="the reordered field must remain in the .form on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_field_back_to_form_root():
+    # Field inside a group, then move it back to the form root by naming the form as the parent.
+    _seed_form_group("BackGrp")
+    _seed_form_attribute("BackAttr")
+    cr = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
+        "properties": [{"name": "dataPath", "value": "BackAttr"}, {"name": "parent", "value": "BackGrp"}]})
+    # create_metadata may not accept 'parent' at creation; if not, fall back to creating then moving in.
+    if not cr.ok:
+        cr = call("create_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
+            "properties": [{"name": "dataPath", "value": "BackAttr"}]})
+        assert_ok(cr, "seed field at root")
+        wait_for_project_ready()
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
+            "properties": [{"name": "parent", "value": "BackGrp"}]}), "move field into group")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
+        "properties": [{"name": "parent", "value": "ItemForm"}],
+    })
+    assert_ok(r, "move the field back to the form root")
+    assert "form root" in (r.structured.get("destination") or ""), \
+        "destination must report the form root: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_group_into_own_descendant_rejected():
+    # A group cannot be moved into a group nested inside itself (a containment cycle).
+    _seed_form_group("OuterGrp")
+    inner = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.InnerGrp",
+        "properties": [{"name": "parent", "value": "OuterGrp"}]})
+    if not inner.ok:
+        inner = call("create_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.InnerGrp"})
+        assert_ok(inner, "seed inner group")
+        wait_for_project_ready()
+        assert_ok(call("modify_metadata", {
+            "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.InnerGrp",
+            "properties": [{"name": "parent", "value": "OuterGrp"}]}), "nest inner under outer")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.OuterGrp",
+        "properties": [{"name": "parent", "value": "InnerGrp"}],
+    })
+    e = assert_error(r, "move group into its own descendant")
+    assert_error_quality(e, suggests=["itself", "descendant"],
+                         ctx="moving a group into its own descendant is a clean cycle error")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_missing_item_is_error():
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.NoSuchFld_zz",
+        "properties": [{"name": "position", "value": "first"}],
+    })
+    e = assert_error(r, "move a missing item")
+    assert_error_quality(e, names=["NoSuchFld_zz"], suggests=["not found", "get_metadata_details"],
+                         ctx="moving a non-existent item is a clean, actionable error")
+    assert_no_diff("a rejected move must change nothing")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_missing_target_group_is_error():
+    _seed_form_field("TgtAttr", "TgtFld")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.TgtFld",
+        "properties": [{"name": "parent", "value": "NoSuchGroup_zz"}],
+    })
+    e = assert_error(r, "move into a missing group")
+    assert_error_quality(e, names=["NoSuchGroup_zz"], suggests=["not found"],
+                         ctx="a missing target group is a clean error")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_cannot_be_mixed_with_other_properties():
+    # A structural move must not be combined with an ordinary property change in one call.
+    _seed_form_field("MixAttr", "MixFld")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.MixFld",
+        "properties": [{"name": "position", "value": "first"},
+                       {"name": "visible", "value": False}],
+    })
+    e = assert_error(r, "move mixed with a property change")
+    assert_error_quality(e, suggests=["cannot be combined", "separate call"],
+                         ctx="a move cannot be mixed with a property change")
+    assert_no_diff("a rejected mixed move must change nothing")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_move_on_form_attribute_is_rejected():
+    # 'parent'/'position' address a form ITEM only - a form ATTRIBUTE is not positioned.
+    _seed_form_attribute("NoPosAttr")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Attribute.NoPosAttr",
+        "properties": [{"name": "position", "value": "first"}],
+    })
+    e = assert_error(r, "position on a form attribute")
+    assert_error_quality(e, suggests=["form ITEM", "not positioned"],
+                         ctx="a form attribute cannot be positioned")

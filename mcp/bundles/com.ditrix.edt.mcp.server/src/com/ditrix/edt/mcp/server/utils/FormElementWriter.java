@@ -1272,6 +1272,259 @@ public final class FormElementWriter
         return null;
     }
 
+    // ---- move / reorder (F2) --------------------------------------------------------------------
+
+    /** Position spec prefixes (the integer / {@code first} / {@code last} forms have no prefix). */
+    private static final String POS_FIRST = "first"; //$NON-NLS-1$
+    private static final String POS_LAST = "last"; //$NON-NLS-1$
+    private static final String POS_BEFORE = "before:"; //$NON-NLS-1$
+    private static final String POS_AFTER = "after:"; //$NON-NLS-1$
+
+    /**
+     * Moves / reorders a form ITEM (a field, group, decoration, button or table - anything in the
+     * {@code items} containment tree) on the tx-bound {@code formModel}. The item is re-parented into
+     * {@code targetParent} (a group name, or the FORM name / blank for the form root) and/or reordered
+     * to {@code position} among the destination's children. The destination's {@code items} list is the
+     * SAME list the source is removed from when reordering in place, so the integer index is the desired
+     * FINAL 0-based position "as you see it" (see {@link #resolveMovePosition}). Reuses the reflective
+     * {@code items}-tree access the rest of this writer uses - no compile-time form-model dependency.
+     *
+     * <p>Rejections (thrown as a {@link RuntimeException} with a user-facing message, so the calling
+     * write lambda rolls back with no partial mutation): an item / target-group name that is missing or
+     * AMBIGUOUS (matches more than one element), a {@code targetParent} that is not a group, and moving a
+     * group INTO ITSELF OR ITS OWN DESCENDANT (a containment cycle).</p>
+     *
+     * @param formModel the editable form content model (tx-bound)
+     * @param itemName the programmatic name of the item to move
+     * @param targetParent the destination group name; blank or equal to {@code formName} means the form
+     *     root; {@code null} keeps the item in its current container (reorder in place)
+     * @param position the destination position spec ({@code first} / {@code last} / {@code before:<n>} /
+     *     {@code after:<n>} / a 0-based integer index), or {@code null} to append at the end
+     * @param formName the MD-form Name (matching it as {@code targetParent} means the form root)
+     * @return a human-readable description of where the item ended up (e.g. {@code "group 'Main' at index 1"})
+     */
+    public static String moveItem(EObject formModel, String itemName, String targetParent,
+        String position, String formName)
+    {
+        EObject item = findUniqueItem(formModel, itemName);
+        if (item == null)
+        {
+            throw new RuntimeException("Form item not found: '" + itemName //$NON-NLS-1$
+                + "'. Use get_metadata_details on the form to inspect its items."); //$NON-NLS-1$
+        }
+        EObject sourceContainer = item.eContainer();
+        if (sourceContainer == null || sourceContainer.eClass().getEStructuralFeature(FEATURE_ITEMS) == null)
+        {
+            throw new RuntimeException("Form item '" + itemName //$NON-NLS-1$
+                + "' has no parent container and cannot be moved."); //$NON-NLS-1$
+        }
+
+        // Resolve the destination container.
+        EObject destContainer;
+        String destLabel;
+        boolean reparent = targetParent != null && !targetParent.isEmpty();
+        if (reparent && !targetParent.equalsIgnoreCase(formName))
+        {
+            EObject group = findUniqueGroup(formModel, targetParent);
+            if (group == null)
+            {
+                throw new RuntimeException("Target group not found: '" + targetParent //$NON-NLS-1$
+                    + "'. The parent must be an existing group (or the form name for the form root)."); //$NON-NLS-1$
+            }
+            if (group == item || isDescendant(item, group))
+            {
+                throw new RuntimeException("Cannot move group '" + itemName //$NON-NLS-1$
+                    + "' into itself or one of its own descendants."); //$NON-NLS-1$
+            }
+            destContainer = group;
+            destLabel = "group '" + stringFeature(group, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        else if (reparent)
+        {
+            // targetParent equals the form name -> the form root.
+            destContainer = formModel;
+            destLabel = "the form root"; //$NON-NLS-1$
+        }
+        else
+        {
+            // No targetParent -> reorder within the current container.
+            destContainer = sourceContainer;
+            destLabel = (sourceContainer == formModel) ? "the form root" //$NON-NLS-1$
+                : "group '" + stringFeature(sourceContainer, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        @SuppressWarnings("unchecked")
+        EList<EObject> sourceItems = (EList<EObject>)sourceContainer
+            .eGet(sourceContainer.eClass().getEStructuralFeature(FEATURE_ITEMS));
+        @SuppressWarnings("unchecked")
+        EList<EObject> destItems = (EList<EObject>)destContainer
+            .eGet(destContainer.eClass().getEStructuralFeature(FEATURE_ITEMS));
+
+        // Remove from the source first (it may BE the destination list when reordering in place). The
+        // requested integer position is the desired FINAL 0-based index in the resulting list ("as you
+        // see it"): inserting at that index into the POST-removal list lands the item at exactly that
+        // index in both directions, so no off-by-one compensation is applied.
+        sourceItems.remove(item);
+        int index = resolveMovePosition(position, namesOf(destItems), itemName);
+        if (index < 0 || index > destItems.size())
+        {
+            index = destItems.size();
+        }
+        destItems.add(index, item);
+        return destLabel + " at index " + index; //$NON-NLS-1$
+    }
+
+    /**
+     * Resolves a requested {@code position} into a 0-based insertion index in a destination list whose
+     * sibling names are {@code destNames} (already EXCLUDING the moved item). The {@code first} /
+     * {@code last} / {@code before:<name>} / {@code after:<name>} forms are name-relative; a plain
+     * integer is the desired FINAL index as-is. Pure (no model dependency) so it is unit-testable.
+     *
+     * @param position the position spec, or {@code null} / blank / {@code last} for the end
+     * @param destNames the destination sibling names in order (without the moved item)
+     * @param movedName the moved item's name (a {@code before:}/{@code after:} reference to it is rejected)
+     * @return the 0-based insertion index
+     * @throws RuntimeException with a user-facing message on a malformed spec or unknown sibling
+     */
+    public static int resolveMovePosition(String position, List<String> destNames, String movedName)
+    {
+        if (position == null || position.isEmpty() || POS_LAST.equalsIgnoreCase(position))
+        {
+            return destNames.size();
+        }
+        if (POS_FIRST.equalsIgnoreCase(position))
+        {
+            return 0;
+        }
+        String lower = position.toLowerCase(java.util.Locale.ROOT);
+        if (lower.startsWith(POS_BEFORE))
+        {
+            return indexOfSibling(destNames, position.substring(POS_BEFORE.length()).trim(), movedName);
+        }
+        if (lower.startsWith(POS_AFTER))
+        {
+            return indexOfSibling(destNames, position.substring(POS_AFTER.length()).trim(), movedName) + 1;
+        }
+        try
+        {
+            int idx = Integer.parseInt(position.trim());
+            if (idx < 0)
+            {
+                throw new RuntimeException("Invalid position index '" + position //$NON-NLS-1$
+                    + "': must be zero or positive."); //$NON-NLS-1$
+            }
+            return idx;
+        }
+        catch (NumberFormatException e)
+        {
+            throw new RuntimeException("Invalid position '" + position //$NON-NLS-1$
+                + "'. Expected an integer index, 'first', 'last', 'before:<name>' or 'after:<name>'."); //$NON-NLS-1$
+        }
+    }
+
+    /** The 0-based index of {@code sibling} in {@code destNames} (case-insensitive), or throws. */
+    private static int indexOfSibling(List<String> destNames, String sibling, String movedName)
+    {
+        if (sibling.isEmpty())
+        {
+            throw new RuntimeException("Position reference is missing a sibling name " //$NON-NLS-1$
+                + "(use 'before:<name>' or 'after:<name>')."); //$NON-NLS-1$
+        }
+        if (sibling.equalsIgnoreCase(movedName))
+        {
+            throw new RuntimeException("Position cannot reference the moved item itself: '" //$NON-NLS-1$
+                + sibling + "'."); //$NON-NLS-1$
+        }
+        for (int i = 0; i < destNames.size(); i++)
+        {
+            if (sibling.equalsIgnoreCase(destNames.get(i)))
+            {
+                return i;
+            }
+        }
+        throw new RuntimeException("Sibling '" + sibling //$NON-NLS-1$
+            + "' not found in the destination container."); //$NON-NLS-1$
+    }
+
+    /** The programmatic names of the items in {@code list}, in order (for position resolution). */
+    private static List<String> namesOf(EList<EObject> list)
+    {
+        List<String> names = new ArrayList<>(list.size());
+        for (EObject item : list)
+        {
+            names.add(stringFeature(item, FEATURE_NAME));
+        }
+        return names;
+    }
+
+    /**
+     * Finds a form item by name anywhere in the {@code items} tree, rejecting an AMBIGUOUS name (more
+     * than one match) with a clear error rather than silently moving the first match. Returns the unique
+     * match, or {@code null} when none exists.
+     */
+    private static EObject findUniqueItem(EObject formModel, String name)
+    {
+        List<EObject> matches = new ArrayList<>();
+        collectItemsByName(formModel, name, matches);
+        if (matches.size() > 1)
+        {
+            throw new RuntimeException("Form item name '" + name //$NON-NLS-1$
+                + "' is ambiguous (it matches more than one item)."); //$NON-NLS-1$
+        }
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    /**
+     * Finds a form GROUP (a {@code FormGroup}) by name anywhere in the {@code items} tree, rejecting an
+     * ambiguous name. Returns the unique matching group, or {@code null} when no group has that name (a
+     * non-group item with the name is treated as "no group", matching the v1 semantics).
+     */
+    private static EObject findUniqueGroup(EObject formModel, String name)
+    {
+        List<EObject> matches = new ArrayList<>();
+        collectItemsByName(formModel, name, matches);
+        EObject group = null;
+        for (EObject match : matches)
+        {
+            if (ECLASS_FORM_GROUP.equals(match.eClass().getName()))
+            {
+                if (group != null)
+                {
+                    throw new RuntimeException("Target group name '" + name //$NON-NLS-1$
+                        + "' is ambiguous (it matches more than one group)."); //$NON-NLS-1$
+                }
+                group = match;
+            }
+        }
+        return group;
+    }
+
+    /** Collects every item in the {@code items} tree whose name matches (case-insensitive). */
+    private static void collectItemsByName(EObject container, String name, List<EObject> out)
+    {
+        for (EObject item : referenceList(container, FEATURE_ITEMS))
+        {
+            if (name.equalsIgnoreCase(stringFeature(item, FEATURE_NAME)))
+            {
+                out.add(item);
+            }
+            collectItemsByName(item, name, out);
+        }
+    }
+
+    /** Whether {@code candidate} is {@code ancestor} itself or nested anywhere inside it (cycle guard). */
+    private static boolean isDescendant(EObject ancestor, EObject candidate)
+    {
+        for (EObject parent = candidate.eContainer(); parent != null; parent = parent.eContainer())
+        {
+            if (parent == ancestor)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Depth-first search of the whole {@code items} tree for an item by programmatic name. */
     private static EObject findItem(EObject container, String name)
     {
