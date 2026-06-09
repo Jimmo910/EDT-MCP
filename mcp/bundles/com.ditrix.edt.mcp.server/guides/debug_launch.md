@@ -29,7 +29,8 @@ If a launch of the same configuration/application is still alive, the tool short
 
 ## Notes
 
-- Returns JSON. On success: `launchConfiguration`, `configurationType`, `attach`, `mode`, `project`/`applicationId` (when known), and a `message`.
+- Returns JSON. On a fresh launch: `launchConfiguration`, `configurationType`, `attach`, `mode`, `status: "launching"`, `project`/`applicationId` (when known), and a `message`. The `alreadyRunning: true` short-circuit returns the same identity fields but no `status` (nothing was launched).
+- The launch is ASYNCHRONOUS and non-blocking: the tool dispatches `config.launch(DEBUG_MODE, null)` onto the EDT UI thread and returns `status: "launching"` immediately, WITHOUT waiting for the 1C client to finish starting (it may show login / database-update dialogs). Poll `debug_status` until the session appears running, then use `wait_for_break`. Because the launch runs after the call returns, a launch failure is NOT reported in this response — it is written to the EDT error log instead.
 - On a not-found config the error payload includes `availableConfigurations` (every debug-capable config: runtime client + attach), so you can pick a valid name.
 - The launch goes through a direct `config.launch(DEBUG_MODE, null)` to avoid modal EDT dialogs that would block the MCP worker thread.
 

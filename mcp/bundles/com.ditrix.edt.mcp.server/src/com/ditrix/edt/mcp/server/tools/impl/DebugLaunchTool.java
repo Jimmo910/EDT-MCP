@@ -97,6 +97,8 @@ public class DebugLaunchTool implements IMcpTool
             .stringProperty("applicationId", "Application id of the launched configuration") //$NON-NLS-1$ //$NON-NLS-2$
             .booleanProperty("alreadyRunning", "True if a matching session was already alive; re-launch skipped") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("mode", "Launch mode of the session (e.g. debug, run)") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringProperty("status", "\"launching\" when the launch was dispatched asynchronously and is " //$NON-NLS-1$ //$NON-NLS-2$
+                + "still starting; absent on the alreadyRunning short-circuit. Poll debug_status for readiness.") //$NON-NLS-1$
             .stringProperty("message", "Human-readable status message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -218,10 +220,14 @@ public class DebugLaunchTool implements IMcpTool
                 .put("configurationType", typeId) //$NON-NLS-1$
                 .put("attach", isAttach) //$NON-NLS-1$
                 .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("status", "launching") //$NON-NLS-1$ //$NON-NLS-2$
                 .put("message", isAttach //$NON-NLS-1$
-                    ? "Attach debug session started — use debug_status to inspect, " //$NON-NLS-1$
-                        + "wait_for_break to block until a breakpoint is hit." //$NON-NLS-1$
-                    : "Debug session started successfully"); //$NON-NLS-1$
+                    ? "Attach debug session is connecting — poll debug_status to confirm it is " //$NON-NLS-1$
+                        + "running, then wait_for_break to block until a breakpoint is hit." //$NON-NLS-1$
+                    : "Debug session is starting asynchronously. The 1C client may show startup " //$NON-NLS-1$
+                        + "dialogs (login / database update); this call does NOT wait for it. " //$NON-NLS-1$
+                        + "Poll debug_status until the session appears running, then use " //$NON-NLS-1$
+                        + "wait_for_break."); //$NON-NLS-1$
             if (configProject != null && !configProject.isEmpty())
             {
                 result.put("project", configProject); //$NON-NLS-1$
@@ -401,7 +407,10 @@ public class DebugLaunchTool implements IMcpTool
                 .put("configurationType", LaunchConfigUtils.getConfigTypeId(matchingConfig)) //$NON-NLS-1$
                 .put("attach", false) //$NON-NLS-1$
                 .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
-                .put("message", "Debug session started successfully") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("status", "launching") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("message", "Debug session is starting asynchronously. The 1C client may show " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "startup dialogs (login / database update); this call does NOT wait for it. " //$NON-NLS-1$
+                    + "Poll debug_status until the session appears running, then use wait_for_break.") //$NON-NLS-1$
                 .toJson();
         }
         catch (Exception e)
@@ -440,7 +449,7 @@ public class DebugLaunchTool implements IMcpTool
     }
 
     /**
-     * Launches the given configuration in debug mode.
+     * Launches the given configuration in debug mode, asynchronously.
      *
      * <p>Uses a direct {@code config.launch(DEBUG_MODE, null)} — not
      * {@code DebugUITools.launch} — because the latter may open modal dialogs
@@ -448,42 +457,54 @@ public class DebugLaunchTool implements IMcpTool
      * block the MCP worker thread indefinitely and eventually close the HTTP
      * socket. {@code debug_yaxunit_tests} uses the same direct path.
      *
-     * @return {@code null} on success, or an error message on failure.
+     * <p>The launch is scheduled on the UI thread via {@code asyncExec} and this
+     * method returns immediately — it does NOT wait for the 1C client to finish
+     * starting. A runtime client typically shows GUI dialogs at startup (login,
+     * database update), so blocking here (as the previous {@code syncExec} did)
+     * would hang the MCP worker until it timed out and would freeze the EDT UI
+     * while the modal dialog is up. Callers therefore report
+     * {@code status: "launching"}; readiness is observed separately via
+     * {@code debug_status} / {@code wait_for_break}.
+     *
+     * <p>Because the launch now runs after this method returns, any failure can no
+     * longer be surfaced synchronously to the caller — it is logged from inside the
+     * async lambda instead. Only the synchronous (headless, no UI thread) path can
+     * still return an error message.
+     *
+     * @return {@code null} when the launch was scheduled (or, in a headless test
+     *         with no UI thread, completed) successfully; otherwise an error message.
      */
     private String performLaunch(ILaunchConfiguration config)
     {
-        final String[] launchError = {null};
-        final boolean[] launchSuccess = {false};
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
         {
-            display.syncExec(() -> {
+            // Fire-and-forget on the UI thread: returns control to the MCP worker
+            // immediately so a 1C startup dialog can never block the HTTP socket.
+            // The launch outcome can no longer be returned to the caller, so log it.
+            display.asyncExec(() -> {
                 try
                 {
                     config.launch(ILaunchManager.DEBUG_MODE, null);
-                    launchSuccess[0] = true;
                 }
                 catch (Exception e)
                 {
-                    Activator.logError("Error launching debug session", e); //$NON-NLS-1$
-                    launchError[0] = e.getMessage();
+                    Activator.logError("Error launching debug session (async)", e); //$NON-NLS-1$
                 }
             });
+            return null;
         }
-        else
+        // No UI thread (headless tests): launch synchronously and surface errors.
+        try
         {
-            try
-            {
-                config.launch(ILaunchManager.DEBUG_MODE, null);
-                launchSuccess[0] = true;
-            }
-            catch (CoreException e)
-            {
-                Activator.logError("Error launching debug session", e); //$NON-NLS-1$
-                launchError[0] = e.getMessage();
-            }
+            config.launch(ILaunchManager.DEBUG_MODE, null);
+            return null;
         }
-        return launchSuccess[0] ? null : (launchError[0] != null ? launchError[0] : "unknown error"); //$NON-NLS-1$
+        catch (CoreException e)
+        {
+            Activator.logError("Error launching debug session", e); //$NON-NLS-1$
+            return e.getMessage();
+        }
     }
 
     /**
