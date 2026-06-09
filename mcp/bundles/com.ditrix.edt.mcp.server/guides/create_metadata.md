@@ -19,6 +19,7 @@ Creates one metadata node addressed by a 1C full-name FQN, then force-exports th
 - `fqn` (required) - full-name FQN of the node to create.
 - `properties` (optional) - array of `{name, value, language?}` applied at creation. This version applies `synonym` (with optional `language` CODE, e.g. 'en'/'ru'; defaults to the configuration default language) and `comment`. Any other property name is rejected - set those via modify_metadata.
 - `expectedNotExists` (optional, default false) - assert the node does not yet exist, for a sharper precondition error. A real duplicate is rejected regardless.
+- `normalizeYo` (optional, default true) - normalize the Russian letter `ё`->`е` / `Ё`->`Е` in the NAME (the trailing FQN segment) and in any `synonym` / `comment` value, applied at the parse step before identifier validation. `ё` in a Name is flagged by the 1C standard `mdo-ru-name-unallowed-letter`, so this stores a compliant Name; set `false` to keep `ё` exactly as supplied. The result lists the rewritten fields under `normalized`.
 
 ## Bilingual (ru/en)
 The synonym EMap is keyed by the language CODE (`ru`/`en`), never the language name. Objects are resolved by programmatic Name; only the type / kind tokens are dialect-aware.

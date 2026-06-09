@@ -124,6 +124,10 @@
           "description": "Full-name FQN of the node to create (required). Top object: 'Type.Name' (e.g. 'Catalog.Products'). Member: 'Type.Name.Kind.Name' (e.g. 'Catalog.Products.Attribute.Weight'). The trailing Name is the new node's programmatic Name; type / kind tokens may be English or Russian.",
           "type": "string"
         },
+        "normalizeYo": {
+          "description": "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in the new node's NAME (the trailing FQN segment) and in any synonym / comment value (default true). 'ё' in a Name is flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input stores a compliant name. Set false to keep 'ё' exactly as supplied.",
+          "type": "boolean"
+        },
         "projectName": {
           "description": "EDT project name (required).",
           "type": "string"
@@ -168,6 +172,13 @@
         "name": {
           "description": "Programmatic name of the created node",
           "type": "string"
+        },
+        "normalized": {
+          "description": "Fields whose value was rewritten by the 'ё'->'е' normalization (when any)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "persisted": {
           "description": "Whether the change was exported to disk",
@@ -2071,6 +2082,10 @@
           "description": "Full-name FQN of the node to modify (required), e.g. 'Catalog.Products' or 'Catalog.Products.Attribute.Weight' (type / kind tokens may be English or Russian; the Name parts are the programmatic Name).",
           "type": "string"
         },
+        "normalizeYo": {
+          "description": "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in synonym / comment / title and any other localized-string or free-text value being set (default true). Matches the 1C standard mdo-ru-name-unallowed-letter. Set false to keep 'ё' exactly as supplied.",
+          "type": "boolean"
+        },
         "projectName": {
           "description": "EDT project name (required).",
           "type": "string"
@@ -2111,6 +2126,13 @@
         "message": {
           "description": "Human-readable confirmation message",
           "type": "string"
+        },
+        "normalized": {
+          "description": "Properties whose value was rewritten by the 'ё'->'е' normalization (when any)",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "persisted": {
           "description": "Whether the change was exported to disk",

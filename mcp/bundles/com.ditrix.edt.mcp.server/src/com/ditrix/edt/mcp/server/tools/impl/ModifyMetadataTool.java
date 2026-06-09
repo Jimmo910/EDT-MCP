@@ -35,6 +35,7 @@ import com.ditrix.edt.mcp.server.tools.base.AbstractMetadataWriteTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormStructureReader;
+import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector;
@@ -90,6 +91,10 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                 "Properties to set, as [{name, value, language?}] (required, at least one). 'name' is " //$NON-NLS-1$
                 + "the property name (e.g. 'comment', 'synonym', 'indexing'); 'value' is the new " //$NON-NLS-1$
                 + "value; 'language' is the code for a synonym (default: config default).", true) //$NON-NLS-1$
+            .booleanProperty("normalizeYo", //$NON-NLS-1$
+                "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in synonym / comment / title and any " //$NON-NLS-1$
+                + "other localized-string or free-text value being set (default true). Matches the 1C " //$NON-NLS-1$
+                + "standard mdo-ru-name-unallowed-letter. Set false to keep 'ё' exactly as supplied.") //$NON-NLS-1$
             .build();
     }
 
@@ -102,6 +107,8 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             .stringProperty("fqn", "Normalized FQN of the modified node") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty("applied", "Names of the properties that were set") //$NON-NLS-1$ //$NON-NLS-2$
             .booleanProperty("persisted", "Whether the change was exported to disk") //$NON-NLS-1$ //$NON-NLS-2$
+            .stringArrayProperty("normalized", //$NON-NLS-1$
+                "Properties whose value was rewritten by the 'ё'->'е' normalization (when any)") //$NON-NLS-1$
             .stringProperty("message", "Human-readable confirmation message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -116,12 +123,18 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         }
         String projectName = JsonUtils.extractStringArgument(params, "projectName"); //$NON-NLS-1$
         String fqn = JsonUtils.extractStringArgument(params, "fqn"); //$NON-NLS-1$
+        boolean normalizeYo = JsonUtils.extractBooleanArgument(params, "normalizeYo", true); //$NON-NLS-1$
         List<JsonObject> properties = JsonUtils.extractObjectArray(params, "properties"); //$NON-NLS-1$
         if (properties.isEmpty())
         {
             return ToolResult.error("properties is required: provide at least one {name, value} to " //$NON-NLS-1$
                 + "set, e.g. [{name: 'comment', value: 'Goods'}].").toJson(); //$NON-NLS-1$
         }
+
+        // 'ё'->'е' normalization is applied at the parse step to every localized-string / free-text
+        // value being set (synonym / comment / title / ...), matching mdo-ru-name-unallowed-letter.
+        // Rename is out of scope here, so there is no Name to normalize.
+        MdNameNormalizer.Report normReport = new MdNameNormalizer.Report(normalizeYo);
 
         ProjectContext ctx = resolveProjectAndConfig(projectName);
         if (ctx.hasError())
@@ -138,7 +151,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         FormElementWriter.FormMemberRef formRef = FormElementWriter.parse(normFqn);
         if (formRef != null)
         {
-            return modifyFormMember(ctx, normFqn, formRef, properties);
+            return modifyFormMember(ctx, normFqn, formRef, properties, normReport);
         }
 
         MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(config, normFqn);
@@ -190,7 +203,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         List<PreparedChange> changes = new ArrayList<>();
         for (JsonObject prop : properties)
         {
-            String pErr = prepare(config, version, target, prop, changes);
+            String pErr = prepare(config, version, target, prop, changes, normReport);
             if (pErr != null)
             {
                 return pErr;
@@ -253,11 +266,13 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         {
             applied.add(change.featureName());
         }
-        return ToolResult.success()
+        ToolResult result = ToolResult.success()
             .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("applied", applied) //$NON-NLS-1$
-            .put("persisted", persisted) //$NON-NLS-1$
+            .put("persisted", persisted); //$NON-NLS-1$
+        addNormalization(result, normReport);
+        return result
             .put("message", "Modified " + normFqn + " (" + String.join(", ", applied) + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             .toJson();
     }
@@ -277,7 +292,8 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
      * concern. The member is re-navigated by name inside the transaction.</p>
      */
     private String modifyFormMember(ProjectContext ctx, String normFqn,
-        FormElementWriter.FormMemberRef ref, List<JsonObject> properties)
+        FormElementWriter.FormMemberRef ref, List<JsonObject> properties,
+        MdNameNormalizer.Report normReport)
     {
         // Event handlers are added/removed (create_metadata / delete_metadata), not property-modified.
         if (FormElementWriter.isHandlerToken(ref.kindToken) || ref.isItemLevel())
@@ -354,8 +370,8 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                     {
                         throw new FormValidationException(guard);
                     }
-                    String pErr =
-                        prepare(config, version, member, normalizeFormProperty(member, prop), changes);
+                    String pErr = prepare(config, version, member,
+                        normalizeFormProperty(member, prop), changes, normReport);
                     if (pErr != null)
                     {
                         throw new FormValidationException(pErr);
@@ -385,11 +401,13 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
             && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
 
-        return ToolResult.success()
+        ToolResult result = ToolResult.success()
             .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("applied", applied) //$NON-NLS-1$
-            .put("persisted", persisted) //$NON-NLS-1$
+            .put("persisted", persisted); //$NON-NLS-1$
+        addNormalization(result, normReport);
+        return result
             .put("message", "Modified " + normFqn + " (" + String.join(", ", applied) + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             .toJson();
     }
@@ -468,7 +486,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
      * and the prepared change are EClass-driven, not mdclass-specific).
      */
     private String prepare(Configuration config, Version version, EObject target, JsonObject prop,
-        List<PreparedChange> out)
+        List<PreparedChange> out, MdNameNormalizer.Report normReport)
     {
         String name = asString(prop.get("name")); //$NON-NLS-1$
         if (name == null || name.isEmpty())
@@ -507,7 +525,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                     return ToolResult.error("Cannot determine a language code for '" + name //$NON-NLS-1$
                         + "'. Specify a 'language' code (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
                 }
-                out.add(PreparedChange.localized(info.feature, code, value));
+                out.add(PreparedChange.localized(info.feature, code, normReport.apply(name, value)));
                 return null;
             }
             case ENUM:
@@ -608,7 +626,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                 {
                     return requireValueError(name);
                 }
-                out.add(PreparedChange.scalar(info.feature, value));
+                out.add(PreparedChange.scalar(info.feature, normReport.apply(name, value)));
                 return null;
         }
     }
@@ -827,5 +845,14 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     {
         String[] parts = normFqn.split("\\."); //$NON-NLS-1$
         return parts.length >= 2 ? parts[0] + "." + parts[1] : normFqn; //$NON-NLS-1$
+    }
+
+    /** Adds the {@code normalized} report field to a result when the normalization rewrote anything. */
+    private static void addNormalization(ToolResult result, MdNameNormalizer.Report normReport)
+    {
+        if (normReport.hasChanges())
+        {
+            result.put("normalized", normReport.normalizedFields()); //$NON-NLS-1$
+        }
     }
 }
