@@ -116,6 +116,18 @@
     "description": "Create a metadata node addressed by a 1C full-name FQN: a top-level object (Catalog.Products) or a subordinate member (Catalog.Products.Attribute.Weight, InformationRegister.Prices.Dimension.Product, Enum.Colors.EnumValue.Red). The kind is inferred from the FQN; type and kind tokens may be English or Russian. Full parameters and examples: call get_tool_guide('create_metadata').",
     "inputSchema": {
       "properties": {
+        "commonModuleKind": {
+          "description": "CommonModule top-object only. Selects a standards-compliant flag combination the common-module-type validator accepts (no warning), instead of a bare module: 'Server', 'ServerCall', 'ClientManaged', 'ClientOrdinary', 'ClientServer', 'Global'. Defaults to 'Server'. Ignored for other types. Combine with 'serverCall' / 'privileged' / 'returnValuesReuse'. These are create-time-only (the flag set cannot be re-derived post-hoc).",
+          "enum": [
+            "Server",
+            "ServerCall",
+            "ClientManaged",
+            "ClientOrdinary",
+            "ClientServer",
+            "Global"
+          ],
+          "type": "string"
+        },
         "expectedNotExists": {
           "description": "Optional stale-intent guard (default false): assert the node does not yet exist for a sharper precondition error. A real duplicate is always rejected anyway.",
           "type": "boolean"
@@ -123,6 +135,10 @@
         "fqn": {
           "description": "Full-name FQN of the node to create (required). Top object: 'Type.Name' (e.g. 'Catalog.Products'). Member: 'Type.Name.Kind.Name' (e.g. 'Catalog.Products.Attribute.Weight'). The trailing Name is the new node's programmatic Name; type / kind tokens may be English or Russian.",
           "type": "string"
+        },
+        "privileged": {
+          "description": "CommonModule top-object only. When true, the module runs with full (privileged) access. Valid only with the 'Server' kind (not a server call). Ignored for other types.",
+          "type": "boolean"
         },
         "projectName": {
           "description": "EDT project name (required).",
@@ -134,6 +150,23 @@
             "type": "object"
           },
           "type": "array"
+        },
+        "returnValuesReuse": {
+          "description": "CommonModule top-object only. Reuse of return values: 'DontUse' (default), 'DuringRequest' or 'DuringSession'. 'DuringSession' yields a cached module accepted by the common-module-type validator. Ignored for other types.",
+          "enum": [
+            "DontUse",
+            "DuringRequest",
+            "DuringSession"
+          ],
+          "type": "string"
+        },
+        "serverCall": {
+          "description": "CommonModule top-object only. When true, the server module is callable from the client (server call). Valid only with a server kind and incompatible with 'Global'. Ignored for other types.",
+          "type": "boolean"
+        },
+        "targetNamespace": {
+          "description": "XDTOPackage top-object only. URI namespace for the new package; a non-empty namespace is required for the package to be valid. Defaults to 'http://example.org/<Name>' when omitted. Create-time-only. Ignored for other types.",
+          "type": "string"
         }
       },
       "required": [
@@ -147,6 +180,10 @@
       "properties": {
         "action": {
           "description": "'created' on success",
+          "type": "string"
+        },
+        "commonModuleKind": {
+          "description": "Resolved CommonModule kind, when a CommonModule was created",
           "type": "string"
         },
         "fqn": {
@@ -179,6 +216,10 @@
         },
         "synonym": {
           "description": "Display name written, when a synonym property was provided",
+          "type": "string"
+        },
+        "targetNamespace": {
+          "description": "XDTO namespace written, when an XDTOPackage was created",
           "type": "string"
         }
       },
