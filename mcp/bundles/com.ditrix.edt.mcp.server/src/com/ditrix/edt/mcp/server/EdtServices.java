@@ -6,11 +6,16 @@
 
 package com.ditrix.edt.mcp.server;
 
+import java.lang.reflect.Method;
+
+import org.eclipse.core.runtime.Platform;
+import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.util.tracker.ServiceTracker;
 
 import com._1c.g5.v8.dt.bm.xtext.BmAwareResourceSetProvider;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
+import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IConfigurationProvider;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
@@ -50,6 +55,7 @@ public class EdtServices
     private ServiceTracker<IApplicationManager, IApplicationManager> applicationManagerTracker;
     private ServiceTracker<INavigatorContentProviderStateProvider, INavigatorContentProviderStateProvider> navigatorStateProviderTracker;
     private ServiceTracker<IMdRefactoringService, IMdRefactoringService> mdRefactoringServiceTracker;
+    private ServiceTracker<ITopObjectFqnGenerator, ITopObjectFqnGenerator> topObjectFqnGeneratorTracker;
     /**
      * EDT workspace CLI APIs are tracked by String class name and invoked via
      * reflection from the tools, keeping this bundle build-independent of
@@ -119,6 +125,9 @@ public class EdtServices
 
         mdRefactoringServiceTracker = new ServiceTracker<>(context, IMdRefactoringService.class, null);
         mdRefactoringServiceTracker.open();
+
+        topObjectFqnGeneratorTracker = new ServiceTracker<>(context, ITopObjectFqnGenerator.class, null);
+        topObjectFqnGeneratorTracker.open();
 
         exportConfigurationFilesApiTracker = new ServiceTracker<>(
             context, "com._1c.g5.v8.dt.cli.api.workspace.IExportConfigurationFilesApi", null); //$NON-NLS-1$
@@ -213,6 +222,11 @@ public class EdtServices
         {
             mdRefactoringServiceTracker.close();
             mdRefactoringServiceTracker = null;
+        }
+        if (topObjectFqnGeneratorTracker != null)
+        {
+            topObjectFqnGeneratorTracker.close();
+            topObjectFqnGeneratorTracker = null;
         }
         if (exportConfigurationFilesApiTracker != null)
         {
@@ -463,6 +477,144 @@ public class EdtServices
             Activator.logError("Failed to obtain MD IModelObjectFactory from MdPlugin injector", e); //$NON-NLS-1$
         }
         return null;
+    }
+
+    /** Symbolic name of the EDT form bundle that owns the form Guice injector. */
+    private static final String FORM_BUNDLE_ID = "com._1c.g5.v8.dt.form"; //$NON-NLS-1$
+
+    /** Internal (non-exported) class that exposes the form bundle Guice injector. */
+    private static final String FORM_PLUGIN_CLASS = "com._1c.g5.v8.dt.internal.form.FormPlugin"; //$NON-NLS-1$
+
+    /**
+     * Public, exported service class that lives in the form bundle. Loading it
+     * <em>through the form bundle</em> trips the bundle's lazy activation
+     * ({@code Bundle-ActivationPolicy: lazy}), so {@code FormPlugin.getDefault()}
+     * stops returning {@code null}.
+     */
+    private static final String FORM_SERVICE_CLASS =
+        "com._1c.g5.v8.dt.form.service.FormItemInformationService"; //$NON-NLS-1$
+
+    /**
+     * Returns the {@link IModelObjectFactory} that creates <em>form-model</em>
+     * objects (everything under {@code com._1c.g5.v8.dt.form.model}: the content
+     * {@code Form}, {@code AutoCommandBar}, {@code FormCommandInterface}, …) with
+     * EDT default content — the same factory
+     * ({@code com._1c.g5.v8.dt.form.FormObjectFactory}) the "New form" wizard uses.
+     * <p>
+     * This is a <strong>different</strong> factory from
+     * {@link #getModelObjectFactory()}: that one is bound in the MD language
+     * injector and only knows the {@code mdclass} EPackage (Catalog, Document, …);
+     * it cannot create form-model objects. A {@code Form} built with the MD factory
+     * (or a bare {@code FormFactory.eINSTANCE.createForm()}) is missing the
+     * predefined {@code autoCommandBar} that EDT's WYSIWYG layout generator
+     * ({@code HippoGenerator.readElement}) unconditionally reads for a
+     * {@code CommandBarHolder}; when it is {@code null} the generator throws and the
+     * form never renders. Creating the form through this factory (or, as a fallback,
+     * seeding the command bar manually — see {@code FormElementWriter.createForm})
+     * makes it render.
+     * <p>
+     * The factory is a Guice {@code @Singleton} in the form bundle's injector, so it
+     * must be pulled from there (reaching the bundle's internal {@code FormPlugin}
+     * reflectively, exactly like the MD factory above). Returns {@code null} when the
+     * form bundle or its injector is not available.
+     *
+     * @return the form-model object factory, or {@code null} if unavailable
+     */
+    public IModelObjectFactory getFormModelObjectFactory()
+    {
+        Bundle formBundle = Platform.getBundle(FORM_BUNDLE_ID);
+        if (formBundle == null)
+        {
+            Activator.logError("form bundle '" + FORM_BUNDLE_ID //$NON-NLS-1$
+                + "' not found in the running platform", null); //$NON-NLS-1$
+            return null;
+        }
+        ensureFormBundleActive(formBundle);
+        try
+        {
+            Class<?> formPluginClass = formBundle.loadClass(FORM_PLUGIN_CLASS);
+            // FormPlugin is the non-exported internal class
+            // com._1c.g5.v8.dt.internal.form.FormPlugin. getDefault()/getInjector() are
+            // public methods, but because their DECLARING class is not public to this
+            // bundle, Method.invoke enforces access on the declaring class and throws
+            // IllegalAccessException unless the Method is made accessible first.
+            Method getDefaultMethod = formPluginClass.getMethod("getDefault"); //$NON-NLS-1$
+            getDefaultMethod.setAccessible(true);
+            Object formPlugin = getDefaultMethod.invoke(null);
+            if (formPlugin == null)
+            {
+                Activator.logError("FormPlugin.getDefault() is null (form bundle not active)", null); //$NON-NLS-1$
+                return null;
+            }
+            Method getInjectorMethod = formPluginClass.getMethod("getInjector"); //$NON-NLS-1$
+            getInjectorMethod.setAccessible(true);
+            Object injectorObj = getInjectorMethod.invoke(formPlugin);
+            if (!(injectorObj instanceof Injector))
+            {
+                Activator.logError("FormPlugin.getInjector() did not return a Guice Injector", null); //$NON-NLS-1$
+                return null;
+            }
+            return ((Injector)injectorObj).getInstance(IModelObjectFactory.class);
+        }
+        catch (Throwable e)
+        {
+            Activator.logError("Failed to obtain the form IModelObjectFactory from the form bundle injector", //$NON-NLS-1$
+                e instanceof Exception ? (Exception)e : new RuntimeException(e));
+            return null;
+        }
+    }
+
+    /**
+     * Ensures the lazily-activated form bundle is started. First loads an exported
+     * class through the bundle (the standard lazy-activation trigger), then, if the
+     * bundle is still not {@code ACTIVE}, calls {@code start(START_TRANSIENT)}.
+     *
+     * @param formBundle the form bundle
+     */
+    private static void ensureFormBundleActive(Bundle formBundle)
+    {
+        try
+        {
+            // Touch an exported class to trip Bundle-ActivationPolicy: lazy.
+            formBundle.loadClass(FORM_SERVICE_CLASS);
+        }
+        catch (Throwable e)
+        {
+            // Fall through to the explicit start below.
+        }
+        if (formBundle.getState() != Bundle.ACTIVE)
+        {
+            try
+            {
+                formBundle.start(Bundle.START_TRANSIENT);
+            }
+            catch (Throwable e)
+            {
+                // Best-effort: getFormModelObjectFactory reports a clear null below.
+            }
+        }
+    }
+
+    /**
+     * Returns the {@link ITopObjectFqnGenerator} service used to compute the
+     * canonical BM top-object FQN for external-property objects (e.g. the content
+     * {@code Form} referenced by a {@code BasicForm}).
+     * <p>
+     * This is the same generator EDT's own form infrastructure uses (see
+     * {@code com._1c.g5.v8.dt.form.service.common.impl.ExtInfoManagementService}).
+     * Using it guarantees the content form is attached under the FQN the BM
+     * namespace/store layer expects, so the object resolves on subsequent lookups
+     * instead of failing with "No store with '&lt;id&gt;' is assigned to namespace".
+     *
+     * @return the top-object FQN generator, or {@code null} if not available
+     */
+    public ITopObjectFqnGenerator getTopObjectFqnGenerator()
+    {
+        if (topObjectFqnGeneratorTracker == null)
+        {
+            return null;
+        }
+        return topObjectFqnGeneratorTracker.getService();
     }
 
     /**

@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.EMap;
@@ -27,7 +28,21 @@ import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 
+import com._1c.g5.v8.bm.core.IBmObject;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
+import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
+import com._1c.g5.v8.dt.form.model.AutoCommandBar;
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormChildrenGroup;
+import com._1c.g5.v8.dt.form.model.FormCommandInterface;
+import com._1c.g5.v8.dt.form.model.FormFactory;
+import com._1c.g5.v8.dt.form.model.FormPackage;
+import com._1c.g5.v8.dt.form.model.ItemHorizontalAlignment;
 import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.Version;
 
@@ -189,6 +204,55 @@ public final class FormElementWriter
         return null;
     }
 
+    /** A parsed form-OBJECT create FQN: the owner type/name + the new form's Name. */
+    public static final class FormObjectRef
+    {
+        /** Owner metadata TYPE token, as supplied (English or Russian), e.g. {@code Catalog}. */
+        public final String ownerType;
+        /** Owner metadata object Name, e.g. {@code Products}. */
+        public final String ownerName;
+        /** Programmatic Name of the form to create, e.g. {@code ItemForm}. */
+        public final String formName;
+
+        FormObjectRef(String ownerType, String ownerName, String formName)
+        {
+            this.ownerType = ownerType;
+            this.ownerName = ownerName;
+            this.formName = formName;
+        }
+
+        /** The {@code Type.Object} owner FQN of the new form. */
+        public String ownerFqn()
+        {
+            return ownerType + "." + ownerName; //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * If {@code normFqn} addresses a FORM OBJECT to CREATE on a metadata object -
+     * {@code Type.Object.Form(s).FormName} (exactly 4 parts, a form token at position 2) - returns the
+     * parsed owner + form name; otherwise {@code null}. This is the create counterpart of
+     * {@link #parse} (which addresses a form MEMBER, 6+ parts) and of {@link #parseFormPath} (which
+     * resolves an EXISTING form for reading): a 4-part form FQN is neither a member nor a top object, so
+     * it is handled by {@code create_metadata}'s dedicated form-object branch.
+     * <p>
+     * A {@code CommonForm.Name} (2 parts) is NOT returned here: a CommonForm IS a top object and is
+     * created through the normal top-level create path.
+     */
+    public static FormObjectRef parseFormObjectCreate(String normFqn)
+    {
+        if (normFqn == null)
+        {
+            return null;
+        }
+        String[] p = normFqn.split("\\."); //$NON-NLS-1$
+        if (p.length == 4 && isFormToken(p[2]))
+        {
+            return new FormObjectRef(p[0], p[1], p[3]);
+        }
+        return null;
+    }
+
     /**
      * Resolves a form-member FQN kind token (English or Russian, case-insensitive) to a {@link Kind},
      * or {@code null} if it is not a supported form-element kind.
@@ -316,6 +380,227 @@ public final class FormElementWriter
             default:
                 return createItem(formModel, kind, name, parentName, titleLanguage, title, createdKind);
         }
+    }
+
+    // ---- form-OBJECT creation (the BasicForm mdo + its renderable content Form) ------------------
+
+    /**
+     * Creates a managed form OBJECT on {@code owner} inside an active BM write transaction: the
+     * MD-form ({@link BasicForm}, added to the owner's {@code forms} collection) AND an empty,
+     * renderable content {@link Form}, linked both ways, with the content form registered as a BM top
+     * object under the canonical external-property FQN. Mirrors the EDT "New form" wizard.
+     * <p>
+     * The content form is built by the FORM model factory ({@code formFactory}, the same
+     * {@code FormObjectFactory} the wizard uses) so it gets the predefined {@code autoCommandBar} the
+     * WYSIWYG layout generator requires - without it {@code HippoGenerator.readElement} ->
+     * {@code findHGClass(null)} throws and the form never renders. As a guard against the factory not
+     * resolving in this environment (or a future change), the render-critical {@code autoCommandBar}
+     * and the standard form-level flags are also applied explicitly here.
+     * <p>
+     * The content form is attached under {@code ITopObjectFqnGenerator.generateExternalPropertyFqn(
+     * mdForm, BASIC_FORM__FORM)} - the SAME FQN EDT's own form infrastructure uses - so the BM
+     * namespace assigns it a store and later look-ups resolve; any other FQN leaves it store-less and
+     * access fails with "No store … assigned to namespace".
+     *
+     * @param tx the active BM write transaction
+     * @param owner the owner metadata object, re-fetched inside {@code tx}
+     * @param formName the programmatic Name of the new form (already validated)
+     * @param synonymLanguage the resolved synonym language CODE, or {@code null} when no synonym
+     * @param synonym the synonym text, or {@code null}
+     * @param setAsDefault when {@code true}, registers the form as the owner's default object form
+     * @param mdFactory the MD model-object factory (creates the BasicForm)
+     * @param formFactory the FORM model-object factory (creates the content Form), may be {@code null}
+     * @param fqnGenerator the top-object FQN generator (computes the content form's canonical FQN)
+     * @param version the platform version
+     * @return the content form's own top-object FQN (serialized to {@code Form.form}), for force-export
+     */
+    public static String createForm(IBmTransaction tx, MdObject owner, String formName,
+        String synonymLanguage, String synonym, boolean setAsDefault, IModelObjectFactory mdFactory,
+        IModelObjectFactory formFactory, ITopObjectFqnGenerator fqnGenerator, Version version)
+    {
+        EStructuralFeature formsFeature = owner.eClass().getEStructuralFeature("forms"); //$NON-NLS-1$
+        if (formsFeature == null || !(formsFeature.getEType() instanceof EClass))
+        {
+            throw new RuntimeException("Object type '" + owner.eClass().getName() //$NON-NLS-1$
+                + "' does not support forms."); //$NON-NLS-1$
+        }
+        if (findOwnedFormByName(owner, formsFeature, formName) != null)
+        {
+            throw new RuntimeException("Form already exists: " + formName); //$NON-NLS-1$
+        }
+        EClass mdFormEClass = (EClass)formsFeature.getEType();
+
+        // (1) The MD-form via the standard MD factory (wizard-equivalent).
+        BasicForm mdForm = (BasicForm)mdFactory.create(mdFormEClass, version);
+        if (mdForm == null)
+        {
+            throw new RuntimeException("Factory returned null for form type: " + mdFormEClass.getName()); //$NON-NLS-1$
+        }
+        mdForm.setName(formName);
+        mdForm.setUuid(UUID.randomUUID());
+        if (synonym != null && !synonym.isEmpty() && synonymLanguage != null)
+        {
+            mdForm.getSynonym().put(synonymLanguage, synonym);
+        }
+
+        // (2) The content form, built by the FORM factory so it gets EDT's default structure
+        // (autoCommandBar, command interface, form flags). Falls back to a manual minimal-but-
+        // renderable build if the factory is unavailable.
+        Form content = createContentForm(formFactory, owner, version);
+
+        // (3) Link MD-form <-> content form (both directions).
+        mdForm.setForm(content);
+        content.setMdForm(mdForm);
+
+        // (4) Add the MD-form to the owner's forms collection BEFORE generating the content FQN, so the
+        // MD-form has a resolvable parent chain (owner -> configuration) and therefore a resolvable FQN.
+        addToList(owner, "forms", mdForm); //$NON-NLS-1$
+
+        // (5) Register the content form as a BM top object under the canonical external-property FQN.
+        String contentFqn = fqnGenerator.generateExternalPropertyFqn(mdForm,
+            MdClassPackage.Literals.BASIC_FORM__FORM);
+        if (contentFqn == null || contentFqn.isEmpty())
+        {
+            throw new RuntimeException("Could not generate the content-form FQN for: " + formName); //$NON-NLS-1$
+        }
+        tx.attachTopObject((IBmObject)content, contentFqn);
+
+        // (6) Fill default references / usePurposes as the wizard does.
+        mdFactory.fillDefaultReferences(mdForm);
+
+        // (7) Optionally set as the owner's default object form.
+        if (setAsDefault)
+        {
+            setDefaultObjectForm(owner, mdForm);
+        }
+        return contentFqn;
+    }
+
+    /**
+     * Builds the content {@link Form} with EDT's default structure. Prefers the FORM model factory
+     * ({@code FormObjectFactory}) - {@code create(FormPackage.Literals.FORM, owner, version)} produces
+     * exactly what the "New form" wizard builds (predefined {@code autoCommandBar}, command interface,
+     * form flags). Falls back to a bare {@code FormFactory.createForm()} when the factory is absent.
+     * In both cases the render-critical {@code autoCommandBar} and the standard form-level defaults are
+     * applied explicitly afterwards, so the form renders whether or not the factory ran.
+     */
+    private static Form createContentForm(IModelObjectFactory formFactory, MdObject owner, Version version)
+    {
+        Form content = null;
+        if (formFactory != null)
+        {
+            content = formFactory.create(FormPackage.Literals.FORM, owner, version);
+        }
+        if (content == null)
+        {
+            content = FormFactory.eINSTANCE.createForm();
+        }
+        // Guard: the factory may not run in this environment (its injector may be absent), or a future
+        // change may stop seeding the command bar. Ensure the render-critical element is present.
+        if (content.getAutoCommandBar() == null)
+        {
+            content.setAutoCommandBar(createDefaultAutoCommandBar());
+        }
+        applyFormDefaults(content);
+        return content;
+    }
+
+    /**
+     * Sets the standard default form-level properties a managed form authored in EDT has - the eight
+     * form flags ({@code saveWindowSettings}, {@code autoTitle}, {@code autoUrl}, {@code autoFillCheck},
+     * {@code allowFormCustomize}, {@code enabled}, {@code showTitle}, {@code showCloseButton}) true, the
+     * children grouping {@link FormChildrenGroup#VERTICAL}, and an (empty) {@link FormCommandInterface}
+     * holding an empty navigation panel and command bar - so an MCP-created form matches the reference
+     * regardless of whether {@code FormObjectFactory} resolved and ran. The {@code autoCommandBar} is
+     * created separately (it is render-critical); this method does not touch it.
+     */
+    private static void applyFormDefaults(Form form)
+    {
+        form.setSaveWindowSettings(true);
+        form.setAutoTitle(true);
+        form.setAutoUrl(true);
+        form.setAutoFillCheck(true);
+        form.setAllowFormCustomize(true);
+        form.setEnabled(true);
+        form.setShowTitle(true);
+        form.setShowCloseButton(true);
+        form.setGroup(FormChildrenGroup.VERTICAL);
+
+        FormCommandInterface commandInterface = FormFactory.eINSTANCE.createFormCommandInterface();
+        commandInterface.setNavigationPanel(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
+        commandInterface.setCommandBar(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
+        form.setCommandInterface(commandInterface);
+    }
+
+    /**
+     * Builds the form's predefined automatic command bar, mirroring
+     * {@code FormObjectFactory.newAutoCommandBar}: {@code autoFill = true}, {@code horizontalAlign =
+     * LEFT}, id {@code -1} (the sentinel EDT persists for a form's own predefined command bar, keeping
+     * it out of the regular element id space). A name is assigned so the element is well-formed; EDT
+     * renames predefined items to their canonical names on the next form sync.
+     */
+    private static AutoCommandBar createDefaultAutoCommandBar()
+    {
+        AutoCommandBar bar = FormFactory.eINSTANCE.createAutoCommandBar();
+        bar.setAutoFill(true);
+        bar.setHorizontalAlign(ItemHorizontalAlignment.LEFT);
+        bar.setId(-1);
+        bar.setName(RU_FORM_COMMAND_BAR);
+        return bar;
+    }
+
+    /** ru "ФормаКоманднаяПанель" - the canonical predefined-command-bar name (pure-ASCII source). */
+    private static final String RU_FORM_COMMAND_BAR = cp(0x0424, 0x043e, 0x0440, 0x043c, 0x0430,
+        0x041a, 0x043e, 0x043c, 0x0430, 0x043d, 0x0434, 0x043d, 0x0430, 0x044f,
+        0x041f, 0x0430, 0x043d, 0x0435, 0x043b, 0x044c);
+
+    /**
+     * Sets the owner's default object form via {@code setDefaultObjectForm(...)} when present. Uses
+     * reflection because that setter is declared per owner type without a common interface; a missing
+     * setter is reported clearly rather than failing silently.
+     */
+    private static void setDefaultObjectForm(MdObject owner, BasicForm mdForm)
+    {
+        for (Method method : owner.getClass().getMethods())
+        {
+            if (!"setDefaultObjectForm".equals(method.getName())) //$NON-NLS-1$
+            {
+                continue;
+            }
+            Class<?>[] paramTypes = method.getParameterTypes();
+            if (paramTypes.length == 1 && paramTypes[0].isInstance(mdForm))
+            {
+                try
+                {
+                    method.invoke(owner, mdForm);
+                    return;
+                }
+                catch (ReflectiveOperationException e)
+                {
+                    throw new RuntimeException("Failed to set default object form", e); //$NON-NLS-1$
+                }
+            }
+        }
+        throw new RuntimeException("Owner type '" + owner.eClass().getName() //$NON-NLS-1$
+            + "' has no compatible setDefaultObjectForm(...) method; create the form without " //$NON-NLS-1$
+            + "setAsDefault and assign it manually."); //$NON-NLS-1$
+    }
+
+    /** Finds a form by Name in the owner's {@code forms} collection (case-insensitive), or null. */
+    private static EObject findOwnedFormByName(EObject owner, EStructuralFeature formsFeature, String name)
+    {
+        Object value = owner.eGet(formsFeature);
+        if (value instanceof EList<?>)
+        {
+            for (Object form : (EList<?>)value)
+            {
+                if (form instanceof MdObject && name.equalsIgnoreCase(((MdObject)form).getName()))
+                {
+                    return (EObject)form;
+                }
+            }
+        }
+        return null;
     }
 
     private static String createAttribute(EObject formModel, String name, String titleLanguage,
