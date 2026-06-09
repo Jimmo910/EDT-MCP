@@ -24,8 +24,10 @@ import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.mcore.Value;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.StyleElementType;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -42,6 +44,7 @@ import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector;
 import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector.PropertyInfo;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeBuilder;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.StyleValueBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -76,6 +79,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             + "the form root) and/or 'position' ('first'/'last'/'before:<name>'/'after:<name>'/index) " //$NON-NLS-1$
             + "properties. REBIND a form event handler's procedure with a 'procedure' property on a " //$NON-NLS-1$
             + "Handler FQN, or re-point a Button at a different form command with a 'command' property. " //$NON-NLS-1$
+            + "Set a StyleItem's value with a 'value' property: a Color " //$NON-NLS-1$
+            + "{value:{color:{red:255,green:0,blue:0}}} (or {color:'auto'}) or a Font " //$NON-NLS-1$
+            + "{value:{font:{faceName:'Arial',height:12,bold:true}}}. " //$NON-NLS-1$
             + "Discover assignable properties + allowed values with " //$NON-NLS-1$
             + "get_metadata_details(assignable:true). To rename, use rename_metadata_object. " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('modify_metadata')."; //$NON-NLS-1$
@@ -1084,6 +1090,19 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                 out.add(PreparedChange.manyReference(info.feature, ids));
                 return null;
             }
+            case STYLE_VALUE:
+            {
+                StyleValueBuilder.Result sv = StyleValueBuilder.build(prop.get("value")); //$NON-NLS-1$
+                if (sv.error != null)
+                {
+                    return ToolResult.error("Invalid StyleItem '" + name + "': " + sv.error).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                // The style item's `type` (Color / Font) is kept consistent with the value it holds, so
+                // the change sets both the `value` and the sibling `type` feature in one shot.
+                EStructuralFeature typeFeature = target.eClass().getEStructuralFeature("type"); //$NON-NLS-1$
+                out.add(PreparedChange.styleValue(info.feature, typeFeature, sv.value, sv.type));
+                return null;
+            }
             case STRING:
             default:
                 if (value == null || value.isEmpty())
@@ -1145,7 +1164,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     /** A validated, coerced change ready to apply to the re-fetched target inside the write tx. */
     private static final class PreparedChange
     {
-        private enum Kind { SCALAR, LOCALIZED, REFERENCE, MANY_REFERENCE }
+        private enum Kind { SCALAR, LOCALIZED, REFERENCE, MANY_REFERENCE, STYLE_VALUE }
 
         private final EStructuralFeature feature;
         private final Kind kind;
@@ -1154,9 +1173,14 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         private final String localizedValue;
         /** For a REFERENCE: the target's bmId. For a MANY_REFERENCE: the targets' bmIds in order. */
         private final List<Long> referenceBmIds;
+        /** For a STYLE_VALUE: the sibling `type` feature (Color / Font), set alongside the value. */
+        private final EStructuralFeature styleTypeFeature;
+        /** For a STYLE_VALUE: the StyleElementType to set on {@link #styleTypeFeature}. */
+        private final StyleElementType styleType;
 
         private PreparedChange(EStructuralFeature feature, Kind kind, Object scalarValue,
-            String language, String localizedValue, List<Long> referenceBmIds)
+            String language, String localizedValue, List<Long> referenceBmIds,
+            EStructuralFeature styleTypeFeature, StyleElementType styleType)
         {
             this.feature = feature;
             this.kind = kind;
@@ -1164,27 +1188,43 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             this.localizedLanguage = language;
             this.localizedValue = localizedValue;
             this.referenceBmIds = referenceBmIds;
+            this.styleTypeFeature = styleTypeFeature;
+            this.styleType = styleType;
         }
 
         static PreparedChange scalar(EStructuralFeature feature, Object value)
         {
-            return new PreparedChange(feature, Kind.SCALAR, value, null, null, null);
+            return new PreparedChange(feature, Kind.SCALAR, value, null, null, null, null, null);
         }
 
         static PreparedChange localized(EStructuralFeature feature, String language, String value)
         {
-            return new PreparedChange(feature, Kind.LOCALIZED, null, language, value, null);
+            return new PreparedChange(feature, Kind.LOCALIZED, null, language, value, null, null, null);
         }
 
         static PreparedChange reference(EStructuralFeature feature, long targetBmId)
         {
             return new PreparedChange(feature, Kind.REFERENCE, null, null, null,
-                java.util.Collections.singletonList(targetBmId));
+                java.util.Collections.singletonList(targetBmId), null, null);
         }
 
         static PreparedChange manyReference(EStructuralFeature feature, List<Long> targetBmIds)
         {
-            return new PreparedChange(feature, Kind.MANY_REFERENCE, null, null, null, targetBmIds);
+            return new PreparedChange(feature, Kind.MANY_REFERENCE, null, null, null, targetBmIds,
+                null, null);
+        }
+
+        /**
+         * A StyleItem value change: the freshly-built mcore {@link Value} ({@code styleValue}) is a
+         * detached containment object, so it is set directly on the re-fetched style item inside the
+         * tx (like the TYPE_DESCRIPTION scalar). The sibling {@code typeFeature} (Color / Font) is set
+         * to {@code type} in the same change so the style item's type stays consistent with its value.
+         */
+        static PreparedChange styleValue(EStructuralFeature valueFeature, EStructuralFeature typeFeature,
+            Value styleValue, StyleElementType type)
+        {
+            return new PreparedChange(valueFeature, Kind.STYLE_VALUE, styleValue, null, null, null,
+                typeFeature, type);
         }
 
         String featureName()
@@ -1224,6 +1264,17 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                     {
                         list.add(requireInTx(tx, id));
                     }
+                    return;
+                }
+                case STYLE_VALUE:
+                {
+                    // Keep the style item's `type` consistent with the value it now holds (Color / Font),
+                    // then set the freshly-built (detached) mcore Value as its containment `value`.
+                    if (styleTypeFeature != null && styleType != null)
+                    {
+                        target.eSet(styleTypeFeature, styleType);
+                    }
+                    target.eSet(feature, scalarValue);
                     return;
                 }
                 case SCALAR:

@@ -19,6 +19,13 @@ The `type` property takes a STRUCTURED value `{types:[{kind, ...}]}`. Primitive 
 ## Setting an object reference
 A reference property to another metadata object is set by FQN: a SINGLE reference (e.g. `chartOfAccounts` on an AccountingRegister) takes `value:'Type.Name'`; a LIST reference (e.g. a Subsystem's `content`) takes `value:['Type.Name', ...]` and REPLACES the whole list (an empty array `[]` clears it). The target must be a top-level object whose type matches; get_metadata_details(assignable:true) shows the allowed target type. Structured content with per-item flags (e.g. a common attribute's content), and references whose target is a member (e.g. a default form), are not set here yet.
 
+## Setting a StyleItem value (Color / Font)
+A StyleItem (created generically with create_metadata) has no value yet; set its `value` property to a STRUCTURED object with EITHER a `color` OR a `font` member (not both). The style item's `type` (Color / Font) is set automatically to match the value.
+- Color (explicit RGB): `{name:'value', value:{color:{red:255, green:0, blue:0}}}` - each component 0-255.
+- Color (automatic): `{name:'value', value:{color:'auto'}}` - the platform automatic color.
+- Font: `{name:'value', value:{font:{faceName:'Arial', height:12, bold:true, italic:false, underline:false, strikeout:false}}}` - at least one of faceName / height / bold / italic / underline / strikeout is required; height is a positive integer.
+get_metadata_details renders the assigned value under a `Value` section (Style Type + Color `RGB(r, g, b)` / `Auto`, or the Font face / height / flags).
+
 ## Form members
 A FORM member is addressed like its create FQN: `Catalog.X.Form.F.<Kind>.Name` (or `CommonForm.F.<Kind>.Name`), Kind = Attribute / Command / Field / Button / Group / Decoration / Table. The same assignable properties apply: an item's `title` (bilingual; defaults to the config language when `language` is omitted), `visible`, `readOnly` (fields / groups / tables only) and any other assignable scalar / boolean / enum the item carries. NB `type` is context-dependent: on a form ATTRIBUTE it aliases the data `valueType` (same `{types:[...]}` shape as an mdclass attribute); on a form FIELD / Button / Decoration it is the display-kind ENUM (InputField / LabelField / ...). A wrong property name is rejected WITH the member's assignable list. The form item `id` cannot be set (auto-allocated). The change persists to the form's `Form.form` on disk.
 
@@ -46,6 +53,9 @@ A move is structural, so it CANNOT be combined with ordinary property changes in
 - Set a form attribute's type: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Attribute.Total', properties:[{name:'type', value:{types:[{kind:'Number', precision:10, scale:2}]}}]}`
 - Rebind an item-level handler's procedure: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Field.Price.Handler.OnChange', properties:[{name:'procedure', value:'PriceOnChange'}]}`
 - Re-point a button at another command: `{projectName:'P', fqn:'Catalog.Products.Form.ItemForm.Button.Go', properties:[{name:'command', value:'Refresh'}]}`
+- Set a style item to a red color: `{projectName:'P', fqn:'StyleItem.MyColor', properties:[{name:'value', value:{color:{red:255, green:0, blue:0}}}]}`
+- Set a style item to the automatic color: `{projectName:'P', fqn:'StyleItem.MyColor', properties:[{name:'value', value:{color:'auto'}}]}`
+- Set a style item to a font: `{projectName:'P', fqn:'StyleItem.MyFont', properties:[{name:'value', value:{font:{faceName:'Arial', height:12, bold:true}}}]}`
 
 ## Result
 JSON with `action='modified'`, the normalized `fqn`, the `applied` property names, `persisted`, and (when the ё->е normalization rewrote anything) the list of `normalized` properties. A move additionally returns `destination` (where the moved item ended up, e.g. `group 'Main' at index 1`).

@@ -21,11 +21,14 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 
+import com._1c.g5.v8.dt.mcore.ColorValue;
+import com._1c.g5.v8.dt.mcore.FontValue;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.mcore.util.McoreUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.StyleItem;
 
 /**
  * Introspects the ASSIGNABLE properties of a metadata {@link EObject}: which structural features a
@@ -57,7 +60,14 @@ public final class MetadataPropertyIntrospector
         /** A single reference to another metadata object, set by its FQN. */
         REFERENCE,
         /** A list of references to other metadata objects, set (replaced) by an array of FQNs. */
-        MANY_REFERENCE
+        MANY_REFERENCE,
+        /**
+         * A {@link com._1c.g5.v8.dt.metadata.mdclass.StyleItem StyleItem}'s {@code value}: an mcore
+         * {@code Value} (a Color or a Font) set via the structured {@code {color:...}} / {@code {font:...}}
+         * form (see {@link StyleValueBuilder}). It is a single-valued containment reference - excluded
+         * from the generic containment-ref filter, so it is classified explicitly.
+         */
+        STYLE_VALUE
     }
 
     /** The introspected schema of one assignable property. */
@@ -198,6 +208,13 @@ public final class MetadataPropertyIntrospector
 
     private static ValueKind classify(EStructuralFeature feature)
     {
+        // A StyleItem's `value` is a single-valued containment ref to an mcore Value (Color / Font).
+        // It is assignable (the style item's whole point), but it is a containment ref so the generic
+        // filter below would drop it - classify it explicitly as STYLE_VALUE.
+        if (isStyleItemValue(feature))
+        {
+            return ValueKind.STYLE_VALUE;
+        }
         if (feature instanceof EAttribute)
         {
             EClassifier type = ((EAttribute)feature).getEAttributeType();
@@ -280,6 +297,21 @@ public final class MetadataPropertyIntrospector
         return type != null && "TypeDescription".equals(type.getName()); //$NON-NLS-1$
     }
 
+    /**
+     * The {@code value} feature declared on (or inherited into) {@link StyleItem}: a single-valued
+     * containment ref to an mcore {@code Value} (a Color or a Font). Matched by name + the declaring
+     * class being {@code StyleItem}, so only the style item's value is treated as STYLE_VALUE.
+     */
+    private static boolean isStyleItemValue(EStructuralFeature feature)
+    {
+        if (!(feature instanceof EReference) || !"value".equals(feature.getName())) //$NON-NLS-1$
+        {
+            return false;
+        }
+        EClass owner = feature.getEContainingClass();
+        return owner != null && MdClassPackage.Literals.STYLE_ITEM.isSuperTypeOf(owner);
+    }
+
     private static EEnum enumTypeOf(EStructuralFeature feature)
     {
         if (feature instanceof EAttribute)
@@ -347,6 +379,8 @@ public final class MetadataPropertyIntrospector
                     return value instanceof MdObject ? ((MdObject)value).getName() : null;
                 case MANY_REFERENCE:
                     return renderReferenceList(value);
+                case STYLE_VALUE:
+                    return renderStyleValue(value);
                 default:
                     return String.valueOf(value);
             }
@@ -405,6 +439,26 @@ public final class MetadataPropertyIntrospector
             }
         }
         return sb.length() > 0 ? sb.toString() : null;
+    }
+
+    /**
+     * Renders a StyleItem {@code value} (an mcore {@code Value}): a Color as {@code Color: RGB(r, g, b)} /
+     * {@code Color: Auto}, a Font as {@code Font: ...}. Delegates to {@link StyleValueBuilder} so the
+     * AutoColor-first ordering is shared with the get_metadata_details formatter.
+     */
+    private static String renderStyleValue(Object value)
+    {
+        if (value instanceof ColorValue)
+        {
+            String color = StyleValueBuilder.renderColor(((ColorValue)value).getValue());
+            return color != null ? "Color: " + color : null; //$NON-NLS-1$
+        }
+        if (value instanceof FontValue)
+        {
+            String font = StyleValueBuilder.renderFont(((FontValue)value).getValue());
+            return font != null ? "Font: " + font : null; //$NON-NLS-1$
+        }
+        return null;
     }
 
     private static String renderType(TypeDescription typeDesc)

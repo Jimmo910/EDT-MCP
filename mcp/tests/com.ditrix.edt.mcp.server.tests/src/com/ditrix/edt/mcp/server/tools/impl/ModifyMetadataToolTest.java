@@ -69,6 +69,25 @@ public class ModifyMetadataToolTest
     }
 
     @Test
+    public void testDescriptionAndGuideAdvertiseStyleItemValue()
+    {
+        // F4: setting a StyleItem's Color / Font value is part of the tool surface, so the description
+        // and the guide must advertise the 'value' property with its color / font shape.
+        String desc = new ModifyMetadataTool().getDescription();
+        assertTrue("description should advertise the StyleItem value", //$NON-NLS-1$
+            desc.contains("StyleItem")); //$NON-NLS-1$
+        assertTrue("description should mention the color shape", desc.contains("color")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("description should mention the font shape", desc.contains("font")); //$NON-NLS-1$ //$NON-NLS-2$
+
+        String guide = new ModifyMetadataTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide should explain setting a StyleItem value", //$NON-NLS-1$
+            guide.contains("StyleItem")); //$NON-NLS-1$
+        assertTrue("guide should show the color value shape", guide.contains("color")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("guide should show the font value shape", guide.contains("font")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
     public void testInputSchemaContainsAllParameters()
     {
         String schema = new ModifyMetadataTool().getInputSchema();
