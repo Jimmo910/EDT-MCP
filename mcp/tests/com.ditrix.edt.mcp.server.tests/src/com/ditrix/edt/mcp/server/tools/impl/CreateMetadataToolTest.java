@@ -70,6 +70,31 @@ public class CreateMetadataToolTest
         assertTrue(schema.contains("\"privileged\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"returnValuesReuse\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"targetNamespace\"")); //$NON-NLS-1$
+        // F1: form-object create flag (execute() reads it; schema parity).
+        assertTrue("schema must declare the setAsDefault form-object flag", //$NON-NLS-1$
+            schema.contains("\"setAsDefault\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testSetAsDefaultIsOptional()
+    {
+        // F1: setAsDefault is a form-object-create flag, defaults false -> must not be required.
+        String schema = new CreateMetadataTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("setAsDefault must not be required (defaults false)", //$NON-NLS-1$
+            tail.contains("\"setAsDefault\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOutputSchemaDeclaresSetAsDefault()
+    {
+        // Output parity: a form-object create echoes setAsDefault in the result payload.
+        String schema = new CreateMetadataTool().getOutputSchema();
+        assertNotNull(schema);
+        assertTrue("output schema must declare setAsDefault", //$NON-NLS-1$
+            schema.contains("\"setAsDefault\"")); //$NON-NLS-1$
     }
 
     @Test

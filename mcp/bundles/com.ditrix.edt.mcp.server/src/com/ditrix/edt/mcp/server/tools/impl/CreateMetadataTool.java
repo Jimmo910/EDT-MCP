@@ -20,6 +20,7 @@ import org.eclipse.emf.ecore.util.EcoreUtil;
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
+import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -107,6 +108,10 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 + "FQN segment) and in any synonym / comment value (default true). 'ё' in a Name is " //$NON-NLS-1$
                 + "flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input " //$NON-NLS-1$
                 + "stores a compliant name. Set false to keep 'ё' exactly as supplied.") //$NON-NLS-1$
+            .booleanProperty("setAsDefault", //$NON-NLS-1$
+                "Form OBJECT create only (FQN 'Type.Object.Form.FormName'). When true, registers the " //$NON-NLS-1$
+                + "new form as the owner's default object form (default: false). Ignored for other " //$NON-NLS-1$
+                + "create kinds.") //$NON-NLS-1$
             .enumProperty("commonModuleKind", //$NON-NLS-1$
                 "CommonModule top-object only. Selects a standards-compliant flag combination the " //$NON-NLS-1$
                 + "common-module-type validator accepts (no warning), instead of a bare module: " //$NON-NLS-1$
@@ -155,6 +160,9 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 "Resolved CommonModule kind, when a CommonModule was created") //$NON-NLS-1$
             .stringProperty("targetNamespace", //$NON-NLS-1$
                 "XDTO namespace written, when an XDTOPackage was created") //$NON-NLS-1$
+            .booleanProperty("setAsDefault", //$NON-NLS-1$
+                "Whether the new form was registered as the owner's default object form " //$NON-NLS-1$
+                + "(form-object create only)") //$NON-NLS-1$
             .stringProperty("message", "Human-readable confirmation message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -191,6 +199,15 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 return createFormHandler(projectName, normFqn, formRef, properties);
             }
             return createFormMember(projectName, normFqn, formRef, properties, normReport);
+        }
+
+        // A 4-part form FQN (Type.Object.Form.FormName) addresses the FORM OBJECT itself - neither a
+        // form member (6+ parts, handled above) nor an mdclass member (Form is not a child-kind token).
+        // It creates a working managed form (the BasicForm mdo + a renderable content Form).
+        FormElementWriter.FormObjectRef formObjectRef = FormElementWriter.parseFormObjectCreate(normFqn);
+        if (formObjectRef != null)
+        {
+            return createFormObject(projectName, normFqn, formObjectRef, properties, params, normReport);
         }
 
         // Parse the supported properties (synonym/comment); reject anything else early. The synonym /
@@ -629,6 +646,154 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             .put("persisted", persisted); //$NON-NLS-1$
         addNormalization(formResult, normReport);
         return formResult.put("message", "Created " + normFqn).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ---- form-OBJECT creation (the BasicForm mdo + its renderable content Form) ------------------
+
+    /**
+     * Creates a managed form OBJECT addressed by a 4-part form FQN
+     * ({@code Type.Object.Form.FormName}): the MD-form ({@code BasicForm}, on the owner's {@code forms}
+     * collection) AND a renderable, empty content {@code Form} (serialized to {@code Form.form}), linked
+     * both ways. The owner is re-fetched inside a write transaction; the form authoring is delegated to
+     * {@link FormElementWriter#createForm} (which seeds the render-critical {@code autoCommandBar} and
+     * the form defaults, and attaches the content form under the canonical external-property FQN). Both
+     * the content form's own FQN and the owner {@code .mdo} (which registers the form) are force-exported.
+     */
+    private String createFormObject(String projectName, String normFqn,
+        FormElementWriter.FormObjectRef ref, List<JsonObject> properties, Map<String, String> params,
+        MdNameNormalizer.Report normReport)
+    {
+        if (!isValidIdentifier(ref.formName))
+        {
+            return ToolResult.error("Invalid form name '" + ref.formName + "'. A name must start with " //$NON-NLS-1$ //$NON-NLS-2$
+                + "a letter or underscore and contain only letters, digits and underscores.").toJson(); //$NON-NLS-1$
+        }
+
+        // A form object takes only synonym (with language); parent/title/dataPath are form-MEMBER props.
+        Props props = new Props();
+        String propErr = parseProperties(properties, props, normReport);
+        if (propErr != null)
+        {
+            return propErr;
+        }
+        boolean setAsDefault = JsonUtils.extractBooleanArgument(params, "setAsDefault", false); //$NON-NLS-1$
+
+        ProjectContext ctx = resolveProjectAndConfig(projectName);
+        if (ctx.hasError())
+        {
+            return ctx.error;
+        }
+        IProject project = ctx.project;
+        Configuration config = ctx.config;
+
+        MdObject owner = MetadataTypeUtils.findObject(config, ref.ownerType, ref.ownerName);
+        if (owner == null)
+        {
+            return ToolResult.error("Owner object not found: " + ref.ownerFqn() + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Use get_metadata_objects to list available objects.").toJson(); //$NON-NLS-1$
+        }
+        if (!(owner instanceof IBmObject))
+        {
+            return ToolResult.error("Owner object is not a BM object").toJson(); //$NON-NLS-1$
+        }
+
+        // Resolve the synonym language now (needs the configuration); only when a synonym was given.
+        final String synonymLanguage;
+        if (props.synonym != null && !props.synonym.isEmpty())
+        {
+            synonymLanguage = MetadataLanguageUtils.resolveLanguageCode(config, props.language);
+            if (synonymLanguage == null)
+            {
+                return ToolResult.error("Cannot determine a language code for the synonym in this " //$NON-NLS-1$
+                    + "configuration. Specify a 'language' code (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
+            }
+        }
+        else
+        {
+            synonymLanguage = null;
+        }
+
+        IV8ProjectManager v8ProjectManager = Activator.getDefault().getV8ProjectManager();
+        IModelObjectFactory mdFactory = Activator.getDefault().getModelObjectFactory();
+        IModelObjectFactory formFactory = Activator.getDefault().getFormModelObjectFactory();
+        ITopObjectFqnGenerator fqnGenerator = Activator.getDefault().getTopObjectFqnGenerator();
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (v8ProjectManager == null || mdFactory == null || bmModelManager == null)
+        {
+            return ToolResult.error("Required EDT services not available").toJson(); //$NON-NLS-1$
+        }
+        if (fqnGenerator == null)
+        {
+            return ToolResult.error("ITopObjectFqnGenerator not available (needed to attach the content " //$NON-NLS-1$
+                + "form under its canonical FQN)").toJson(); //$NON-NLS-1$
+        }
+        IV8Project v8Project = v8ProjectManager.getProject(project);
+        if (v8Project == null)
+        {
+            return ToolResult.error("Could not resolve V8 project for: " + projectName).toJson(); //$NON-NLS-1$
+        }
+        final Version version = v8Project.getVersion();
+        IBmModel bmModel = bmModelManager.getModel(project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
+        }
+
+        final long ownerBmId = ((IBmObject)owner).bmGetId();
+        final String ownerFqn = ((IBmObject)owner).bmGetFqn();
+        final String formName = ref.formName;
+        final String synonym = props.synonym;
+        final String comment = props.comment;
+        final boolean fSetAsDefault = setAsDefault;
+
+        final String contentFormFqn;
+        try
+        {
+            contentFormFqn = BmTransactions.<String>write(bmModel, "CreateFormObject", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txOwner = (EObject)tx.getObjectById(ownerBmId);
+                if (!(txOwner instanceof MdObject))
+                {
+                    throw new RuntimeException("Owner object not found in transaction"); //$NON-NLS-1$
+                }
+                return FormElementWriter.createForm(tx, (MdObject)txOwner, formName, synonymLanguage,
+                    synonym, comment, fSetAsDefault, mdFactory, formFactory, fqnGenerator, version);
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error creating form object", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to create form: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        // Persist BOTH the content form's own Form.form (its FQN, generated inside the tx) and the owner
+        // .mdo (which registers the new form in its <forms> and, when setAsDefault, the default-form ref).
+        java.util.List<String> dirty = new java.util.ArrayList<>();
+        if (contentFormFqn != null && !contentFormFqn.isEmpty())
+        {
+            dirty.add(contentFormFqn);
+        }
+        if (ownerFqn != null && !ownerFqn.isEmpty())
+        {
+            dirty.add(ownerFqn);
+        }
+        boolean persisted = !dirty.isEmpty() && BmTransactions.forceExportToDisk(project, dirty);
+
+        ToolResult result = ToolResult.success()
+            .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("kind", "Form") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("name", formName) //$NON-NLS-1$
+            .put("persisted", persisted) //$NON-NLS-1$
+            .put("setAsDefault", setAsDefault); //$NON-NLS-1$
+        if (props.synonym != null && !props.synonym.isEmpty() && synonymLanguage != null)
+        {
+            result.put("synonym", props.synonym).put("language", synonymLanguage); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        addNormalization(result, normReport);
+        return result.put("message", "Created form " + normFqn //$NON-NLS-1$ //$NON-NLS-2$
+            + ". Add structure with create_metadata on a form-member FQN " //$NON-NLS-1$
+            + "(e.g. " + normFqn + ".Attribute.<Name>).").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**

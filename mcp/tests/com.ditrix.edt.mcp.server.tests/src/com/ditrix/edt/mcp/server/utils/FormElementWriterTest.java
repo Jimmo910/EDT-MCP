@@ -13,6 +13,7 @@ import static org.junit.Assert.assertNull;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormMemberRef;
+import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormObjectRef;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter.Kind;
 
 /**
@@ -210,5 +211,44 @@ public class FormElementWriterTest
         // A top object / too-short FQN is not a form member.
         assertNull(FormElementWriter.parse("Catalog.Products")); //$NON-NLS-1$
         assertNull(FormElementWriter.parse(null));
+    }
+
+    // ---- form-OBJECT create FQN parse (F1) -------------------------------------------------------
+
+    @Test
+    public void testParseFormObjectCreateManaged()
+    {
+        // A 4-part form FQN addresses the FORM OBJECT to create (owner type/name + form name).
+        FormObjectRef ref = FormElementWriter.parseFormObjectCreate("Catalog.Products.Form.ItemForm"); //$NON-NLS-1$
+        assertNotNull(ref);
+        assertEquals("Catalog", ref.ownerType); //$NON-NLS-1$
+        assertEquals("Products", ref.ownerName); //$NON-NLS-1$
+        assertEquals("ItemForm", ref.formName); //$NON-NLS-1$
+        assertEquals("Catalog.Products", ref.ownerFqn()); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testParseFormObjectCreateBilingualFormToken()
+    {
+        // The form token is bilingual: "Форма" (forma) and "Forms" are both accepted.
+        String ru = "Catalog.Products." + fromCp(0x0444, 0x043e, 0x0440, 0x043c, 0x0430) + ".F"; //$NON-NLS-1$
+        FormObjectRef ref = FormElementWriter.parseFormObjectCreate(ru);
+        assertNotNull(ref);
+        assertEquals("F", ref.formName); //$NON-NLS-1$
+        assertNotNull(FormElementWriter.parseFormObjectCreate("Document.Inv.Forms.MainForm")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testParseFormObjectCreateRejectsNonFormObject()
+    {
+        // A form MEMBER FQN (6 parts) is NOT a form-object create (it routes to parse()).
+        assertNull(FormElementWriter.parseFormObjectCreate("Catalog.Products.Form.ItemForm.Attribute.A")); //$NON-NLS-1$
+        // A 4-part mdclass member (no form token at position 2) is not a form-object create.
+        assertNull(FormElementWriter.parseFormObjectCreate("Catalog.Products.Attribute.Weight")); //$NON-NLS-1$
+        // A CommonForm (2 parts) IS a top object - created via the normal top-level path, not here.
+        assertNull(FormElementWriter.parseFormObjectCreate("CommonForm.MyForm")); //$NON-NLS-1$
+        // A plain top object / null is not a form-object create.
+        assertNull(FormElementWriter.parseFormObjectCreate("Catalog.Products")); //$NON-NLS-1$
+        assertNull(FormElementWriter.parseFormObjectCreate(null));
     }
 }

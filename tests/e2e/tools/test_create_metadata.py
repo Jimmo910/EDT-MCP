@@ -405,6 +405,81 @@ def test_create_web_service_operation_and_parameter():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Happy — FORM OBJECT creation (F1: the BasicForm mdo + a renderable content Form)
+# A 4-part form FQN 'Type.Object.Form.FormName' creates the form itself; the content
+# form gets the render-critical autoCommandBar + form defaults and is attached under
+# its canonical FQN so its structure re-resolves.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_object_on_catalog():
+    # Create a NEW managed form on the fixture Catalog.Catalog and confirm it exists + renders.
+    form = "Z_McpNewForm"
+    fqn = "Catalog.Catalog.Form." + form
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})
+    assert_ok(r, "create form object %s" % fqn)
+    assert r.structured.get("action") == "created", "must report created: %r" % (r.structured,)
+    assert r.structured.get("kind") == "Form", "kind must be Form: %r" % (r.structured,)
+    assert r.structured.get("name") == form, "name must be the form name: %r" % (r.structured,)
+
+    # The new form must register in the owner Catalog.Catalog.mdo on disk (its <forms> entry) and
+    # the content Form.form must be written (the form name appears in both).
+    poll_diff_contains(form, ctx="the new form must land in the owner .mdo / Form.form on disk")
+
+    # MODEL read-back: get_metadata_details on the form FQN renders its structure (the "# Form
+    # Structure" heading proves the content form resolved - i.e. it was attached under the canonical
+    # FQN and the editable model is reachable; a store-less attach would fail to resolve here).
+    d = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
+    assert_ok(d, "render the new form's structure")
+    assert_contains(d.text, "Form Structure", "the new form must render a structure (content model resolved)")
+    assert_contains(d.text, form, "the rendered structure must name the new form")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_object_then_add_member():
+    # End-to-end: create a form OBJECT, then add a member to it via the folded member path. This
+    # only works if the content form was created renderable + reachable (the F1 fix).
+    form, attr = "Z_McpFormThenAttr", "NewAttr"
+    r1 = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Form." + form})
+    assert_ok(r1, "create form object")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.%s.Attribute.%s" % (form, attr)})
+    assert_ok(r2, "add an attribute to the just-created form")
+    assert r2.structured.get("action") == "created", "must report created: %r" % (r2.structured,)
+    poll_diff_contains(attr, ctx="the member added to the new form must land in its Form.form on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_object_russian_token():
+    # The form token is bilingual: "Форма" creates the form object just like "Form".
+    form = "Z_McpRuForm"
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Форма." + form})
+    assert_ok(r, "create form object via the Russian form token")
+    assert r.structured.get("kind") == "Form", "kind must be Form: %r" % (r.structured,)
+    poll_diff_contains(form, ctx="the Russian-token form object must land on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_object_duplicate_is_error():
+    # Catalog.Catalog already has the fixture form "ItemForm" -> creating it again is rejected.
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm"})
+    e = assert_error(r, "duplicate form object")
+    assert_error_quality(e, names=["ItemForm"], suggests=["already exists"],
+                         ctx="creating an existing form must be a clean duplicate error")
+    assert_no_diff("a rejected duplicate form create must not change the project")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_object_invalid_name_is_error():
+    r = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Form.1Bad-Form"})
+    e = assert_error(r, "invalid form name")
+    assert_error_quality(e, names=["1Bad-Form"], suggests=["must start with"],
+                         ctx="an invalid form name is a clean error")
+    assert_no_diff("a rejected form create must not change the project")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Happy — FORM content members (the cross-model hop into the editable .form)
 # Fixture: Catalog.Catalog has a managed form "ItemForm".
 # ──────────────────────────────────────────────────────────────────────────────

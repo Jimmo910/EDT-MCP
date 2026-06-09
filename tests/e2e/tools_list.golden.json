@@ -168,6 +168,10 @@
           "description": "CommonModule top-object only. When true, the server module is callable from the client (server call). Valid only with a server kind and incompatible with 'Global'. Ignored for other types.",
           "type": "boolean"
         },
+        "setAsDefault": {
+          "description": "Form OBJECT create only (FQN 'Type.Object.Form.FormName'). When true, registers the new form as the owner's default object form (default: false). Ignored for other create kinds.",
+          "type": "boolean"
+        },
         "targetNamespace": {
           "description": "XDTOPackage top-object only. URI namespace for the new package; a non-empty namespace is required for the package to be valid. Defaults to 'http://example.org/<Name>' when omitted. Create-time-only. Ignored for other types.",
           "type": "string"
@@ -219,6 +223,10 @@
         },
         "persisted": {
           "description": "Whether the change was exported to disk",
+          "type": "boolean"
+        },
+        "setAsDefault": {
+          "description": "Whether the new form was registered as the owner's default object form (form-object create only)",
           "type": "boolean"
         },
         "success": {
