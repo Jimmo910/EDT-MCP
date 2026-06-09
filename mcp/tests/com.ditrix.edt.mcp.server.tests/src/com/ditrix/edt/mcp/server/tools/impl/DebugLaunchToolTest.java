@@ -67,6 +67,31 @@ public class DebugLaunchToolTest
     }
 
     @Test
+    public void testOutputSchemaDeclaresLaunchingStatus()
+    {
+        // The launch is async: a fresh launch returns status:"launching" so the
+        // caller knows to poll debug_status. The output schema must advertise that
+        // field (schema<->result parity), otherwise a conformant client would not
+        // expect it in structuredContent.
+        String schema = new DebugLaunchTool().getOutputSchema();
+        assertNotNull(schema);
+        assertTrue(schema.contains("\"status\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("launching")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDescribesAsyncLaunch()
+    {
+        // The launch dispatch is non-blocking (asyncExec): the guide must tell the
+        // caller it returns status:"launching" immediately and to poll debug_status
+        // for readiness rather than expecting a running session synchronously.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue(guide.contains("launching")); //$NON-NLS-1$
+        assertTrue(guide.contains("debug_status")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testGuideHasMigratedDetail()
     {
         // The exhaustive detail (Attach mode, the alreadyRunning short-circuit and
