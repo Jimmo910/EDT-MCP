@@ -2432,6 +2432,119 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
+    "description": "Bulk re-synchronize the in-memory BM model to the on-disk src/ .mdo files and report BM-to-disk desync. Walks EVERY top metadata object of the configuration (all kinds) and force-exports each object's .mdo, so objects that exist in the model / Configuration.mdo but have no .mdo on disk are written out. Fixes 'object file does not exist' failures from update_database / XML import caused by an accumulated desync. Read-safe and idempotent: when already in sync it re-exports harmlessly and reports 0 missing. Also CLEANS dangling/orphaned references in Configuration.mdo (unresolved proxies shown by get_project_errors as md-reference-intergrity 'lost reference' warnings that block update_database / XML import), reporting danglingFound + danglingRemovedCount (cleanDanglingReferences, default true; idempotent). Full parameters and examples: call get_tool_guide('resync_to_disk').",
+    "inputSchema": {
+      "properties": {
+        "cleanDanglingReferences": {
+          "description": "When true (default), remove dangling/orphaned references from Configuration.mdo - entries that register an object with no .mdo and no BM body (unresolved proxies), the source of md-reference-intergrity 'lost reference' warnings that block update_database / XML import. Set false to only report danglingFound without removing anything.",
+          "type": "boolean"
+        },
+        "projectName": {
+          "description": "EDT project name (required).",
+          "type": "string"
+        },
+        "revalidate": {
+          "description": "When true, schedule a full project revalidation (clean build) after the export so stale markers refresh. Default: false (export only).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectName"
+      ],
+      "type": "object"
+    },
+    "name": "resync_to_disk",
+    "outputSchema": {
+      "properties": {
+        "cleanDanglingReferences": {
+          "description": "Whether dangling-reference removal was requested",
+          "type": "boolean"
+        },
+        "danglingDetails": {
+          "description": "All dangling entries found: [{field, lostFqn, position}]",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "danglingFound": {
+          "description": "Dangling (unresolved-proxy) references detected in Configuration.mdo",
+          "type": "integer"
+        },
+        "danglingRemoved": {
+          "description": "Removed dangling entries: [{field, lostFqn, position}]",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "danglingRemovedCount": {
+          "description": "Dangling references actually removed (0 in report-only mode)",
+          "type": "integer"
+        },
+        "danglingWarning": {
+          "description": "Set when the dangling scan/cleanup could not complete cleanly",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable summary of the outcome",
+          "type": "string"
+        },
+        "missingBefore": {
+          "description": "FQNs that were missing on disk before the export",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "missingBeforeCount": {
+          "description": "Top objects that had no .mdo on disk before the export",
+          "type": "integer"
+        },
+        "objectsExported": {
+          "description": "Number of top objects whose .mdo was (re)written",
+          "type": "integer"
+        },
+        "projectName": {
+          "description": "The project that was re-synchronized",
+          "type": "string"
+        },
+        "revalidateWarning": {
+          "description": "Set when the optional post-export revalidation failed",
+          "type": "string"
+        },
+        "stillMissing": {
+          "description": "FQNs still missing on disk after the export",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stillMissingCount": {
+          "description": "Top objects still missing on disk after the export",
+          "type": "integer"
+        },
+        "success": {
+          "description": "Whether the export succeeded",
+          "type": "boolean"
+        },
+        "totalTopObjects": {
+          "description": "Total metadata top objects walked in the BM model",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Revalidate EDT project or specific objects. If objects array is empty or missing, revalidates entire project. FQN examples: 'Document.SalesOrder', 'Catalog.Products', 'CommonModule.Common'. Russian type names are also supported (e.g. 'Документ.ПриходнаяНакладная', 'Справочник.Номенклатура').",
     "inputSchema": {
       "properties": {
