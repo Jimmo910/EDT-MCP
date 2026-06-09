@@ -53,6 +53,42 @@ public class DeleteMetadataToolTest
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"fqn\"")); //$NON-NLS-1$
         assertTrue(schema.contains("\"confirm\"")); //$NON-NLS-1$
+        assertTrue("schema must declare the force override", //$NON-NLS-1$
+            schema.contains("\"force\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testForceIsOptionalAndDistinctFromConfirm()
+    {
+        String schema = new DeleteMetadataTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        assertTrue(requiredIdx >= 0);
+        String tail = schema.substring(requiredIdx);
+        assertFalse("force must not be required", tail.contains("\"force\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        // force is the reference-override; confirm is the preview gate — both are declared and distinct.
+        assertTrue(schema.contains("\"force\"")); //$NON-NLS-1$
+        assertTrue(schema.contains("\"confirm\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testOutputSchemaDocumentsBlockedAction()
+    {
+        String schema = new DeleteMetadataTool().getOutputSchema();
+        assertNotNull(schema);
+        // The output envelope must describe the blocked/forced branch a caller can now receive.
+        assertTrue("outputSchema must declare blockingReferences", //$NON-NLS-1$
+            schema.contains("\"blockingReferences\"")); //$NON-NLS-1$
+        assertTrue("outputSchema must declare the forced flag", //$NON-NLS-1$
+            schema.contains("\"forced\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDescriptionMentionsForceOverride()
+    {
+        String desc = new DeleteMetadataTool().getDescription();
+        assertNotNull(desc);
+        assertTrue("description should mention the force override", //$NON-NLS-1$
+            desc.toLowerCase().contains("force")); //$NON-NLS-1$
     }
 
     @Test
