@@ -21,6 +21,21 @@ Creates one metadata node addressed by a 1C full-name FQN, then force-exports th
 - `expectedNotExists` (optional, default false) - assert the node does not yet exist, for a sharper precondition error. A real duplicate is rejected regardless.
 - `normalizeYo` (optional, default true) - normalize the Russian letter `ё`->`е` / `Ё`->`Е` in the NAME (the trailing FQN segment) and in any `synonym` / `comment` value, applied at the parse step before identifier validation. `ё` in a Name is flagged by the 1C standard `mdo-ru-name-unallowed-letter`, so this stores a compliant Name; set `false` to keep `ё` exactly as supplied. The result lists the rewritten fields under `normalized`.
 
+### CommonModule presets (top-object `CommonModule` only; create-time-only)
+A bare CommonModule has no flags set, which the platform `common-module-type` validator flags. Pass `commonModuleKind` to get a standards-compliant flag combination it accepts:
+- `commonModuleKind`: `'Server'` (default), `'ServerCall'`, `'ClientManaged'`, `'ClientOrdinary'`, `'ClientServer'`, `'Global'`.
+- `serverCall` (boolean): make a server module callable from the client. Valid only with a server kind; incompatible with `Global`.
+- `privileged` (boolean): run with full access. Valid only with the `Server` kind (not a server call).
+- `returnValuesReuse`: `'DontUse'` (default), `'DuringRequest'`, `'DuringSession'`. `DuringSession` yields a cached module on `Server`/`ServerCall`/`ClientManaged`/`ClientOrdinary`; `DuringRequest` has no validator-accepted combo.
+
+The kind + modifiers map to ONE canonical 8-flag combination; an illegal mix (e.g. `serverCall` on a client kind, `privileged` with `Global`) is rejected up front with an actionable error. These flags cannot be re-derived post-hoc, so they are create-time args (not `properties`). The success payload echoes the resolved `commonModuleKind`.
+
+### XDTOPackage namespace (top-object `XDTOPackage` only; create-time-only)
+- `targetNamespace`: the package URI namespace. A non-empty namespace is required for the package to be valid; defaults to `http://example.org/<Name>` when omitted. The success payload echoes the written `targetNamespace`.
+
+### Edition-gated top types
+`Bot`, `WebSocketClient` and `IntegrationService` are created only when the loaded platform version exposes their Configuration collection. On a build that lacks the collection feature the create returns a clear "Could not resolve configuration collection" error rather than crashing (the feature is probed on the live `Configuration` EClass, never assumed). On the 2026.1 target platform all three resolve and create.
+
 ## Bilingual (ru/en)
 The synonym EMap is keyed by the language CODE (`ru`/`en`), never the language name. Objects are resolved by programmatic Name; only the type / kind tokens are dialect-aware.
 

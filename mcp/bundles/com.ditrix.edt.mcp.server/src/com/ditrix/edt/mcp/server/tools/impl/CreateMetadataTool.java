@@ -24,10 +24,13 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.ReturnValuesReuse;
 import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
+import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -55,6 +58,15 @@ import com.google.gson.JsonObject;
 public class CreateMetadataTool extends AbstractMetadataWriteTool
 {
     public static final String NAME = "create_metadata"; //$NON-NLS-1$
+
+    /** Canonical English singular type name for the CommonModule object. */
+    private static final String TYPE_COMMON_MODULE = "CommonModule"; //$NON-NLS-1$
+
+    /** Canonical English singular type name for the XDTOPackage object. */
+    private static final String TYPE_XDTO_PACKAGE = "XDTOPackage"; //$NON-NLS-1$
+
+    /** Quoted, comma-separated list of CommonModule kinds for schema hints. */
+    private static final String COMMON_MODULE_KINDS = CommonModuleKind.quotedList();
 
     @Override
     public String getName()
@@ -95,6 +107,33 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 + "FQN segment) and in any synonym / comment value (default true). 'ё' in a Name is " //$NON-NLS-1$
                 + "flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input " //$NON-NLS-1$
                 + "stores a compliant name. Set false to keep 'ё' exactly as supplied.") //$NON-NLS-1$
+            .enumProperty("commonModuleKind", //$NON-NLS-1$
+                "CommonModule top-object only. Selects a standards-compliant flag combination the " //$NON-NLS-1$
+                + "common-module-type validator accepts (no warning), instead of a bare module: " //$NON-NLS-1$
+                + COMMON_MODULE_KINDS + ". Defaults to 'Server'. Ignored for other types. Combine " //$NON-NLS-1$
+                + "with 'serverCall' / 'privileged' / 'returnValuesReuse'. These are create-time-only " //$NON-NLS-1$
+                + "(the flag set cannot be re-derived post-hoc).", //$NON-NLS-1$
+                CommonModuleKind.SERVER.token(), CommonModuleKind.SERVER_CALL.token(),
+                CommonModuleKind.CLIENT_MANAGED.token(), CommonModuleKind.CLIENT_ORDINARY.token(),
+                CommonModuleKind.CLIENT_SERVER.token(), CommonModuleKind.GLOBAL.token())
+            .booleanProperty("serverCall", //$NON-NLS-1$
+                "CommonModule top-object only. When true, the server module is callable from the " //$NON-NLS-1$
+                + "client (server call). Valid only with a server kind and incompatible with " //$NON-NLS-1$
+                + "'Global'. Ignored for other types.") //$NON-NLS-1$
+            .booleanProperty("privileged", //$NON-NLS-1$
+                "CommonModule top-object only. When true, the module runs with full (privileged) " //$NON-NLS-1$
+                + "access. Valid only with the 'Server' kind (not a server call). Ignored for other " //$NON-NLS-1$
+                + "types.") //$NON-NLS-1$
+            .enumProperty("returnValuesReuse", //$NON-NLS-1$
+                "CommonModule top-object only. Reuse of return values: 'DontUse' (default), " //$NON-NLS-1$
+                + "'DuringRequest' or 'DuringSession'. 'DuringSession' yields a cached module accepted " //$NON-NLS-1$
+                + "by the common-module-type validator. Ignored for other types.", //$NON-NLS-1$
+                "DontUse", "DuringRequest", "DuringSession") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            .stringProperty("targetNamespace", //$NON-NLS-1$
+                "XDTOPackage top-object only. URI namespace for the new package; a non-empty " //$NON-NLS-1$
+                + "namespace is required for the package to be valid. Defaults to " //$NON-NLS-1$
+                + "'http://example.org/<Name>' when omitted. Create-time-only. Ignored for other " //$NON-NLS-1$
+                + "types.") //$NON-NLS-1$
             .build();
     }
 
@@ -112,6 +151,10 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             .stringProperty("language", "Language code the synonym was written for") //$NON-NLS-1$ //$NON-NLS-2$
             .stringArrayProperty("normalized", //$NON-NLS-1$
                 "Fields whose value was rewritten by the 'ё'->'е' normalization (when any)") //$NON-NLS-1$
+            .stringProperty("commonModuleKind", //$NON-NLS-1$
+                "Resolved CommonModule kind, when a CommonModule was created") //$NON-NLS-1$
+            .stringProperty("targetNamespace", //$NON-NLS-1$
+                "XDTO namespace written, when an XDTOPackage was created") //$NON-NLS-1$
             .stringProperty("message", "Human-readable confirmation message") //$NON-NLS-1$ //$NON-NLS-2$
             .build();
     }
@@ -183,6 +226,19 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 + "a letter or underscore and contain only letters, digits and underscores.").toJson(); //$NON-NLS-1$
         }
 
+        // Resolve the create-time-only, type-specific options (CommonModule flag combination and
+        // XDTOPackage namespace) up front so an invalid request fails fast, before any BM work.
+        // These only apply to the matching TOP-object type; they are ignored for everything else.
+        final TypeSpecific typeSpecific;
+        try
+        {
+            typeSpecific = TypeSpecific.resolve(target, params);
+        }
+        catch (IllegalArgumentException e)
+        {
+            return ToolResult.error(e.getMessage()).toJson();
+        }
+
         // Resolve the synonym language now (needs the configuration); only when a synonym was given.
         final String synonymLanguage;
         if (props.synonym != null && !props.synonym.isEmpty())
@@ -214,7 +270,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         if (target.topLevel)
         {
             return createTopLevel(project, config, projectName, target, normFqn, props, synonymLanguage,
-                normReport);
+                typeSpecific, normReport);
         }
         return createMember(project, projectName, target, normFqn, props, synonymLanguage, normReport);
     }
@@ -223,7 +279,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
 
     private String createTopLevel(IProject project, Configuration config, String projectName,
         CreateTarget target, String normFqn, Props props, String synonymLanguage,
-        MdNameNormalizer.Report normReport)
+        TypeSpecific typeSpecific, MdNameNormalizer.Report normReport)
     {
         // Any configuration top-level type resolved by MetadataTypeUtils is attempted: the EDT
         // model-object factory produces the EDT "New"-wizard default content. A type the factory
@@ -282,6 +338,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 }
                 newObject.setName(name);
                 applyScalarProps(newObject, props, synonymLanguage);
+                // Type-specific defaults applied on top of the factory's default content.
+                typeSpecific.applyTo(newObject);
                 tx.attachTopObject((IBmObject)newObject, normFqn);
                 addToCollection(cfg, configFeatureName, newObject);
                 factory.fillDefaultReferences(newObject);
@@ -301,7 +359,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             dirty.add(configFqn);
         }
         boolean persisted = BmTransactions.forceExportToDisk(project, dirty);
-        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, normReport);
+        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, typeSpecific,
+            normReport);
     }
 
     // ---- member creation (mirrors the former add_metadata_attribute, generalized) ---------------
@@ -409,7 +468,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         }
 
         boolean persisted = BmTransactions.forceExportToDisk(project, topFqn);
-        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, normReport);
+        return success(normFqn, createdKind, name, persisted, props, synonymLanguage, null, normReport);
     }
 
     // ---- form-content member creation (the cross-model hop into the editable Form) ---------------
@@ -831,7 +890,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
     }
 
     private String success(String fqn, EClass kind, String name, boolean persisted, Props props,
-        String synonymLanguage, MdNameNormalizer.Report normReport)
+        String synonymLanguage, TypeSpecific typeSpecific, MdNameNormalizer.Report normReport)
     {
         ToolResult result = ToolResult.success()
             .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
@@ -842,6 +901,17 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         if (props.synonym != null && !props.synonym.isEmpty() && synonymLanguage != null)
         {
             result.put("synonym", props.synonym).put("language", synonymLanguage); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (typeSpecific != null)
+        {
+            if (typeSpecific.commonModuleFlags != null)
+            {
+                result.put("commonModuleKind", typeSpecific.commonModuleFlags.kind.token()); //$NON-NLS-1$
+            }
+            if (typeSpecific.xdtoNamespace != null)
+            {
+                result.put("targetNamespace", typeSpecific.xdtoNamespace); //$NON-NLS-1$
+            }
         }
         addNormalization(result, normReport);
         return result
@@ -903,5 +973,342 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             }
         }
         return true;
+    }
+
+    // ---- type-specific, create-time-only options (CommonModule flags / XDTO namespace) ----------
+
+    /**
+     * Resolved, create-time-only options that depend on the concrete TOP-object type: a
+     * validator-approved CommonModule flag combination and/or an XDTOPackage namespace. Both are
+     * applied on top of the EDT factory's default content and are NOT addressable post-hoc through
+     * modify_metadata (a CommonModule's flag set cannot be re-derived from a single property; an
+     * XDTOPackage needs a non-empty namespace to be valid at all), which is why they are top-level
+     * create arguments rather than entries in the {@code properties} array.
+     */
+    private static final class TypeSpecific
+    {
+        final CommonModuleFlags commonModuleFlags;
+        final String xdtoNamespace;
+
+        private TypeSpecific(CommonModuleFlags commonModuleFlags, String xdtoNamespace)
+        {
+            this.commonModuleFlags = commonModuleFlags;
+            this.xdtoNamespace = xdtoNamespace;
+        }
+
+        /** Applies the resolved options to a freshly created top object (no-op for other types). */
+        void applyTo(MdObject newObject)
+        {
+            if (commonModuleFlags != null && newObject instanceof CommonModule)
+            {
+                commonModuleFlags.applyTo((CommonModule)newObject);
+            }
+            if (xdtoNamespace != null && newObject instanceof XDTOPackage)
+            {
+                ((XDTOPackage)newObject).setNamespace(xdtoNamespace);
+            }
+        }
+
+        /**
+         * Resolves the type-specific options from the tool parameters for a TOP-object create. For a
+         * member create (or any other top-type) it returns an empty holder; the CommonModule /
+         * XDTOPackage modifiers in {@code params} are simply ignored.
+         *
+         * @param target the resolved create target
+         * @param params the tool parameters
+         * @return the resolved holder (never null)
+         * @throws IllegalArgumentException with a clear English message if a CommonModule
+         *             kind/modifier combination is unknown or has no validator-accepted flag set
+         */
+        static TypeSpecific resolve(CreateTarget target, Map<String, String> params)
+        {
+            if (target == null || !target.topLevel)
+            {
+                return new TypeSpecific(null, null);
+            }
+            if (TYPE_COMMON_MODULE.equals(target.topLevelType))
+            {
+                return new TypeSpecific(CommonModuleFlags.resolve(params), null);
+            }
+            if (TYPE_XDTO_PACKAGE.equals(target.topLevelType))
+            {
+                String requested = JsonUtils.extractStringArgument(params, "targetNamespace"); //$NON-NLS-1$
+                String ns = (requested != null && !requested.trim().isEmpty())
+                    ? requested.trim()
+                    : "http://example.org/" + target.childName; //$NON-NLS-1$
+                return new TypeSpecific(null, ns);
+            }
+            return new TypeSpecific(null, null);
+        }
+    }
+
+    /**
+     * Standards-compliant CommonModule kinds. Each kind corresponds to a flag combination that the
+     * EDT {@code common-module-type} validator accepts. The validator compares the eight flag
+     * features against a fixed set of canonical combinations and reports a BLOCKER issue when none
+     * matches, so the tool must pick exactly one of those combinations rather than an arbitrary
+     * subset.
+     */
+    enum CommonModuleKind
+    {
+        /** Server-side module (the default): client ordinary + external connection + server. */
+        SERVER("Server"), //$NON-NLS-1$
+        /** Server module callable from the client (server call). */
+        SERVER_CALL("ServerCall"), //$NON-NLS-1$
+        /** Managed-application client module. */
+        CLIENT_MANAGED("ClientManaged"), //$NON-NLS-1$
+        /** Ordinary-application client module. */
+        CLIENT_ORDINARY("ClientOrdinary"), //$NON-NLS-1$
+        /** Combined client and server module. */
+        CLIENT_SERVER("ClientServer"), //$NON-NLS-1$
+        /** Global client module (its exports are available without the module prefix). */
+        GLOBAL("Global"); //$NON-NLS-1$
+
+        private final String token;
+
+        CommonModuleKind(String token)
+        {
+            this.token = token;
+        }
+
+        String token()
+        {
+            return token;
+        }
+
+        static CommonModuleKind fromToken(String value)
+        {
+            for (CommonModuleKind k : values())
+            {
+                if (k.token.equalsIgnoreCase(value))
+                {
+                    return k;
+                }
+            }
+            return null;
+        }
+
+        static String quotedList()
+        {
+            StringBuilder sb = new StringBuilder();
+            for (CommonModuleKind k : values())
+            {
+                if (sb.length() > 0)
+                {
+                    sb.append(", "); //$NON-NLS-1$
+                }
+                sb.append('\'').append(k.token).append('\'');
+            }
+            return sb.toString();
+        }
+    }
+
+    /**
+     * Resolved, validator-approved flag combination for a new CommonModule. Built from the
+     * {@code commonModuleKind} plus the {@code serverCall}, {@code privileged} and
+     * {@code returnValuesReuse} modifiers. Every combination produced here is one of the canonical
+     * combinations recognized by the {@code common-module-type} check, so a freshly created module
+     * never raises that warning.
+     */
+    static final class CommonModuleFlags
+    {
+        final CommonModuleKind kind;
+        final boolean clientManagedApplication;
+        final boolean clientOrdinaryApplication;
+        final boolean server;
+        final boolean serverCall;
+        final boolean externalConnection;
+        final boolean global;
+        final boolean privileged;
+        final ReturnValuesReuse returnValuesReuse;
+
+        private CommonModuleFlags(CommonModuleKind kind, boolean clientManagedApplication,
+            boolean clientOrdinaryApplication, boolean server, boolean serverCall,
+            boolean externalConnection, boolean global, boolean privileged,
+            ReturnValuesReuse returnValuesReuse)
+        {
+            this.kind = kind;
+            this.clientManagedApplication = clientManagedApplication;
+            this.clientOrdinaryApplication = clientOrdinaryApplication;
+            this.server = server;
+            this.serverCall = serverCall;
+            this.externalConnection = externalConnection;
+            this.global = global;
+            this.privileged = privileged;
+            this.returnValuesReuse = returnValuesReuse;
+        }
+
+        void applyTo(CommonModule module)
+        {
+            module.setClientManagedApplication(clientManagedApplication);
+            module.setClientOrdinaryApplication(clientOrdinaryApplication);
+            module.setServer(server);
+            module.setServerCall(serverCall);
+            module.setExternalConnection(externalConnection);
+            module.setGlobal(global);
+            module.setPrivileged(privileged);
+            module.setReturnValuesReuse(returnValuesReuse);
+        }
+
+        /**
+         * Resolves the flag combination from the tool parameters, validating that the requested
+         * kind/modifier combination has a standards-compliant (validator-accepted) flag combination.
+         *
+         * @param params the tool parameters
+         * @return the resolved flags
+         * @throws IllegalArgumentException with a clear English message if the requested combination
+         *             is unknown or invalid
+         */
+        static CommonModuleFlags resolve(Map<String, String> params)
+        {
+            String kindToken = JsonUtils.extractStringArgument(params, "commonModuleKind"); //$NON-NLS-1$
+            CommonModuleKind kind;
+            if (kindToken == null || kindToken.trim().isEmpty())
+            {
+                kind = CommonModuleKind.SERVER;
+            }
+            else
+            {
+                kind = CommonModuleKind.fromToken(kindToken.trim());
+                if (kind == null)
+                {
+                    throw new IllegalArgumentException("Unknown commonModuleKind '" + kindToken //$NON-NLS-1$
+                        + "'. Supported: " + CommonModuleKind.quotedList() + "."); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+
+            boolean serverCall = JsonUtils.extractBooleanArgument(params, "serverCall", false); //$NON-NLS-1$
+            boolean privileged = JsonUtils.extractBooleanArgument(params, "privileged", false); //$NON-NLS-1$
+            ReturnValuesReuse reuse = parseReuse(JsonUtils.extractStringArgument(params, "returnValuesReuse")); //$NON-NLS-1$
+
+            // ServerCall kind is shorthand for the Server kind + the server-call flag.
+            if (kind == CommonModuleKind.SERVER_CALL)
+            {
+                serverCall = true;
+            }
+
+            // --- Cross-flag validation (clear, actionable messages) ---
+
+            boolean serverSideKind = kind == CommonModuleKind.SERVER
+                || kind == CommonModuleKind.SERVER_CALL
+                || kind == CommonModuleKind.CLIENT_SERVER;
+
+            if (serverCall && !serverSideKind)
+            {
+                throw new IllegalArgumentException("serverCall requires a server kind " //$NON-NLS-1$
+                    + "('Server', 'ServerCall' or 'ClientServer'); it is not valid for kind '" //$NON-NLS-1$
+                    + kind.token() + "'."); //$NON-NLS-1$
+            }
+            if (serverCall && kind == CommonModuleKind.GLOBAL)
+            {
+                throw new IllegalArgumentException("serverCall is incompatible with the 'Global' kind."); //$NON-NLS-1$
+            }
+            if (privileged && kind != CommonModuleKind.SERVER)
+            {
+                throw new IllegalArgumentException("privileged requires the 'Server' kind " //$NON-NLS-1$
+                    + "(a privileged server module that is not a server call); it is not valid for kind '" //$NON-NLS-1$
+                    + kind.token() + "'."); //$NON-NLS-1$
+            }
+            if (privileged && serverCall)
+            {
+                throw new IllegalArgumentException("privileged is not valid together with serverCall."); //$NON-NLS-1$
+            }
+            if (privileged && reuse != ReturnValuesReuse.DONT_USE)
+            {
+                throw new IllegalArgumentException("privileged is not valid together with returnValuesReuse."); //$NON-NLS-1$
+            }
+
+            // returnValuesReuse only produces a validator-accepted module when it is either DontUse,
+            // or DuringSession on a kind that has a cached variant (Server, ServerCall, ClientManaged,
+            // ClientOrdinary). DuringRequest and reuse on Global/ClientServer have no canonical combo.
+            if (reuse != ReturnValuesReuse.DONT_USE)
+            {
+                if (reuse == ReturnValuesReuse.DURING_REQUEST)
+                {
+                    throw new IllegalArgumentException("returnValuesReuse 'DuringRequest' has no " //$NON-NLS-1$
+                        + "standards-compliant common-module combination; use 'DuringSession' for a " //$NON-NLS-1$
+                        + "cached module, or 'DontUse'."); //$NON-NLS-1$
+                }
+                boolean reuseKind = kind == CommonModuleKind.SERVER
+                    || kind == CommonModuleKind.SERVER_CALL
+                    || kind == CommonModuleKind.CLIENT_MANAGED
+                    || kind == CommonModuleKind.CLIENT_ORDINARY;
+                if (!reuseKind)
+                {
+                    throw new IllegalArgumentException("returnValuesReuse 'DuringSession' is only valid " //$NON-NLS-1$
+                        + "for the 'Server', 'ServerCall', 'ClientManaged' or 'ClientOrdinary' kinds; " //$NON-NLS-1$
+                        + "it is not valid for kind '" + kind.token() + "'."); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+
+            // --- Map (kind, modifiers) to a canonical, validator-accepted combo ---
+            // Flags order: clientManaged, clientOrdinary, server, serverCall, externalConnection,
+            // global, privileged, reuse.
+
+            boolean cached = reuse == ReturnValuesReuse.DURING_SESSION;
+
+            switch (kind)
+            {
+            case SERVER:
+            case SERVER_CALL:
+                if (privileged)
+                {
+                    // SERVER_FULL_ACCESS: server-only, privileged.
+                    return new CommonModuleFlags(kind, false, false, true, false, false, false, true,
+                        ReturnValuesReuse.DONT_USE);
+                }
+                if (serverCall)
+                {
+                    // SERVER_CALL / SERVER_CALL_CACHED: server + server call, no client flags.
+                    return new CommonModuleFlags(kind, false, false, true, true, false, false, false,
+                        cached ? ReturnValuesReuse.DURING_SESSION : ReturnValuesReuse.DONT_USE);
+                }
+                // SERVER / SERVER_CACHED: client ordinary + external connection + server.
+                return new CommonModuleFlags(kind, false, true, true, false, true, false, false,
+                    cached ? ReturnValuesReuse.DURING_SESSION : ReturnValuesReuse.DONT_USE);
+
+            case CLIENT_MANAGED:
+            case CLIENT_ORDINARY:
+                // CLIENT / CLIENT_CACHED: both client flags set (the canonical client module).
+                return new CommonModuleFlags(kind, true, true, false, false, false, false, false,
+                    cached ? ReturnValuesReuse.DURING_SESSION : ReturnValuesReuse.DONT_USE);
+
+            case CLIENT_SERVER:
+                // CLIENT_SERVER: both client flags + server + external connection.
+                return new CommonModuleFlags(kind, true, true, true, false, true, false, false,
+                    ReturnValuesReuse.DONT_USE);
+
+            case GLOBAL:
+                // CLIENT_GLOBAL: both client flags + global.
+                return new CommonModuleFlags(kind, true, true, false, false, false, true, false,
+                    ReturnValuesReuse.DONT_USE);
+
+            default:
+                throw new IllegalArgumentException("Unsupported commonModuleKind: " + kind.token()); //$NON-NLS-1$
+            }
+        }
+
+        private static ReturnValuesReuse parseReuse(String value)
+        {
+            if (value == null || value.trim().isEmpty())
+            {
+                return ReturnValuesReuse.DONT_USE;
+            }
+            String normalized = value.trim();
+            if ("DontUse".equalsIgnoreCase(normalized)) //$NON-NLS-1$
+            {
+                return ReturnValuesReuse.DONT_USE;
+            }
+            if ("DuringRequest".equalsIgnoreCase(normalized)) //$NON-NLS-1$
+            {
+                return ReturnValuesReuse.DURING_REQUEST;
+            }
+            if ("DuringSession".equalsIgnoreCase(normalized)) //$NON-NLS-1$
+            {
+                return ReturnValuesReuse.DURING_SESSION;
+            }
+            throw new IllegalArgumentException("Unknown returnValuesReuse '" + value //$NON-NLS-1$
+                + "'. Supported: 'DontUse', 'DuringRequest', 'DuringSession'."); //$NON-NLS-1$
+        }
     }
 }

@@ -733,6 +733,67 @@ def test_create_every_top_type():
         assert_contains(d.text, name, "MODEL read-back: %s.%s present" % (t, name))
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# M2 — create-time-only, type-specific options (CommonModule presets, XDTO namespace)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_xdto_package_with_target_namespace():
+    # XDTOPackage needs a non-empty namespace to be valid; the targetNamespace arg sets it and
+    # the create echoes it back. The namespace also lands in the package's own .mdo on disk.
+    name = "E2EXdtoNs"
+    ns = "http://example.org/e2e/%s" % name
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "XDTOPackage." + name,
+        "targetNamespace": ns,
+    })
+    assert_ok(r, "create XDTOPackage.%s with targetNamespace" % name)
+    assert r.structured.get("action") == "created", "must report created: %r" % (r.structured,)
+    assert r.structured.get("targetNamespace") == ns, \
+        "the create must echo the written XDTO namespace: %r" % (r.structured,)
+    assert_contains(_objects_text("xDTOPackages"), name,
+                    "the new XDTO package must appear in the model read-back")
+    poll_diff_contains(ns, ctx="the targetNamespace must land in the XDTOPackage .mdo on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_common_module_server_call_preset_sets_flags():
+    # commonModuleKind=ServerCall maps to the canonical server + server-call flag combo the
+    # common-module-type validator accepts. Verify the resolved flags via get_metadata_details.
+    name = "E2ECMServerCall"
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "CommonModule." + name,
+        "commonModuleKind": "ServerCall",
+    })
+    assert_ok(r, "create CommonModule.%s with commonModuleKind=ServerCall" % name)
+    assert r.structured.get("commonModuleKind") == "ServerCall", \
+        "the create must echo the resolved CommonModule kind: %r" % (r.structured,)
+
+    d = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": ["CommonModule." + name]})
+    assert_ok(d, "read-back CommonModule.%s flags" % name)
+    # A ServerCall module is server-side AND a server call, with no client flags set.
+    assert_contains(d.text, "ServerCall", "the read-back must show the server-call flag")
+    assert_contains(d.text, "Server", "the read-back must show the server-side flag")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_common_module_illegal_flag_combo_is_error():
+    # serverCall on a pure client kind has no validator-accepted combo and is rejected up front,
+    # before any model change (the validator would otherwise flag an arbitrary flag set).
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "CommonModule.E2EShouldNotExist",
+        "commonModuleKind": "ClientManaged",
+        "serverCall": True,
+    })
+    e = assert_error(r, "illegal CommonModule flag combo")
+    assert_error_quality(e, names=["serverCall"], suggests=["Server"],
+                         ctx="an illegal flag combo must be a clean, actionable error")
+    assert_no_diff("a rejected create must not change the project")
+
+
 @e2e_test(tool="create_metadata", kind="write-metadata")
 def test_unknown_type_token_is_error():
     # A gibberish type token cannot resolve a create target.

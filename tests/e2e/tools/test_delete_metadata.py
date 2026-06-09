@@ -315,6 +315,94 @@ def test_delete_form_missing_member_is_error():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Reference blocking + force override (the M1 graft). An object still referenced
+# by other metadata the refactoring CANNOT auto-clean must BLOCK a confirm=true
+# delete (action='blocked', success=false) unless force=true is also passed, in
+# which case the object is deleted and the incoming reference is left dangling.
+# Setup: a fresh Catalog referenced by an attribute Type on Catalog.Catalog.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_referenced_catalog(cat, ref_attr):
+    """Create Catalog.<cat>, then an attribute on Catalog.Catalog whose Type points at it.
+    Deleting Catalog.<cat> is then blocked by that incoming metadata reference."""
+    cr = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat})
+    assert_ok(cr, "seed catalog to be referenced: " + cat)
+    wait_for_project_ready()
+    ca = call("create_metadata", {"projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + ref_attr})
+    assert_ok(ca, "seed the referencing attribute: " + ref_attr)
+    wait_for_project_ready()
+    st = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Attribute." + ref_attr,
+        "properties": [{"name": "type", "value": {"types": [{"kind": "CatalogRef", "ref": cat}]}}],
+    })
+    assert_ok(st, "point the attribute Type at Catalog." + cat)
+    wait_for_project_ready()
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_confirm_without_force_is_blocked_by_incoming_reference():
+    # The referenced catalog cannot be deleted while an attribute Type still points at it.
+    cat, ref_attr = "E2EBlockedCat", "E2ERefAttr"
+    _seed_referenced_catalog(cat, ref_attr)
+
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat, "confirm": True})
+    e = assert_error(r, "delete a still-referenced catalog without force must be blocked")
+    assert_error_quality(e, names=[cat], suggests=["referenced", "force"],
+                         ctx="a blocked delete names the target and points at force=true")
+    # Structured envelope marks the block and lists the referencer.
+    assert r.structured is not None, "a JSON tool must return structuredContent on a blocked delete"
+    assert r.structured.get("action") == "blocked", \
+        "a still-referenced confirm=true delete without force must be blocked: %r" % (r.structured,)
+    assert (r.structured.get("blockingReferencesCount") or 0) >= 1, \
+        "the blocked delete must report at least one blocking reference: %r" % (r.structured,)
+    # The object must SURVIVE and nothing must be written.
+    assert_contains(_list_catalogs(), "| " + cat + " ",
+                    "a blocked delete must NOT remove the still-referenced catalog")
+    assert_no_diff("a blocked delete must not touch the project on disk")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_force_deletes_referenced_object_leaving_dangling_reference():
+    # force=true overrides the reference block: the catalog is deleted, the attribute Type is
+    # left dangling (the refactoring did not auto-clean it).
+    cat, ref_attr = "E2EForceCat", "E2EForceRefAttr"
+    _seed_referenced_catalog(cat, ref_attr)
+
+    r = call("delete_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog." + cat, "confirm": True, "force": True,
+    })
+    assert_ok(r, "force-delete a still-referenced catalog")
+    assert r.structured.get("action") == "executed", \
+        "force=true must take the execute branch even when referenced: %r" % (r.structured,)
+    assert r.structured.get("forced") is True, "a forced delete must echo forced=true: %r" % (r.structured,)
+    # The catalog is gone from the model and disk; its sibling Catalog.Catalog survives.
+    after = _list_catalogs()
+    assert_not_contains(after, "| " + cat + " ", "force=true must remove Catalog." + cat)
+    assert_contains(after, "| Catalog ", "the referencing Catalog.Catalog must survive a forced delete")
+    poll_disk_path_gone("src/Catalogs/%s/%s.mdo" % (cat, cat),
+                        ctx="a forced delete must remove the object's own .mdo from disk")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_preview_flags_blocking_reference_without_mutating():
+    # The preview (confirm omitted) must surface the blocking reference so a caller sees what
+    # would block, and must NOT mutate the project.
+    cat, ref_attr = "E2EPreviewBlockCat", "E2EPreviewRefAttr"
+    _seed_referenced_catalog(cat, ref_attr)
+
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat})
+    assert_ok(r, "preview a still-referenced catalog delete")
+    assert r.structured.get("action") == "preview", "absent confirm must preview: %r" % (r.structured,)
+    assert r.structured.get("blocking") is True, \
+        "the preview must mark a still-referenced node as blocking: %r" % (r.structured,)
+    assert (r.structured.get("blockingReferencesCount") or 0) >= 1, \
+        "the preview must list the blocking reference: %r" % (r.structured,)
+    assert_contains(_list_catalogs(), "| " + cat + " ", "a preview must NOT delete the catalog")
+    assert_no_diff("a preview must not touch the project on disk")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Negative matrix — bad input must error clearly AND change nothing
 # ──────────────────────────────────────────────────────────────────────────────
 
