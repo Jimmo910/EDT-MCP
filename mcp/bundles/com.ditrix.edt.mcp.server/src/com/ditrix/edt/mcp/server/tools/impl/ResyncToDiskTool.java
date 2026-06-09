@@ -232,9 +232,11 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
         DanglingResult dangling =
             cleanDanglingReferences(ctx.config, bmModel, ctx.project, cleanDangling);
 
-        // Step 6 (optional, best-effort): refresh stale validation markers.
+        // Step 6 (optional, best-effort): refresh stale validation markers. Only run
+        // when the export actually succeeded - a failed export must not then trigger a
+        // full clean build.
         String revalidateWarning = null;
-        if (revalidate)
+        if (revalidate && exported)
         {
             try
             {
@@ -247,7 +249,16 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             }
         }
 
-        ToolResult result = ToolResult.success();
+        // The force-export swallows failures and returns false (unresolved
+        // services/project, or the export threw). Report success:false when an export
+        // was expected (FQNs were collected) but did not run/succeed, so the caller is
+        // not misled by a success envelope. With nothing to export (0 FQNs) it is a
+        // genuine in-sync no-op and stays success:true.
+        boolean exportFailed = !exported && !allFqns.isEmpty();
+        ToolResult result = exportFailed
+            ? ToolResult.error("Force-export to disk did not run or failed (services/project/FQN " //$NON-NLS-1$
+                + "unresolved or export threw); see message/objectsExported") //$NON-NLS-1$
+            : ToolResult.success();
         result.put("projectName", projectName) //$NON-NLS-1$
             .put("objectsExported", exported ? allFqns.size() : 0) //$NON-NLS-1$
             .put("totalTopObjects", allFqns.size()) //$NON-NLS-1$
