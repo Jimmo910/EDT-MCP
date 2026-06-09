@@ -21,14 +21,17 @@ Control:
 
 - `timeout` — polling window in seconds (default 60). See ## Polling and Pending.
 - `updateBeforeLaunch` — auto-chain, default `true`. See ## Auto-chain.
+- `updateScope` — which projects to force-recompute + update before the run when `updateBeforeLaunch=true`: `all` (configuration + dependent extensions, default), `configuration`, or `extension:<ProjectName>` (comma-separate several). See ## Auto-chain.
 
 ## Polling and Pending
 
-The tool polls for up to `timeout` seconds. If the launch finishes in that window it returns the parsed JUnit report. If the window expires while the launch is still running it returns **Pending** and does NOT terminate the launch. Call the tool again with the SAME arguments to keep waiting and fetch the result once the launch completes. A run key is derived from the config name plus the filter, so identical arguments reattach to the in-flight launch instead of starting a new one. A fresh report (under a few minutes old) is served from cache.
+The tool polls for up to `timeout` seconds. If the launch finishes in that window it returns the parsed JUnit report. If the window expires while the launch is still running it returns **Pending** and does NOT terminate the launch. Call the tool again with the SAME arguments to keep waiting and fetch the result once the launch completes. A run key is derived from the config name plus the filter, so identical arguments reattach to the in-flight launch instead of starting a new one. A fresh report (under a few minutes old) is served from cache ONLY when `updateBeforeLaunch=false`; with the default `updateBeforeLaunch=true` the cache is bypassed so a freshly edited test always re-runs (an in-flight launch is still reattached, never restarted).
 
 ## Auto-chain (updateBeforeLaunch)
 
-Default `true`: before spawning a new test launch, the tool politely terminates any live 1C client running this configuration and runs a silent database update — so EDT's launch delegate does not pop its modal 'Update database?' dialog that would otherwise block the MCP call. Set `false` to keep legacy behaviour (the delegate decides; the dialog may appear and block). If pre-launch preparation fails because a previous launch is stuck, call `terminate_launch` with `force=true` and retry.
+Default `true`: before spawning a new test launch, the tool FORCES a derived-data recompute (`recomputeAll`) of the project AND its dependent EXTENSION (`.cfe`) projects, waits for the workspace build and derived data to settle, politely terminates any live 1C client running this configuration, then runs a silent database update — so a test you just edited inside an extension is force-rebuilt and its regenerated `.cfe` is loaded into the infobase before the run (not executed stale), and EDT's launch delegate does not pop its modal 'Update database?' dialog that would otherwise block the MCP call. It then waits until the infobase actually reports UPDATED (via EDT's own update-state event) before starting; if the IB cannot be brought in sync in time it REFUSES to run with a clear out-of-sync error rather than producing a stale-green result. Set `false` to keep legacy behaviour (the delegate decides; the dialog may appear and block; no extension-rebuild, so a freshly edited extension may run stale). If pre-launch preparation fails because a previous launch is stuck, call `terminate_launch` with `force=true` and retry.
+
+`updateScope` narrows the recompute+update: `all` (default) covers the configuration plus its dependent extensions; `configuration` covers just the launch project; `extension:<ProjectName>` (comma-separate several) covers the configuration plus only the named extension project(s) — the fast path when only one extension changed. The configuration project is always included, since an extension cannot reach the infobase without its parent configuration.
 
 ## Debug mode (debug=true)
 

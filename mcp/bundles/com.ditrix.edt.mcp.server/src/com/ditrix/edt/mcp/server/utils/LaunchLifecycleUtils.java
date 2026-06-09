@@ -6,10 +6,18 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.NullProgressMonitor;
@@ -20,6 +28,12 @@ import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
+import com._1c.g5.v8.derived.IDerivedDataManager;
+import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IDtProjectManager;
+import com._1c.g5.v8.dt.core.platform.IExtensionProject;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.preferences.ToolParameterSettings;
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -27,6 +41,8 @@ import com.e1c.g5.dt.applications.ApplicationUpdateState;
 import com.e1c.g5.dt.applications.ApplicationUpdateType;
 import com.e1c.g5.dt.applications.ExecutionContext;
 import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationEvent.ApplicationEventType;
+import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
@@ -56,6 +72,148 @@ public final class LaunchLifecycleUtils
      * practice (one per EDT launch configuration).
      */
     private static final ConcurrentMap<String, Object> KEY_LOCKS = new ConcurrentHashMap<>();
+
+    /** Production default for {@link #syncSettleWindowMs}: 5 seconds. */
+    static final long DEFAULT_SYNC_SETTLE_WINDOW_MS = 5000L;
+
+    /** Production default for {@link #syncApplyTimeoutMs}: 120 seconds. */
+    static final long DEFAULT_SYNC_APPLY_TIMEOUT_MS = 120_000L;
+
+    /** Production default for {@link #syncPollIntervalMs}: 500 ms. */
+    static final long DEFAULT_SYNC_POLL_INTERVAL_MS = 500L;
+
+    /**
+     * Bounded window (ms) during which, right after a forced derived-data
+     * recompute, we wait for EDT's {@link ApplicationEventType#UPDATE_STATE_CHANGED}
+     * event even though {@link IApplicationManager#getUpdateState} currently reads
+     * {@link ApplicationUpdateState#UPDATED}, so a lagging {@code …UPDATE_REQUIRED}
+     * desync flag pushed by that event has a chance to surface before we decide
+     * "no update needed" (bug #19925: the cached {@code getUpdateState} flag lags
+     * the just-regenerated extension {@code .cfe}, so an entry short-circuit on a
+     * stale {@code UPDATED} skips the update and the run executes a stale IB).
+     *
+     * <p>Mutable only so unit tests can shrink the timing windows for speed and
+     * determinism (see {@link #setSyncTimingsForTest}); production code never
+     * reassigns it.
+     */
+    static volatile long syncSettleWindowMs = DEFAULT_SYNC_SETTLE_WINDOW_MS;
+
+    /**
+     * Generous upper bound (ms) for blocking until the infobase has actually
+     * applied the configuration/extension changes — i.e. an
+     * {@link ApplicationEventType#UPDATE_STATE_CHANGED} event reports (or
+     * {@link IApplicationManager#getUpdateState} confirms)
+     * {@link ApplicationUpdateState#UPDATED} after we issue
+     * {@link IApplicationManager#update}. {@code update(...)} may return before
+     * the DB application completes (async / {@code BEING_UPDATED}), so awaiting
+     * the event is the real gate that prevents starting a run against a
+     * not-yet-applied IB.
+     *
+     * <p>Mutable only for tests (see {@link #setSyncTimingsForTest}).
+     */
+    static volatile long syncApplyTimeoutMs = DEFAULT_SYNC_APPLY_TIMEOUT_MS;
+
+    /**
+     * Re-check interval (ms) used as a safety net inside the event-driven await:
+     * even while blocked on the listener latch, we wake every {@code syncPollIntervalMs}
+     * to re-read {@link IApplicationManager#getUpdateState} once, in case an event
+     * was missed (e.g. fired between the initial read and listener registration).
+     * Half a second balances responsiveness against churn; the primary signal is
+     * the {@link ApplicationEventType#UPDATE_STATE_CHANGED} event, not this poll.
+     *
+     * <p>Mutable only for tests (see {@link #setSyncTimingsForTest}).
+     */
+    static volatile long syncPollIntervalMs = DEFAULT_SYNC_POLL_INTERVAL_MS;
+
+    /**
+     * Test hook: overrides the infobase-sync timing windows so unit tests run
+     * fast and deterministically. Not part of the public API.
+     */
+    static void setSyncTimingsForTest(long settleWindowMs, long applyTimeoutMs, long pollIntervalMs)
+    {
+        syncSettleWindowMs = settleWindowMs;
+        syncApplyTimeoutMs = applyTimeoutMs;
+        syncPollIntervalMs = pollIntervalMs;
+    }
+
+    /** Test hook: restores the production sync timing windows. */
+    static void resetSyncTimingsForTest()
+    {
+        syncSettleWindowMs = DEFAULT_SYNC_SETTLE_WINDOW_MS;
+        syncApplyTimeoutMs = DEFAULT_SYNC_APPLY_TIMEOUT_MS;
+        syncPollIntervalMs = DEFAULT_SYNC_POLL_INTERVAL_MS;
+    }
+
+    /**
+     * Classification of an {@link ApplicationUpdateState} from the perspective
+     * of "is the infobase in sync with the (recomputed) project/extension
+     * configuration?". This is the same notion that raises EDT's interactive
+     * "Update database?" dialog. Kept as a small pure helper so the
+     * synced / needs-update / in-progress decision is unit-testable without an
+     * EDT runtime.
+     */
+    enum SyncCategory
+    {
+        /** Infobase matches the project: {@link ApplicationUpdateState#UPDATED}. */
+        SYNCED,
+        /**
+         * Infobase is out of sync and a (full or incremental) update is
+         * required: {@link ApplicationUpdateState#INCREMENTAL_UPDATE_REQUIRED}
+         * or {@link ApplicationUpdateState#FULL_UPDATE_REQUIRED}.
+         */
+        NEEDS_UPDATE,
+        /** An update is running right now: {@link ApplicationUpdateState#BEING_UPDATED}. */
+        IN_PROGRESS,
+        /**
+         * State is {@link ApplicationUpdateState#UNKNOWN} (or {@code null}).
+         * Treated conservatively as "not yet known to be synced" so the caller
+         * keeps waiting / does not claim a stale-green success.
+         */
+        UNKNOWN
+    }
+
+    /**
+     * Classifies an {@link ApplicationUpdateState} into a {@link SyncCategory}.
+     * Pure and null-safe ({@code null} → {@link SyncCategory#UNKNOWN}).
+     */
+    static SyncCategory classify(ApplicationUpdateState state)
+    {
+        if (state == null)
+        {
+            return SyncCategory.UNKNOWN;
+        }
+        switch (state)
+        {
+        case UPDATED:
+            return SyncCategory.SYNCED;
+        case INCREMENTAL_UPDATE_REQUIRED:
+        case FULL_UPDATE_REQUIRED:
+            return SyncCategory.NEEDS_UPDATE;
+        case BEING_UPDATED:
+            return SyncCategory.IN_PROGRESS;
+        case UNKNOWN:
+        default:
+            return SyncCategory.UNKNOWN;
+        }
+    }
+
+    /** {@code true} iff {@code state} means the IB is in sync (no update needed). */
+    static boolean isSynced(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.SYNCED;
+    }
+
+    /** {@code true} iff {@code state} means the IB requires a (full/incremental) update. */
+    static boolean needsUpdate(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.NEEDS_UPDATE;
+    }
+
+    /** {@code true} iff an update is currently in progress for the IB. */
+    static boolean isInProgress(ApplicationUpdateState state)
+    {
+        return classify(state) == SyncCategory.IN_PROGRESS;
+    }
 
     /**
      * Set of {@link ILaunch} instances that any MCP tool currently owns via
@@ -235,6 +393,293 @@ public final class LaunchLifecycleUtils
     }
 
     /**
+     * Waits for the incremental build and derived-data computations of the
+     * launch's project <em>and every extension project that depends on it</em>
+     * to settle before the pre-launch DB update runs.
+     *
+     * <p>This closes the race behind bug #19925: after a test module inside an
+     * <strong>extension</strong> ({@code .cfe}) is edited, EDT schedules an
+     * asynchronous incremental rebuild of that extension. The rebuild lives in a
+     * <em>separate</em> {@link IProject} from the launch's configuration project,
+     * so the application's update state can read "ready" while the extension is
+     * still being rebuilt and exported. The pre-launch update then either no-ops
+     * or pushes the stale {@code .cfe} into the infobase, so the first test run
+     * executes the old extension and a freshly added test is silently missing —
+     * only a second run (after the rebuild settled) picks it up.
+     *
+     * <p>Thin wrapper over {@link #recomputeAndSettle(Collection)} for the full
+     * launch-project-plus-extensions scope, preserved so existing callers/tests
+     * keep working. Prefer {@link #recomputeAndSettle(Collection)} +
+     * {@link #resolveUpdateScope(IProject, String)} for a narrowable scope.
+     *
+     * @param launchProject the configuration project the launch targets
+     */
+    public static void waitForLaunchBuildSettled(IProject launchProject)
+    {
+        if (launchProject == null || !launchProject.exists() || !launchProject.isOpen())
+        {
+            return;
+        }
+        recomputeAndSettle(collectLaunchAndExtensionProjects(launchProject));
+    }
+
+    /**
+     * Forces a derived-data recompute of the given projects and then waits for the
+     * workspace build and per-project derived data to settle, so a freshly edited
+     * <strong>extension</strong> ({@code .cfe}) is regenerated and exported to disk
+     * before the pre-launch DB update reads the application's update state.
+     *
+     * <p>This is the FORCE lever bug #19925 needs. The previous pre-launch chain
+     * only <em>waited</em> for derived data, but the wait returns immediately when
+     * nothing is scheduled — so a stale extension {@code .cfe} was never
+     * regenerated and {@code appManager.update(...)} simply consumed the existing
+     * (stale) export artifact. {@link IDerivedDataManager#recomputeAll()} (exactly
+     * what {@code refresh_model} uses) forces the extension's model — and thus its
+     * {@code .cfe} — to be rebuilt before the update.
+     *
+     * <p>Sequence:
+     * <ol>
+     *   <li>schedule {@code recomputeAll()} for EVERY project first (so all rebuilds
+     *       are queued before we start blocking on any of them);</li>
+     *   <li>drain the workspace-wide build job families once via
+     *       {@link BuildUtils#waitForBuildJobs};</li>
+     *   <li>wait on each project's derived data via {@link BuildUtils#waitForDerivedData}.</li>
+     * </ol>
+     *
+     * <p>Null-safe and defensive: a {@code null}/closed project, or unavailable EDT
+     * services ({@code IDtProjectManager}, {@code IDerivedDataManagerProvider}, the
+     * per-project {@code IDtProject} or {@code IDerivedDataManager}), make the
+     * recompute a per-project no-op. Nothing here is allowed to throw into the
+     * launch hot path — failures are logged and the loop continues.
+     *
+     * @param projects projects to force-recompute and settle (may be {@code null} or
+     *            contain {@code null}/closed entries — all skipped)
+     */
+    public static void recomputeAndSettle(Collection<IProject> projects)
+    {
+        if (projects == null || projects.isEmpty())
+        {
+            return;
+        }
+
+        // Phase 1: schedule a forced recompute for every open project up front,
+        // so all extension rebuilds are queued before we start blocking. This is
+        // the same provider/manager access pattern RefreshModelTool uses.
+        for (IProject project : projects)
+        {
+            if (project == null || !project.exists() || !project.isOpen())
+            {
+                continue;
+            }
+            try
+            {
+                if (Activator.getDefault() == null)
+                {
+                    continue;
+                }
+                IDtProjectManager dtProjectManager = Activator.getDefault().getDtProjectManager();
+                if (dtProjectManager == null)
+                {
+                    continue;
+                }
+                IDtProject dtProject = dtProjectManager.getDtProject(project);
+                if (dtProject == null)
+                {
+                    continue;
+                }
+                IDerivedDataManagerProvider ddProvider =
+                    Activator.getDefault().getDerivedDataManagerProvider();
+                if (ddProvider == null)
+                {
+                    continue;
+                }
+                IDerivedDataManager ddManager = ddProvider.get(dtProject);
+                if (ddManager == null)
+                {
+                    continue;
+                }
+                Activator.logInfo("Pre-launch: forcing derived-data recompute for project: " //$NON-NLS-1$
+                    + project.getName());
+                ddManager.recomputeAll();
+            }
+            catch (RuntimeException e)
+            {
+                // A recompute failure must never abort the launch — log and move on.
+                Activator.logError("Error forcing derived-data recompute for " //$NON-NLS-1$
+                    + project.getName(), e);
+            }
+        }
+
+        // Phase 2: drain the workspace-wide build job families once. This is not
+        // project-scoped, so it covers the extension's incremental rebuild
+        // regardless of which project owns it.
+        BuildUtils.waitForBuildJobs(new NullProgressMonitor());
+
+        // Phase 3: wait on each project's derived data so the recomputed model
+        // (and the regenerated .cfe) is fully exported before the DB update runs.
+        for (IProject project : projects)
+        {
+            if (project == null || !project.exists() || !project.isOpen())
+            {
+                continue;
+            }
+            BuildUtils.waitForDerivedData(project);
+        }
+    }
+
+    /**
+     * Resolves which projects the pre-launch recompute+update should cover, from
+     * the optional {@code updateScope} tool parameter.
+     * <ul>
+     *   <li>{@code null} / empty / {@code "all"} (case-insensitive) → the full list
+     *       from {@link #collectLaunchAndExtensionProjects(IProject)} (launch project
+     *       first, then its dependent extensions);</li>
+     *   <li>{@code "configuration"} (case-insensitive) → just {@code [launchProject]};</li>
+     *   <li>{@code "extension:<Name>"} or a comma-separated list of such tokens →
+     *       {@code launchProject} PLUS only the dependent extension projects whose
+     *       {@link IExtensionProject#getProject()} name equals a requested
+     *       {@code <Name>}. The launch (configuration) project is ALWAYS included,
+     *       because an extension cannot reach the infobase without its parent
+     *       configuration present. Unknown names are ignored (the configuration is
+     *       still recomputed); callers may note them.</li>
+     * </ul>
+     *
+     * <p>Null-safe: a {@code null} {@code launchProject} yields an empty list.
+     * The launch (configuration) project is always first in the returned list.
+     *
+     * @param launchProject the configuration project the launch targets
+     * @param updateScope the raw {@code updateScope} parameter value (may be {@code null})
+     * @return ordered, de-duplicated project list (configuration first)
+     */
+    public static List<IProject> resolveUpdateScope(IProject launchProject, String updateScope)
+    {
+        if (launchProject == null)
+        {
+            return new ArrayList<>();
+        }
+
+        String scope = updateScope != null ? updateScope.trim() : ""; //$NON-NLS-1$
+        if (scope.isEmpty() || "all".equalsIgnoreCase(scope)) //$NON-NLS-1$
+        {
+            return collectLaunchAndExtensionProjects(launchProject);
+        }
+        if ("configuration".equalsIgnoreCase(scope)) //$NON-NLS-1$
+        {
+            List<IProject> only = new ArrayList<>();
+            only.add(launchProject);
+            return only;
+        }
+
+        // "extension:<Name>" tokens (comma-separated). Collect the requested
+        // extension names case-sensitively (project names are case-sensitive on
+        // Linux), then keep only the dependent extensions whose project name
+        // matches. The configuration project is always included first.
+        Set<String> requested = new LinkedHashSet<>();
+        for (String token : scope.split(",")) //$NON-NLS-1$
+        {
+            String trimmed = token.trim();
+            if (trimmed.isEmpty())
+            {
+                continue;
+            }
+            // Accept "extension:<Name>"; tolerate a bare name as the same intent.
+            int colon = trimmed.indexOf(':');
+            if (colon >= 0)
+            {
+                String prefix = trimmed.substring(0, colon).trim();
+                String name = trimmed.substring(colon + 1).trim();
+                if ("extension".equalsIgnoreCase(prefix) && !name.isEmpty()) //$NON-NLS-1$
+                {
+                    requested.add(name);
+                }
+            }
+            else
+            {
+                requested.add(trimmed);
+            }
+        }
+
+        Set<IProject> projects = new LinkedHashSet<>();
+        projects.add(launchProject);
+        if (requested.isEmpty())
+        {
+            // Scope referenced no parseable extension name — degrade to just the
+            // configuration (which is always rebuilt) rather than the full scope.
+            return new ArrayList<>(projects);
+        }
+        for (IProject project : collectLaunchAndExtensionProjects(launchProject))
+        {
+            if (project == null || launchProject.equals(project))
+            {
+                continue;
+            }
+            if (requested.contains(project.getName()))
+            {
+                projects.add(project);
+            }
+        }
+        return new ArrayList<>(projects);
+    }
+
+    /**
+     * Returns the launch's project followed by every open extension project whose
+     * parent configuration project is the launch's project. Order is preserved
+     * and duplicates removed; the launch project is always first.
+     *
+     * <p>Extensions are discovered via {@link IV8ProjectManager} —
+     * {@link IExtensionProject#getParentProject()} links an extension back to the
+     * configuration project it extends. When the project manager is unavailable
+     * (headless tests, early startup) the list degrades gracefully to just the
+     * launch project, so the build wait is still performed for it.
+     */
+    static List<IProject> collectLaunchAndExtensionProjects(IProject launchProject)
+    {
+        Set<IProject> projects = new LinkedHashSet<>();
+        projects.add(launchProject);
+
+        IV8ProjectManager projectManager = Activator.getDefault() != null
+            ? Activator.getDefault().getV8ProjectManager() : null;
+        if (projectManager == null)
+        {
+            return new ArrayList<>(projects);
+        }
+        try
+        {
+            Collection<IExtensionProject> extensions =
+                projectManager.getProjects(IExtensionProject.class);
+            if (extensions != null)
+            {
+                for (IExtensionProject extension : extensions)
+                {
+                    if (extension == null)
+                    {
+                        continue;
+                    }
+                    IProject parent = extension.getParentProject();
+                    if (!launchProject.equals(parent))
+                    {
+                        continue;
+                    }
+                    IProject extProject = extension.getProject();
+                    if (extProject != null && extProject.exists() && extProject.isOpen())
+                    {
+                        projects.add(extProject);
+                    }
+                }
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // Discovery is best-effort: a failure here must not abort the launch.
+            // The workspace-wide build join already drained the extension build;
+            // we just skip the per-extension derived-data wait.
+            Activator.logError("Error collecting extension projects for " //$NON-NLS-1$
+                + launchProject.getName(), e);
+        }
+        return new ArrayList<>(projects);
+    }
+
+    /**
      * Resolves the effective application id for a launch: returns {@code applicationId}
      * unchanged when it is set, otherwise falls back to the project's <b>default</b>
      * application id.
@@ -283,14 +728,86 @@ public final class LaunchLifecycleUtils
 
     /**
      * Brings the given application's database to {@link ApplicationUpdateState#UPDATED}
-     * if needed, using the same programmatic path as {@code update_database}.
-     * Skips the work when the state is already {@code UPDATED} or {@code BEING_UPDATED}.
+     * if needed, using the same programmatic path as {@code update_database}, and
+     * <strong>blocks until the infobase has actually applied the change</strong>
+     * (the {@code .cfe}/configuration is live in the DB) before returning success.
      *
-     * <p>Returns {@code Optional.empty()} on success (or no-op); on failure,
-     * returns a populated error message.
+     * <p>This is the hard guarantee bug #19925 needs: never let a YAXUnit run start
+     * while the IB is out of sync with the just-recomputed extension configuration.
+     * The previous version trusted the very first {@code getUpdateState} read and
+     * short-circuited on {@code UPDATED}; but that read is a <em>cached</em> EDT-side
+     * flag that <em>lags</em> the regenerated {@code .cfe} (a manual 1С launch at that
+     * instant shows the "update database?" dialog while the poll still reports
+     * {@code UPDATED}). We now drive the wait off the same authoritative push-style
+     * signal the "Applications" view's {@code ApplicationsDecorator} uses to flip its
+     * out-of-sync "*" star: the {@link ApplicationEventType#UPDATE_STATE_CHANGED} event
+     * delivered by {@link IApplicationManager}. Two phases:
+     * <ol>
+     *   <li><strong>Settle before deciding "no update needed".</strong> If the cheap
+     *       entry read of {@code getUpdateState} is {@code UPDATED} (suspect of lag),
+     *       {@linkplain #awaitUpdateState await} an {@code UPDATE_STATE_CHANGED} event
+     *       carrying a {@code …UPDATE_REQUIRED} state for up to {@link #syncSettleWindowMs};
+     *       if none arrives in that window the IB is treated as genuinely in sync.</li>
+     *   <li><strong>Block until applied.</strong> After issuing
+     *       {@link IApplicationManager#update}, {@linkplain #awaitUpdateState await} the
+     *       {@code UPDATE_STATE_CHANGED→UPDATED} event (treating {@code BEING_UPDATED}
+     *       as "keep waiting") for up to {@link #syncApplyTimeoutMs}. {@code update(...)}
+     *       may return before the DB application completes, so the event — not its
+     *       return value — is the real gate.</li>
+     * </ol>
+     *
+     * <p>If sync is not observed within {@link #syncApplyTimeoutMs}, returns an
+     * explicit, actionable error so the caller ABORTS the run rather than producing a
+     * silent stale-green result.
+     *
+     * <p>Returns {@code Optional.empty()} on success (IB observed {@code UPDATED});
+     * on failure, returns a populated error message. Null-safe (headless: a {@code null}
+     * {@code appManager}/application is reported, never thrown into the launch path).
+     *
+     * <p>This 3-arg overload runs WITHOUT the Phase-A settle wait — it is the plain
+     * "is the IB out of sync?" path used by {@code debug_launch} (and any caller that
+     * did <em>not</em> just force a derived-data recompute). On a genuinely up-to-date
+     * IB ({@code getUpdateState()==UPDATED}) it returns immediately, so a synced
+     * {@code debug_launch} never pays the settle window. The settle-before-decide wait
+     * (warranted only right after a forced recompute, where the cached {@code UPDATED}
+     * flag can lag the just-regenerated {@code .cfe}) is opt-in via the 4-arg overload
+     * with {@code settleAfterPossibleRecompute=true}.
      */
     public static Optional<String> updateApplicationIfNeeded(IProject project, String applicationId,
             IApplicationManager appManager)
+    {
+        return updateApplicationIfNeeded(project, applicationId, appManager, false);
+    }
+
+    /**
+     * Same contract as {@link #updateApplicationIfNeeded(IProject, String, IApplicationManager)},
+     * but with an explicit switch for the Phase-A settle-before-decide wait.
+     *
+     * <p>{@code settleAfterPossibleRecompute} controls the cost/safety trade-off of the
+     * entry {@code UPDATED} reading:
+     * <ul>
+     *   <li>{@code true} — the caller has just run a forced derived-data recompute
+     *       ({@code recomputeAndSettle}), so a cached {@code UPDATED} may LAG the
+     *       freshly regenerated {@code .cfe} (bug #19925). On an entry {@code UPDATED}
+     *       we therefore {@linkplain #awaitUpdateState await} a lagging
+     *       {@code …UPDATE_REQUIRED} event for up to {@link #syncSettleWindowMs} before
+     *       trusting "no update needed". This is the YAXUnit fresh-launch path.</li>
+     *   <li>{@code false} — no recompute happened this call, so a cached {@code UPDATED}
+     *       is authoritative: we return immediately (no settle window). This restores the
+     *       fast path for a plain {@code debug_launch} against an already-synced IB
+     *       (defect: D1's async benefit was undercut by an unconditional ~5s settle).</li>
+     * </ul>
+     *
+     * <p>The {@code BEING_UPDATED} (in-progress) wait and the post-update
+     * block-until-{@code UPDATED} gate are unaffected by this flag — both always run, so
+     * the stale-IB refusal and the half-applied-IB guard stay intact regardless.
+     *
+     * @param settleAfterPossibleRecompute {@code true} to wait out a possibly-lagging
+     *            {@code UPDATED} on entry (YAXUnit post-recompute path); {@code false} to
+     *            trust an entry {@code UPDATED} and return immediately (plain debug_launch)
+     */
+    public static Optional<String> updateApplicationIfNeeded(IProject project, String applicationId,
+            IApplicationManager appManager, boolean settleAfterPossibleRecompute)
     {
         if (appManager == null)
         {
@@ -309,28 +826,56 @@ public final class LaunchLifecycleUtils
                 return Optional.of("Application not found: " + applicationId); //$NON-NLS-1$
             }
             IApplication application = appOpt.get();
+
+            // Phase A — settle before deciding "no update needed". Cheap entry read
+            // of getUpdateState; a stale UPDATED right after the recompute is suspect
+            // because the cached flag lags the just-regenerated .cfe. Instead of
+            // busy-polling that lagging cache, await EDT's UPDATE_STATE_CHANGED event
+            // (the star signal): if a …UPDATE_REQUIRED event arrives within the settle
+            // window we update; if none does, the IB is genuinely in sync.
             ApplicationUpdateState state = appManager.getUpdateState(application);
-            if (state == ApplicationUpdateState.UPDATED)
-            {
-                return Optional.empty();
-            }
-            if (state == ApplicationUpdateState.BEING_UPDATED)
+
+            if (isInProgress(state))
             {
                 // Another caller (or a UI gesture) is already updating this IB.
-                // Wait for it to settle into UPDATED — if we proceeded to launch
-                // now, the delegate could still hit a locked / half-updated IB.
-                long maxMillis = getDefaultTerminateTimeoutSeconds() * 1000L;
-                state = waitForUpdateSettled(appManager, application, maxMillis);
-                if (state == ApplicationUpdateState.UPDATED)
+                // Wait (event-driven) until it actually applies — if we launched now,
+                // the run would execute a half-updated IB.
+                state = awaitUpdateState(appManager, application,
+                    s -> classify(s) == SyncCategory.SYNCED, syncApplyTimeoutMs);
+                if (isSynced(state))
                 {
                     return Optional.empty();
                 }
-                return Optional.of("Another update is in progress and did not " //$NON-NLS-1$
-                    + "settle within " + (maxMillis / 1000) + "s (final state: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + state + "). Retry shortly, or increase the " //$NON-NLS-1$
-                    + "`terminate_launch.timeoutSeconds` preference if your IB " //$NON-NLS-1$
-                    + "updates take longer.");
+                return Optional.of(staleInfobaseError(state));
             }
+
+            if (isSynced(state))
+            {
+                if (!settleAfterPossibleRecompute)
+                {
+                    // No recompute happened this call, so the cached UPDATED is
+                    // authoritative — return immediately (no settle window). This is the
+                    // plain debug_launch / update_database path: a synced IB must not pay
+                    // the ~5s settle wait the YAXUnit recompute path needs (defect D1).
+                    return Optional.empty();
+                }
+                // Post-recompute and suspect of lag: wait briefly for a lagging
+                // …UPDATE_REQUIRED event to arrive. If none does within the settle
+                // window, treat as in sync.
+                ApplicationUpdateState settled = awaitUpdateState(appManager, application,
+                    s -> classify(s) == SyncCategory.NEEDS_UPDATE, syncSettleWindowMs);
+                if (!needsUpdate(settled))
+                {
+                    // Confirmed in sync across the settle window — genuine no-op.
+                    return Optional.empty();
+                }
+                Activator.logInfo("Pre-launch: UPDATE_STATE_CHANGED surfaced " + settled //$NON-NLS-1$
+                    + " after an initial stale UPDATED reading — updating"); //$NON-NLS-1$
+                state = settled;
+            }
+
+            // Phase B — IB needs an update (or state is UNKNOWN). Issue the update,
+            // then await the UPDATE_STATE_CHANGED→UPDATED event before returning.
             ExecutionContext context = new ExecutionContext();
             Shell shell = grabActiveShell();
             if (shell != null)
@@ -341,30 +886,26 @@ public final class LaunchLifecycleUtils
                 + ", stateBefore=" + state); //$NON-NLS-1$
             ApplicationUpdateState after = appManager.update(application,
                 ApplicationUpdateType.INCREMENTAL, context, new NullProgressMonitor());
-            Activator.logInfo("Pre-launch DB update completed: stateAfter=" + after); //$NON-NLS-1$
-            // Post-condition gate: the auto-chain promises the IB will be in
-            // UPDATED state before workingCopy.launch() runs, otherwise the
-            // launch delegate would still see "DB needs update" and pop its
-            // modal dialog — which is exactly what we are trying to avoid.
-            if (after == ApplicationUpdateState.UPDATED)
+            Activator.logInfo("Pre-launch DB update returned: stateAfter=" + after //$NON-NLS-1$
+                + " (now awaiting the UPDATE_STATE_CHANGED→UPDATED event)"); //$NON-NLS-1$
+
+            // Post-condition gate: the auto-chain promises the IB is actually in
+            // UPDATED state (the .cfe applied) before workingCopy.launch() runs.
+            // appManager.update() may return UPDATED, BEING_UPDATED, or even a
+            // still-required state on the async path, so we always await the
+            // UPDATE_STATE_CHANGED→UPDATED event rather than trusting the return value.
+            if (!isSynced(after))
             {
+                after = awaitUpdateState(appManager, application,
+                    s -> classify(s) == SyncCategory.SYNCED, syncApplyTimeoutMs);
+            }
+            if (isSynced(after))
+            {
+                Activator.logInfo("Pre-launch DB update applied: IB is UPDATED for application=" //$NON-NLS-1$
+                    + applicationId);
                 return Optional.empty();
             }
-            if (after == ApplicationUpdateState.BEING_UPDATED)
-            {
-                // appManager.update() returned but the state machine still
-                // reports an update in progress (async path). Wait for it.
-                long maxMillis = getDefaultTerminateTimeoutSeconds() * 1000L;
-                after = waitForUpdateSettled(appManager, application, maxMillis);
-                if (after == ApplicationUpdateState.UPDATED)
-                {
-                    return Optional.empty();
-                }
-            }
-            return Optional.of("Database update finished with state " + after //$NON-NLS-1$
-                + " (expected UPDATED). Inspect the EDT problems view, " //$NON-NLS-1$
-                + "or call `update_database` with `fullUpdate=true` / " //$NON-NLS-1$
-                + "`autoRestructure=true` to handle restructurization, then retry."); //$NON-NLS-1$
+            return Optional.of(staleInfobaseError(after));
         }
         catch (ApplicationException e)
         {
@@ -374,42 +915,190 @@ public final class LaunchLifecycleUtils
     }
 
     /**
-     * Polls {@link IApplicationManager#getUpdateState} until it leaves
-     * {@link ApplicationUpdateState#BEING_UPDATED} or the deadline elapses.
-     * Used when another caller is mid-update — we must not start a launch
-     * against an IB whose update is still running.
+     * Builds the explicit, actionable "infobase is still out of sync" message
+     * returned when the IB does not reach {@link ApplicationUpdateState#UPDATED}
+     * within {@link #syncApplyTimeoutMs}. The point is to ABORT the run rather
+     * than execute it against a not-yet-applied IB (which would yield a stale
+     * green result).
      */
-    private static ApplicationUpdateState waitForUpdateSettled(IApplicationManager appManager,
-            IApplication application, long maxMillis)
+    private static String staleInfobaseError(ApplicationUpdateState finalState)
     {
-        long deadline = System.currentTimeMillis() + maxMillis;
-        ApplicationUpdateState state = ApplicationUpdateState.BEING_UPDATED;
-        while (System.currentTimeMillis() < deadline)
+        return "Infobase is still out of sync (DB requires update; extension changes " //$NON-NLS-1$
+            + "not yet applied) after " + (syncApplyTimeoutMs / 1000) //$NON-NLS-1$
+            + "s (final update state: " + finalState + ") — results would be stale, " //$NON-NLS-1$ //$NON-NLS-2$
+            + "so the run was refused. Retry the run; if it persists, call " //$NON-NLS-1$
+            + "`update_database` (optionally with `fullUpdate=true` / " //$NON-NLS-1$
+            + "`autoRestructure=true`) and inspect the EDT problems view."; //$NON-NLS-1$
+    }
+
+    /**
+     * Waits (event-driven) until the given application's infobase is observed to be
+     * {@link ApplicationUpdateState#UPDATED} (the DB has actually applied the
+     * configuration/extension change), treating {@link ApplicationUpdateState#BEING_UPDATED}
+     * as "keep waiting", up to {@link #syncApplyTimeoutMs}. Public so
+     * {@code update_database} can reuse exactly the same gate the YAXUnit
+     * auto-chain uses: {@code appManager.update(...)} can return before the DB
+     * application finishes, so callers must wait for the observed {@code UPDATED}
+     * before treating the IB as in sync. Wakes on EDT's
+     * {@link ApplicationEventType#UPDATE_STATE_CHANGED} event rather than polling
+     * the lagging cached state (bug #19925).
+     *
+     * <p>Null-safe: a {@code null} {@code appManager}/{@code application} returns
+     * {@link ApplicationUpdateState#UNKNOWN} without throwing.
+     *
+     * @return the last observed state; {@link ApplicationUpdateState#UPDATED} on
+     *         success, otherwise the terminal/last state on timeout
+     */
+    public static ApplicationUpdateState waitForInfobaseApplied(IApplicationManager appManager,
+            IApplication application)
+    {
+        return awaitUpdateState(appManager, application,
+            s -> classify(s) == SyncCategory.SYNCED, syncApplyTimeoutMs);
+    }
+
+    /**
+     * Event-driven await for an application's {@link ApplicationUpdateState}.
+     * Instead of repeatedly reading the <em>cached</em>
+     * {@link IApplicationManager#getUpdateState} (which lags the freshly recomputed
+     * {@code .cfe}), it registers an {@link IApplicationListener} and blocks on EDT's
+     * push-style {@link ApplicationEventType#UPDATE_STATE_CHANGED} event — the very
+     * signal the "Applications" view's {@code ApplicationsDecorator} uses to flip its
+     * out-of-sync "*" star promptly.
+     *
+     * <p>Contract:
+     * <ul>
+     *   <li>BEFORE blocking, reads the current {@code getUpdateState} once (an event
+     *       may already have fired) and returns immediately if {@code done} is
+     *       already satisfied;</li>
+     *   <li>otherwise blocks on a latch up to {@code timeoutMs}, re-evaluating
+     *       {@code done} on every {@code UPDATE_STATE_CHANGED} signal for this
+     *       application, and also waking every {@link #syncPollIntervalMs} to
+     *       re-read {@code getUpdateState} as a safety net against a missed event;</li>
+     *   <li>ALWAYS {@code removeAppllicationListener(...)} in a {@code finally};</li>
+     *   <li>returns the last observed state once {@code done} holds, or the last
+     *       observed state when {@code timeoutMs} elapses.</li>
+     * </ul>
+     *
+     * <p>Null-safe: a {@code null} {@code appManager}/{@code application} (or a
+     * {@code null} {@code done}) returns {@link ApplicationUpdateState#UNKNOWN}
+     * without throwing. Note the EDT API method name carries a real upstream typo —
+     * {@code addAppllicationListener}/{@code removeAppllicationListener} (double "l").
+     *
+     * @param appManager the EDT application manager (event source)
+     * @param application the application whose update state is awaited
+     * @param done predicate that, once satisfied by an observed state, ends the wait
+     * @param timeoutMs maximum time (ms) to wait for {@code done} to be satisfied
+     * @return the last observed {@link ApplicationUpdateState}
+     */
+    static ApplicationUpdateState awaitUpdateState(IApplicationManager appManager,
+            IApplication application, Predicate<ApplicationUpdateState> done, long timeoutMs)
+    {
+        if (appManager == null || application == null || done == null)
         {
-            try
+            return ApplicationUpdateState.UNKNOWN;
+        }
+
+        // Latest state pushed by an UPDATE_STATE_CHANGED event (or read directly).
+        AtomicReference<ApplicationUpdateState> observed =
+            new AtomicReference<>(ApplicationUpdateState.UNKNOWN);
+        // Signals every time a relevant event arrives so the waiter re-evaluates.
+        AtomicReference<CountDownLatch> signal = new AtomicReference<>(new CountDownLatch(1));
+
+        IApplicationListener listener = event -> {
+            if (event == null || event.getApplication() != application
+                || event.getEventType() != ApplicationEventType.UPDATE_STATE_CHANGED)
             {
-                state = appManager.getUpdateState(application);
+                return;
             }
-            catch (ApplicationException e)
+            ApplicationUpdateState pushed = event.getUpdateState();
+            if (pushed != null)
             {
-                Activator.logError("Error polling update state", e); //$NON-NLS-1$
-                return state;
+                observed.set(pushed);
             }
-            if (state != ApplicationUpdateState.BEING_UPDATED)
+            // Wake the waiter; it re-reads `observed` and re-evaluates `done`.
+            signal.get().countDown();
+        };
+
+        appManager.addAppllicationListener(listener);
+        try
+        {
+            // An event may already have fired before registration — read once now.
+            ApplicationUpdateState current = readUpdateState(appManager, application);
+            observed.set(current);
+            if (done.test(current))
             {
-                return state;
+                return current;
             }
-            try
+
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            while (true)
             {
-                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
-            }
-            catch (InterruptedException e)
-            {
-                Thread.currentThread().interrupt();
-                return state;
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0)
+                {
+                    return observed.get();
+                }
+                CountDownLatch latch = signal.get();
+                // Wake on the event OR every syncPollIntervalMs (safety net for a
+                // missed event), whichever comes first.
+                long waitMs = Math.min(remaining, Math.max(1L, syncPollIntervalMs));
+                boolean signalled;
+                try
+                {
+                    signalled = latch.await(waitMs, TimeUnit.MILLISECONDS);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    return observed.get();
+                }
+                if (signalled)
+                {
+                    // Reset the latch for the next event before re-evaluating, so an
+                    // event arriving during evaluation is not lost.
+                    signal.set(new CountDownLatch(1));
+                    if (done.test(observed.get()))
+                    {
+                        return observed.get();
+                    }
+                }
+                else
+                {
+                    // Timed wake — re-read the cached state as a fallback.
+                    ApplicationUpdateState polled = readUpdateState(appManager, application);
+                    observed.set(polled);
+                    if (done.test(polled))
+                    {
+                        return polled;
+                    }
+                }
             }
         }
-        return state;
+        finally
+        {
+            appManager.removeAppllicationListener(listener);
+        }
+    }
+
+    /**
+     * Reads {@link IApplicationManager#getUpdateState} defensively: any
+     * {@link ApplicationException} is logged and mapped to
+     * {@link ApplicationUpdateState#UNKNOWN} so the event-await never throws into
+     * the launch hot path.
+     */
+    private static ApplicationUpdateState readUpdateState(IApplicationManager appManager,
+            IApplication application)
+    {
+        try
+        {
+            ApplicationUpdateState state = appManager.getUpdateState(application);
+            return state != null ? state : ApplicationUpdateState.UNKNOWN;
+        }
+        catch (ApplicationException e)
+        {
+            Activator.logError("Error reading application update state", e); //$NON-NLS-1$
+            return ApplicationUpdateState.UNKNOWN;
+        }
     }
 
     /**
@@ -426,6 +1115,10 @@ public final class LaunchLifecycleUtils
      * <p>If any step fails, the result has {@code ok=false} and the caller must
      * abort instead of falling through to a launch that would hang on a modal.
      *
+     * <p>This 5-arg overload uses the full {@code updateScope} ("all") — the
+     * configuration plus its dependent extensions. Prefer the 6-arg overload to
+     * narrow the recompute to a specific {@code extension:<Name>}.
+     *
      * @param launchManager           Eclipse launch manager
      * @param project                 target project
      * @param applicationId           target {@code ATTR_APPLICATION_ID}
@@ -435,6 +1128,40 @@ public final class LaunchLifecycleUtils
     public static PreLaunchResult prepareForFreshLaunch(ILaunchManager launchManager,
             IProject project, String applicationId, IApplicationManager appManager,
             int terminateTimeoutSeconds)
+    {
+        return prepareForFreshLaunch(launchManager, project, applicationId, appManager,
+            terminateTimeoutSeconds, null);
+    }
+
+    /**
+     * Auto-chain executed before {@code workingCopy.launch()} when the caller
+     * wants to bypass EDT's interactive "Update database?" dialog:
+     * <ol>
+     *   <li>Find every live launch matching {@code project + applicationId};</li>
+     *   <li>Politely terminate each and wait — aborts on timeout (the IB would
+     *       still be locked, defeating the purpose);</li>
+     *   <li>FORCE a derived-data recompute of the requested projects so a freshly
+     *       edited extension {@code .cfe} is regenerated, then wait for it to settle;</li>
+     *   <li>Run {@link #updateApplicationIfNeeded} to settle the IB in
+     *       {@code UPDATED} state — the launch delegate then skips its dialog.</li>
+     * </ol>
+     *
+     * <p>If any step fails, the result has {@code ok=false} and the caller must
+     * abort instead of falling through to a launch that would hang on a modal.
+     *
+     * @param launchManager           Eclipse launch manager
+     * @param project                 target project
+     * @param applicationId           target {@code ATTR_APPLICATION_ID}
+     * @param appManager              EDT application manager
+     * @param terminateTimeoutSeconds polite-wait window per live launch
+     * @param updateScope             which projects to force-recompute+update before
+     *            the launch (see {@link #resolveUpdateScope(IProject, String)}); pass
+     *            {@code null} or {@code "all"} for the configuration plus its
+     *            dependent extensions
+     */
+    public static PreLaunchResult prepareForFreshLaunch(ILaunchManager launchManager,
+            IProject project, String applicationId, IApplicationManager appManager,
+            int terminateTimeoutSeconds, String updateScope)
     {
         if (launchManager == null)
         {
@@ -543,8 +1270,22 @@ public final class LaunchLifecycleUtils
                 terminated++;
             }
 
+            // FORCE a derived-data recompute of the launch project AND the
+            // requested extensions BEFORE the update runs, then wait for it to
+            // settle. Without the forced recompute, an extension (.cfe) edited
+            // just before the launch is never regenerated (the derived-data wait
+            // no-ops when nothing is scheduled) and appManager.update() consumes
+            // the stale export artifact — so the first test run executes the old
+            // extension, missing freshly added tests (bug #19925). updateScope
+            // narrows the recompute when only a specific extension changed.
+            recomputeAndSettle(resolveUpdateScope(project, updateScope));
+
+            // settleAfterPossibleRecompute=true: we JUST forced a recompute, so a cached
+            // UPDATED may lag the freshly regenerated .cfe — wait out the settle window
+            // before trusting "no update needed" (bug #19925). The plain debug_launch
+            // path passes false (immediate return on UPDATED) to avoid that ~5s cost.
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
-                appManager);
+                appManager, true);
             if (updateErr.isPresent())
             {
                 return new PreLaunchResult(false, terminated, updateErr.get());
