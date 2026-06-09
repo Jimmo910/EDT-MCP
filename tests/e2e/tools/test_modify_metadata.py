@@ -517,15 +517,33 @@ def test_modify_form_id_is_rejected():
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
-def test_modify_form_handler_is_rejected():
+def test_modify_form_handler_non_procedure_property_is_rejected():
+    # A handler FQN only supports REBINDING the procedure (a 'procedure' property). Any other property
+    # (here 'title') is refused with a pointer to the 'procedure' rebind + create/delete.
     r = call("modify_metadata", {
         "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Handler.OnOpen",
         "properties": [{"name": "title", "value": "x"}],
     })
-    e = assert_error(r, "modify form handler rejected")
-    assert_error_quality(e, suggests=["not supported", "create_metadata", "delete_metadata"],
-                         ctx="modifying a form handler points to create/delete")
+    e = assert_error(r, "modify form handler with a non-procedure property rejected")
+    assert_error_quality(e, suggests=["procedure", "create_metadata", "delete_metadata"],
+                         ctx="a non-procedure property on a handler FQN points to procedure rebind + create/delete")
     assert_no_diff("a rejected form-handler modify must change nothing")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_form_level_handler_procedure_when_absent_is_error():
+    # Rebind only re-points an EXISTING handler; with no OnOpen handler bound yet the error steers to
+    # create_metadata (binding a NEW event is create_metadata's job).
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Handler.OnOpen",
+        "properties": [{"name": "procedure", "value": "OnOpenProc"}],
+    })
+    # Either there is already a handler (then this succeeds) or there is none (then a clean error). Both
+    # outcomes are acceptable here; the dedicated round-trip test below seeds then rebinds deterministically.
+    if not r.ok:
+        e = assert_error(r, "rebind a non-existent handler")
+        assert_error_quality(e, names=["OnOpen"], suggests=["create_metadata"],
+                             ctx="rebinding an absent handler steers to create_metadata")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -762,3 +780,115 @@ def test_move_on_form_attribute_is_rejected():
     e = assert_error(r, "position on a form attribute")
     assert_error_quality(e, suggests=["form ITEM", "not positioned"],
                          ctx="a form attribute cannot be positioned")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Happy / negative — REBIND a form event handler's procedure (F3) and re-point a
+# button at another form command (F3). Binding the handler / creating the button is
+# create_metadata's job; modify_metadata only REBINDS the existing link.
+# Fixture: Catalog.Catalog has a managed form "ItemForm".
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_item_level_handler_procedure_roundtrip():
+    # Create a bound field + an item-level OnChange handler (procedure Proc1) via create_metadata, then
+    # REBIND the handler's procedure to Proc2 via modify_metadata; the new name lands on disk.
+    _seed_form_field("RbAttr", "RbFld")
+    cr = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.RbFld.Handler.OnChange",
+        "properties": [{"name": "procedure", "value": "RbProc1"}]})
+    assert_ok(cr, "bind the OnChange handler to RbProc1")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.RbFld.Handler.OnChange",
+        "properties": [{"name": "procedure", "value": "RbProc2"}],
+    })
+    assert_ok(r, "rebind the handler procedure to RbProc2")
+    assert r.structured.get("action") == "modified", "must report modified: %r" % (r.structured,)
+    assert r.structured.get("persisted") is True, \
+        "the rebind must force-export the .form to disk: %r" % (r.structured,)
+    poll_diff_contains("RbProc2", ctx="the new handler procedure name must land in the .form on disk")
+    assert_not_contains(diff(), "RbProc1", "the old procedure name must be replaced on disk")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_handler_other_property_in_same_call_rejected():
+    # A handler FQN accepts only the 'procedure' rebind; mixing another property is refused.
+    _seed_form_field("RbMixAttr", "RbMixFld")
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.RbMixFld.Handler.OnChange",
+        "properties": [{"name": "procedure", "value": "RbMixProc1"}]}), "bind OnChange")
+    wait_for_project_ready()
+    r = call("modify_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Field.RbMixFld.Handler.OnChange",
+        "properties": [{"name": "title", "value": "x"}],
+    })
+    e = assert_error(r, "non-procedure property on a handler FQN")
+    assert_error_quality(e, suggests=["procedure", "create_metadata", "delete_metadata"],
+                         ctx="only the procedure rebind is supported on a handler FQN")
+
+
+def _seed_button_and_command(btn, cmd):
+    """Seed a form command + a button bound to it (the button needs an existing command)."""
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd}),
+        "seed form command " + cmd)
+    wait_for_project_ready()
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + btn,
+        "properties": [{"name": "command", "value": cmd}]}),
+        "seed button %s bound to %s" % (btn, cmd))
+    wait_for_project_ready()
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_button_command_roundtrip():
+    # Create a button bound to command Cmd1, create a second command Cmd2, then RE-POINT the button at
+    # Cmd2 via modify_metadata.
+    _seed_button_and_command("RbBtn", "RbCmd1")
+    assert_ok(call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command.RbCmd2"}),
+        "seed the second command")
+    wait_for_project_ready()
+
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.RbBtn",
+        "properties": [{"name": "command", "value": "RbCmd2"}],
+    })
+    assert_ok(r, "re-point the button at RbCmd2")
+    assert r.structured.get("action") == "modified", "must report modified: %r" % (r.structured,)
+    assert "command" in (r.structured.get("applied") or []), "command must be applied: %r" % (r.structured,)
+    assert r.structured.get("persisted") is True, \
+        "the rebind must force-export the .form to disk: %r" % (r.structured,)
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_button_to_missing_command_is_error():
+    _seed_button_and_command("RbMissBtn", "RbMissCmd1")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.RbMissBtn",
+        "properties": [{"name": "command", "value": "NoSuchCmd_zz"}],
+    })
+    e = assert_error(r, "re-point a button at a missing command")
+    assert_error_quality(e, names=["NoSuchCmd_zz"], suggests=["not found", "create_metadata"],
+                         ctx="a missing form command is a clean, actionable error")
+
+
+@e2e_test(tool="modify_metadata", kind="write-metadata")
+def test_rebind_button_command_mixed_with_other_property_rejected():
+    # A 'command' rebind cannot be combined with an ordinary property change in one call.
+    _seed_button_and_command("RbMixBtn", "RbMixCmd")
+    r = call("modify_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.RbMixBtn",
+        "properties": [{"name": "command", "value": "RbMixCmd"},
+                       {"name": "title", "value": "x", "language": "en"}],
+    })
+    e = assert_error(r, "command rebind mixed with a property change")
+    assert_error_quality(e, suggests=["cannot be combined", "separate call"],
+                         ctx="a button command rebind cannot be mixed with a property change")
+    assert_no_diff("a rejected mixed rebind must change nothing")

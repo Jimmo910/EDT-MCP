@@ -74,7 +74,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             + "assignable, and an enum value must be one of the allowed literals) with an actionable " //$NON-NLS-1$
             + "error. Move/reorder a FORM ITEM with the 'parent' (a group name, or the form name for " //$NON-NLS-1$
             + "the form root) and/or 'position' ('first'/'last'/'before:<name>'/'after:<name>'/index) " //$NON-NLS-1$
-            + "properties. Discover assignable properties + allowed values with " //$NON-NLS-1$
+            + "properties. REBIND a form event handler's procedure with a 'procedure' property on a " //$NON-NLS-1$
+            + "Handler FQN, or re-point a Button at a different form command with a 'command' property. " //$NON-NLS-1$
+            + "Discover assignable properties + allowed values with " //$NON-NLS-1$
             + "get_metadata_details(assignable:true). To rename, use rename_metadata_object. " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('modify_metadata')."; //$NON-NLS-1$
     }
@@ -300,11 +302,30 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         FormElementWriter.FormMemberRef ref, List<JsonObject> properties,
         MdNameNormalizer.Report normReport)
     {
-        // Event handlers are added/removed (create_metadata / delete_metadata), not property-modified.
+        // A handler FQN ('...Handler.Event' at form / item level) is not a property-bag member: the only
+        // supported change is REBINDING its BSL procedure ('procedure' / 'handler' property). Binding a
+        // NEW event stays in create_metadata, removing it in delete_metadata; any other property on a
+        // handler FQN is refused with that pointer.
         if (FormElementWriter.isHandlerToken(ref.kindToken) || ref.isItemLevel())
         {
-            return ToolResult.error("Modifying a form event handler is not supported. Use " //$NON-NLS-1$
-                + "create_metadata to add a handler or delete_metadata to remove it.").toJson(); //$NON-NLS-1$
+            String procName = handlerProcedureValue(properties);
+            if (procName != null)
+            {
+                return rebindFormHandler(ctx, normFqn, ref, procName);
+            }
+            return ToolResult.error("On a form event-handler FQN, modify_metadata can only REBIND the " //$NON-NLS-1$
+                + "bound procedure - pass a 'procedure' property (e.g. {name:'procedure', " //$NON-NLS-1$
+                + "value:'NewProc'}). To bind a new event use create_metadata, to remove it " //$NON-NLS-1$
+                + "delete_metadata.").toJson(); //$NON-NLS-1$
+        }
+
+        // A button's command targets a FormCommand (a form-model object, not an mdclass object), so it
+        // is not introspector-assignable; a 'command' property on a Button FQN RE-POINTS it at an
+        // existing form command.
+        if (FormElementWriter.kindForToken(ref.kindToken) == FormElementWriter.Kind.BUTTON
+            && hasCommandProperty(properties))
+        {
+            return rebindButtonCommand(ctx, normFqn, ref, properties);
         }
 
         // A MOVE / REORDER is expressed through the 'parent' and/or 'position' properties on a form
@@ -465,6 +486,45 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         return false;
     }
 
+    /** The rebind property names. {@code procedure} (alias {@code handler}) rebinds a handler's BSL
+     * procedure; {@code command} (alias {@code commandName}) re-points a button at a form command. */
+    private static final String PROP_PROCEDURE = "procedure"; //$NON-NLS-1$
+    private static final String PROP_HANDLER = "handler"; //$NON-NLS-1$
+    private static final String PROP_COMMAND = "command"; //$NON-NLS-1$
+    private static final String PROP_COMMAND_NAME = "commandName"; //$NON-NLS-1$
+
+    /**
+     * The new BSL procedure name from a {@code procedure} (or {@code handler} alias) property on a
+     * handler-rebind call, or {@code null} when no such property is present. The same key
+     * {@code create_metadata} accepts when binding a handler.
+     */
+    private static String handlerProcedureValue(List<JsonObject> properties)
+    {
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (PROP_PROCEDURE.equalsIgnoreCase(name) || PROP_HANDLER.equalsIgnoreCase(name))
+            {
+                return asString(prop.get("value")); //$NON-NLS-1$
+            }
+        }
+        return null;
+    }
+
+    /** Whether any property in the list re-points a button at a form command ({@code command}). */
+    private static boolean hasCommandProperty(List<JsonObject> properties)
+    {
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (PROP_COMMAND.equalsIgnoreCase(name) || PROP_COMMAND_NAME.equalsIgnoreCase(name))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Builds a string from BMP code points (keeps this source pure ASCII, like FormElementWriter). */
     private static String cp(int... codePoints)
     {
@@ -608,6 +668,211 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             .put("persisted", persisted) //$NON-NLS-1$
             .put("destination", destination[0]) //$NON-NLS-1$
             .put("message", "Moved form item '" + itemName + "' to " + destination[0]) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            .toJson();
+    }
+
+    /**
+     * REBINDS an existing event handler (addressed by a handler FQN, {@code ...Handler.Event} at form
+     * or item level) to a different BSL procedure {@code procName}. Resolves the MD-form, opens ONE BM
+     * write transaction on the re-fetched content form, resolves the handler's CONTAINER (the form root,
+     * or the named item for an item-level FQN), re-points the existing handler via {@link
+     * FormElementWriter#rebindHandler} (which fails clearly when no handler for the event exists, so the
+     * tx rolls back), then force-exports the CONTENT form to its {@code Form.form} on disk - the same
+     * persistence path the property-modify branch uses. Does NOT bind a NEW event (that is
+     * create_metadata's job); a single {@code procedure} property is the whole change.
+     */
+    private String rebindFormHandler(ProjectContext ctx, String normFqn,
+        FormElementWriter.FormMemberRef ref, String procName)
+    {
+        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
+        if (mdForm == null || !(mdForm instanceof IBmObject))
+        {
+            return ToolResult.error("Form not found for '" + normFqn + "'. Address a handler as " //$NON-NLS-1$ //$NON-NLS-2$
+                + "'Type.Object.Form.FormName.Handler.Event' or " //$NON-NLS-1$
+                + "'Type.Object.Form.FormName.<ItemKind>.<ItemName>.Handler.Event'.").toJson(); //$NON-NLS-1$
+        }
+
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(ctx.project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
+        }
+
+        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
+        final String eventName = ref.name;
+        final String itemName = ref.isItemLevel() ? ref.itemName : null;
+        final String contentFormFqn;
+        try
+        {
+            contentFormFqn = BmTransactions.<String>write(bmModel, "RebindFormHandler", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
+                if (txMdForm == null)
+                {
+                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+                }
+                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
+                if (formModel == null)
+                {
+                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
+                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
+                        + "built)").toJson());
+                }
+                // Form-level handlers live on the form root; item-level handlers on the named item.
+                EObject container = formModel;
+                if (itemName != null)
+                {
+                    container = FormElementWriter.findFormItem(formModel, itemName);
+                    if (container == null)
+                    {
+                        throw new FormValidationException(ToolResult.error("Form item not found: " //$NON-NLS-1$
+                            + itemName + ". Use get_metadata_details to inspect the form items.").toJson()); //$NON-NLS-1$
+                    }
+                }
+                String err = FormElementWriter.rebindHandler(container, eventName, procName);
+                if (err != null)
+                {
+                    throw new FormValidationException(ToolResult.error(err).toJson());
+                }
+                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
+            });
+        }
+        catch (Exception e)
+        {
+            String validationJson = FormValidationException.jsonOf(e);
+            if (validationJson != null)
+            {
+                return validationJson;
+            }
+            Activator.logError("Error rebinding form handler", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to rebind form handler: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
+            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
+
+        return ToolResult.success()
+            .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("applied", java.util.Collections.singletonList(PROP_PROCEDURE)) //$NON-NLS-1$
+            .put("persisted", persisted) //$NON-NLS-1$
+            .put("message", "Rebound the handler for event '" + eventName + "' to procedure '" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + procName + "'") //$NON-NLS-1$
+            .toJson();
+    }
+
+    /**
+     * RE-POINTS an existing button (a Button form item) at a different (existing) form command. A
+     * button's {@code commandName} references a FormCommand (a form-model object, not an mdclass
+     * object), so it is not introspector-assignable and is rebound here. Resolves the MD-form, opens ONE
+     * BM write transaction on the re-fetched content form, resolves the button and re-points it via
+     * {@link FormElementWriter#rebindButtonCommand} (which validates the command exists, rolling the tx
+     * back otherwise), then force-exports the CONTENT form to its {@code Form.form} on disk. A
+     * {@code command} change is structural-by-reference and must not be mixed with other property
+     * changes in one call.
+     */
+    private String rebindButtonCommand(ProjectContext ctx, String normFqn,
+        FormElementWriter.FormMemberRef ref, List<JsonObject> properties)
+    {
+        String commandName = null;
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (PROP_COMMAND.equalsIgnoreCase(name) || PROP_COMMAND_NAME.equalsIgnoreCase(name))
+            {
+                commandName = asString(prop.get("value")); //$NON-NLS-1$
+            }
+            else
+            {
+                return ToolResult.error("Re-pointing a button's command ('command') cannot be combined " //$NON-NLS-1$
+                    + "with other property changes ('" + name + "') in one call. Rebind the command " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "first, then modify the button's properties in a separate call.").toJson(); //$NON-NLS-1$
+            }
+        }
+        if (commandName == null || commandName.isEmpty())
+        {
+            return ToolResult.error("Provide the form command to point the button at in the 'command' " //$NON-NLS-1$
+                + "property (e.g. {name:'command', value:'Refresh'}).").toJson(); //$NON-NLS-1$
+        }
+
+        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
+        if (mdForm == null || !(mdForm instanceof IBmObject))
+        {
+            return ToolResult.error("Form not found for '" + normFqn + "'. Address a button as " //$NON-NLS-1$ //$NON-NLS-2$
+                + "'Type.Object.Form.FormName.Button.Name' or 'CommonForm.FormName.Button.Name'.").toJson(); //$NON-NLS-1$
+        }
+
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(ctx.project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
+        }
+
+        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
+        final String buttonName = ref.name;
+        final String commandNameFinal = commandName;
+        final String contentFormFqn;
+        try
+        {
+            contentFormFqn = BmTransactions.<String>write(bmModel, "RebindButtonCommand", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
+                if (txMdForm == null)
+                {
+                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+                }
+                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
+                if (formModel == null)
+                {
+                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
+                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
+                        + "built)").toJson());
+                }
+                EObject button = FormElementWriter.findFormItem(formModel, buttonName);
+                if (button == null)
+                {
+                    throw new FormValidationException(ToolResult.error("Form button not found: " //$NON-NLS-1$
+                        + buttonName + ". Use get_metadata_details to inspect the form items.").toJson()); //$NON-NLS-1$
+                }
+                String err = FormElementWriter.rebindButtonCommand(formModel, button, commandNameFinal);
+                if (err != null)
+                {
+                    throw new FormValidationException(ToolResult.error(err).toJson());
+                }
+                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
+            });
+        }
+        catch (Exception e)
+        {
+            String validationJson = FormValidationException.jsonOf(e);
+            if (validationJson != null)
+            {
+                return validationJson;
+            }
+            Activator.logError("Error rebinding button command", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to rebind button command: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
+            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
+
+        return ToolResult.success()
+            .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("applied", java.util.Collections.singletonList(PROP_COMMAND)) //$NON-NLS-1$
+            .put("persisted", persisted) //$NON-NLS-1$
+            .put("message", "Re-pointed button '" + buttonName + "' at command '" //$NON-NLS-1$ //$NON-NLS-2$
+                + commandNameFinal + "'") //$NON-NLS-1$
             .toJson();
     }
 

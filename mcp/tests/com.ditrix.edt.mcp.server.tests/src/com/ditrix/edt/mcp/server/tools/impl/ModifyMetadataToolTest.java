@@ -45,6 +45,30 @@ public class ModifyMetadataToolTest
     }
 
     @Test
+    public void testDescriptionAdvertisesFormHandlerAndCommandRebind()
+    {
+        // F3: the form event-handler procedure rebind + the button command rebind are part of the tool
+        // surface, so the description must advertise the 'procedure' and 'command' rebind properties.
+        String desc = new ModifyMetadataTool().getDescription();
+        assertTrue("description should advertise the handler 'procedure' rebind", //$NON-NLS-1$
+            desc.contains("procedure")); //$NON-NLS-1$
+        assertTrue("description should advertise the button 'command' rebind", //$NON-NLS-1$
+            desc.contains("command")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideExplainsHandlerAndButtonCommandRebind()
+    {
+        // The rebind contract is documented: REBIND an existing handler's procedure / re-point a button.
+        String guide = new ModifyMetadataTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide should explain the handler procedure rebind", //$NON-NLS-1$
+            guide.contains("procedure")); //$NON-NLS-1$
+        assertTrue("guide should explain re-pointing a button at a form command", //$NON-NLS-1$
+            guide.contains("command")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testInputSchemaContainsAllParameters()
     {
         String schema = new ModifyMetadataTool().getInputSchema();
