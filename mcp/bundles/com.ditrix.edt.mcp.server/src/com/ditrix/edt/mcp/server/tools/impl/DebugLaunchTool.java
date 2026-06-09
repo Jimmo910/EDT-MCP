@@ -220,10 +220,14 @@ public class DebugLaunchTool implements IMcpTool
                 .put("configurationType", typeId) //$NON-NLS-1$
                 .put("attach", isAttach) //$NON-NLS-1$
                 .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("status", "launching") //$NON-NLS-1$ //$NON-NLS-2$
                 .put("message", isAttach //$NON-NLS-1$
-                    ? "Attach debug session started — use debug_status to inspect, " //$NON-NLS-1$
-                        + "wait_for_break to block until a breakpoint is hit." //$NON-NLS-1$
-                    : "Debug session started successfully"); //$NON-NLS-1$
+                    ? "Attach debug session is connecting — poll debug_status to confirm it is " //$NON-NLS-1$
+                        + "running, then wait_for_break to block until a breakpoint is hit." //$NON-NLS-1$
+                    : "Debug session is starting asynchronously. The 1C client may show startup " //$NON-NLS-1$
+                        + "dialogs (login / database update); this call does NOT wait for it. " //$NON-NLS-1$
+                        + "Poll debug_status until the session appears running, then use " //$NON-NLS-1$
+                        + "wait_for_break."); //$NON-NLS-1$
             if (configProject != null && !configProject.isEmpty())
             {
                 result.put("project", configProject); //$NON-NLS-1$
@@ -403,7 +407,10 @@ public class DebugLaunchTool implements IMcpTool
                 .put("configurationType", LaunchConfigUtils.getConfigTypeId(matchingConfig)) //$NON-NLS-1$
                 .put("attach", false) //$NON-NLS-1$
                 .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
-                .put("message", "Debug session started successfully") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("status", "launching") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("message", "Debug session is starting asynchronously. The 1C client may show " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "startup dialogs (login / database update); this call does NOT wait for it. " //$NON-NLS-1$
+                    + "Poll debug_status until the session appears running, then use wait_for_break.") //$NON-NLS-1$
                 .toJson();
         }
         catch (Exception e)

@@ -69,14 +69,32 @@ public class DebugLaunchToolTest
     @Test
     public void testOutputSchemaDeclaresLaunchingStatus()
     {
-        // The launch is async: a fresh launch returns status:"launching" so the
-        // caller knows to poll debug_status. The output schema must advertise that
-        // field (schema<->result parity), otherwise a conformant client would not
-        // expect it in structuredContent.
+        // The launch is async: a fresh launch emits status:"launching" so the caller
+        // knows to poll debug_status. This test only asserts the SCHEMA half of that
+        // contract — that the output schema advertises the field; it cannot verify the
+        // emitted result here (a real launch needs a live workbench, covered by E2E).
+        // The coherence check below ties the metadata (schema + guide) together so the
+        // promise can't silently drift in one place only.
         String schema = new DebugLaunchTool().getOutputSchema();
         assertNotNull(schema);
         assertTrue(schema.contains("\"status\"")); //$NON-NLS-1$
         assertTrue(schema.contains("launching")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testLaunchingContractIsCoherentAcrossMetadata()
+    {
+        // Runtime-free coherence check: the async "launching" contract must be
+        // declared consistently in BOTH the output schema and the guide, so neither
+        // can advertise it while the other forgets to. The actual result emission is
+        // verified by the E2E suite (needs a live workbench).
+        DebugLaunchTool tool = new DebugLaunchTool();
+        String schema = tool.getOutputSchema();
+        String guide = tool.getGuide();
+        assertNotNull(schema);
+        assertNotNull(guide);
+        assertTrue(schema.contains("launching")); //$NON-NLS-1$
+        assertTrue(guide.contains("launching")); //$NON-NLS-1$
     }
 
     @Test
