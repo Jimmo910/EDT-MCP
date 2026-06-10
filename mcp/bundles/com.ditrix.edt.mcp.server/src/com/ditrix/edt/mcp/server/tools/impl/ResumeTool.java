@@ -104,7 +104,21 @@ public class ResumeTool implements IMcpTool
                     return ToolResult.error("thread cannot resume (state: " //$NON-NLS-1$
                             + (thread.isSuspended() ? "suspended" : "running") + ")").toJson(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 }
+                // Canonical snapshot key for this thread's session: the registry's
+                // thread→appId mapping (set when the snapshot was created), falling
+                // back to the launch-attribute id. Computed BEFORE resuming — the
+                // async RESUME event may purge the mapping.
+                String threadAppId = registry.getThreadApplicationId(threadId);
+                if (threadAppId == null)
+                {
+                    threadAppId = DebugSessionRegistry.findApplicationIdFor(thread);
+                }
                 thread.resume();
+                // Drop the now-stale pre-resume snapshot (defect C-3: this branch
+                // previously resumed WITHOUT any clearSnapshot, so the snapshot
+                // outlived its suspend and the next wait_for_break returned it as a
+                // fresh hit). clearSnapshot(null) is a safe no-op.
+                registry.clearSnapshot(threadAppId);
                 return ToolResult.success().put("resumed", true).put("scope", "thread").toJson(); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
 

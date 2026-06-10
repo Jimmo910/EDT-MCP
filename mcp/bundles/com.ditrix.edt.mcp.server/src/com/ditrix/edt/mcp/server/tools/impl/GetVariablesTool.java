@@ -20,6 +20,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.DebugTargetResolver;
 import com.ditrix.edt.mcp.server.utils.VariableSerializer;
 
 /**
@@ -121,12 +122,14 @@ public class GetVariablesTool implements IMcpTool
                 if (snap == null)
                 {
                     // Also try the lone debug-server target (debug_yaxunit_tests / EDT-UI
-                    // server-side suspend), whose snapshot wait_for_break injected.
+                    // server-side suspend), whose snapshot wait_for_break injected — under
+                    // the CANONICAL key (owning-launch id when one exists, minted
+                    // ServerApplication.<app> id else), not the raw minted id (defect C-1).
                     DebugServerTargetSupport.ServerTarget lone =
                         DebugServerTargetSupport.findLoneServerTarget();
                     if (lone != null)
                     {
-                        snap = registry.getSnapshot(lone.applicationId);
+                        snap = registry.getSnapshot(DebugTargetResolver.canonicalIdFor(lone.target, lone));
                     }
                 }
                 if (snap == null)
