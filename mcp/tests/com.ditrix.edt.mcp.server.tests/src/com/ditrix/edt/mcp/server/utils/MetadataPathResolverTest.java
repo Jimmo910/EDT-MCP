@@ -70,6 +70,41 @@ public class MetadataPathResolverTest
             MetadataPathResolver.resolveFormFilePath("Catalog.Products.FORMS.ItemForm")); //$NON-NLS-1$
     }
 
+    // ==================== form-token parity (D3: shared FormElementWriter.isFormToken) ====================
+
+    @Test
+    public void testSingularFormTokenResolvesSamePathAsPlural()
+    {
+        // create_metadata accepts 'Catalog.X.Form.Y' (singular) - the screenshot / layout-snapshot
+        // resolver must accept the SAME token set, so a just-created form is addressable by the same
+        // formPath. Singular and plural resolve to the identical on-disk path.
+        assertEquals(MetadataPathResolver.resolveFormFilePath("Catalog.Products.Forms.ItemForm"), //$NON-NLS-1$
+            MetadataPathResolver.resolveFormFilePath("Catalog.Products.Form.ItemForm")); //$NON-NLS-1$
+        assertEquals("src/Catalogs/Products/Forms/ItemForm/Form.form", //$NON-NLS-1$
+            MetadataPathResolver.resolveFormFilePath("Catalog.Products.Form.ItemForm")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testRussianFormTokensResolveSamePath()
+    {
+        // Форма (singular) / Формы (plural) as the form segment resolve to the same path the English
+        // tokens do - one shared predicate, no divergence between create and read tooling.
+        assertEquals("src/Catalogs/Products/Forms/ItemForm/Form.form", //$NON-NLS-1$
+            MetadataPathResolver.resolveFormFilePath(
+                "Catalog.Products.\u0424\u043E\u0440\u043C\u0430.ItemForm")); // Catalog.Products.Форма.ItemForm
+        assertEquals("src/Catalogs/Products/Forms/ItemForm/Form.form", //$NON-NLS-1$
+            MetadataPathResolver.resolveFormFilePath(
+                "Catalog.Products.\u0424\u043E\u0440\u043C\u044B.ItemForm")); // Catalog.Products.Формы.ItemForm
+    }
+
+    @Test
+    public void testFormFolderResolvesForSingularFormToken()
+    {
+        // The folder variant (used by the orphan-folder cleanup) inherits the same token set.
+        assertEquals("src/Catalogs/Products/Forms/ItemForm", //$NON-NLS-1$
+            MetadataPathResolver.resolveFormFolderPath("Catalog.Products.Form.ItemForm")); //$NON-NLS-1$
+    }
+
     // ==================== resolveFormFilePath -- null/unresolvable ====================
 
     @Test

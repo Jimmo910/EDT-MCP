@@ -9,11 +9,16 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+
+import java.util.Arrays;
+import java.util.Collections;
 
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.google.gson.JsonObject;
 
 /**
  * Lightweight contract tests for {@link ModifyMetadataTool}: tool metadata and JSON schema, without
@@ -136,5 +141,38 @@ public class ModifyMetadataToolTest
         // renaming is refused with a pointer to rename_metadata_object
         assertTrue("guide should point a rename at rename_metadata_object", //$NON-NLS-1$
             guide.contains("rename_metadata_object")); //$NON-NLS-1$
+    }
+
+    // ---- D2: a handler rebind must not be mixed with other property changes -----------------------
+
+    private static JsonObject prop(String name, String value)
+    {
+        JsonObject o = new JsonObject();
+        o.addProperty("name", name); //$NON-NLS-1$
+        o.addProperty("value", value); //$NON-NLS-1$
+        return o;
+    }
+
+    /**
+     * The mix detector behind the handler-rebind rejection: a call that carries ONLY the rebind
+     * property ({@code procedure} / {@code handler} alias, any case) is clean; any other property in
+     * the same call is reported by name so the rebind path REJECTS instead of silently dropping it -
+     * the same no-mixing policy the move ('parent'/'position') and button-command ('command')
+     * branches enforce.
+     */
+    @Test
+    public void testHandlerRebindMixDetection()
+    {
+        assertNull(ModifyMetadataTool.firstNonHandlerRebindProperty(
+            Collections.singletonList(prop("procedure", "MyProc")))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(ModifyMetadataTool.firstNonHandlerRebindProperty(
+            Collections.singletonList(prop("Handler", "MyProc")))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(ModifyMetadataTool.firstNonHandlerRebindProperty(
+            Arrays.asList(prop("PROCEDURE", "A"), prop("handler", "B")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        // The first foreign property is reported by name, wherever it sits in the list.
+        assertEquals("title", ModifyMetadataTool.firstNonHandlerRebindProperty( //$NON-NLS-1$
+            Arrays.asList(prop("procedure", "MyProc"), prop("title", "T")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        assertEquals("visible", ModifyMetadataTool.firstNonHandlerRebindProperty( //$NON-NLS-1$
+            Arrays.asList(prop("visible", "false"), prop("handler", "MyProc")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 }

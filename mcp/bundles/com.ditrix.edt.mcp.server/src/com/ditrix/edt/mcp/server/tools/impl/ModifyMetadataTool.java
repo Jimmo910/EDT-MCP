@@ -317,6 +317,16 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             String procName = handlerProcedureValue(properties);
             if (procName != null)
             {
+                // A handler rebind is structural and must not be mixed with other property changes in
+                // one call - the same policy the move ('parent'/'position') and button-command
+                // ('command') branches enforce. Reject BEFORE any mutation.
+                String mixed = firstNonHandlerRebindProperty(properties);
+                if (mixed != null)
+                {
+                    return ToolResult.error("Rebinding a handler's procedure ('procedure') cannot be " //$NON-NLS-1$
+                        + "combined with other property changes ('" + mixed + "') in one call. Rebind " //$NON-NLS-1$ //$NON-NLS-2$
+                        + "the procedure first, then make the other changes in a separate call.").toJson(); //$NON-NLS-1$
+                }
                 return rebindFormHandler(ctx, normFqn, ref, procName);
             }
             return ToolResult.error("On a form event-handler FQN, modify_metadata can only REBIND the " //$NON-NLS-1$
@@ -512,6 +522,25 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             if (PROP_PROCEDURE.equalsIgnoreCase(name) || PROP_HANDLER.equalsIgnoreCase(name))
             {
                 return asString(prop.get("value")); //$NON-NLS-1$
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The name of the first property that is NOT the handler-rebind property ({@code procedure} /
+     * {@code handler} alias), or {@code null} when the list carries only rebind properties. Used to
+     * REJECT a handler-rebind call that mixes in other property changes (which the rebind path would
+     * otherwise silently drop). Package-visible for tests.
+     */
+    static String firstNonHandlerRebindProperty(List<JsonObject> properties)
+    {
+        for (JsonObject prop : properties)
+        {
+            String name = asString(prop.get("name")); //$NON-NLS-1$
+            if (!PROP_PROCEDURE.equalsIgnoreCase(name) && !PROP_HANDLER.equalsIgnoreCase(name))
+            {
+                return name;
             }
         }
         return null;
