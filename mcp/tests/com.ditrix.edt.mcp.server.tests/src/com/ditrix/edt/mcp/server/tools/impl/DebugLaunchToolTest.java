@@ -294,6 +294,47 @@ public class DebugLaunchToolTest
         Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
     }
 
+    // ============ D5b: alreadyRunning detects a live CLIENT session only (Bitrix 20074) ============
+
+    @Test
+    public void testGuideDocumentsClientOnlyAlreadyRunningDetect()
+    {
+        // D5b: the already-running detect is scoped to a live CLIENT session — a
+        // thread-less standalone-SERVER debug target sharing the same app id no longer
+        // blocks the client launch, and launching a client WHILE a debug-server is up
+        // is allowed (it attaches). Ratchet the guide so this can't silently drift back
+        // to the over-broad app-id-only detect that caused 20074.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document that already-running is scoped to a live CLIENT session",
+            guide.contains("live CLIENT session")); //$NON-NLS-1$
+        assertTrue("guide must document that launching a client while a debug-server is up is allowed",
+            guide.contains("launching a client WHILE a debug-server")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsRestartIfRunningNeverTerminatesServer()
+    {
+        // D5b: restartIfRunning only ever terminates a live CLIENT session, never the
+        // debug server (a server target has no live thread, so it is not the duplicate).
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document restartIfRunning never terminates the debug server",
+            guide.contains("NEVER a debug server")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocuments1003KeepExistingButton()
+    {
+        // D5b: the 1003 safety-net now presses 'Keep existing and start new'
+        // (LAUNCH_ANYWAY) so an already-running session survives — not the default
+        // 'Stop existing and start new' that would terminate it.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the 1003 confirmer presses 'Keep existing and start new'",
+            guide.contains("Keep existing and start new")); //$NON-NLS-1$
+    }
+
     @Test
     public void testGuideDocuments1003ConfirmerIndependentOfUpdateBeforeLaunch()
     {

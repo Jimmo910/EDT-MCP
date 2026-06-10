@@ -174,6 +174,22 @@ public final class DebugServerTargetSupport
      * id is NOT the delegate's key; passing one here never matches (that mismatch is
      * exactly the bug 20074 missed).
      *
+     * <p><strong>A live thread is required (Bitrix 20074).</strong> The application
+     * id alone does NOT discriminate a thin-CLIENT debug session from a 1C
+     * standalone-SERVER (or profiling) target: both a "Автономный сервер …" server
+     * target and a thin client of the same project resolve to the SAME
+     * {@code ServerApplication.<proj>} app id. EDT's own delegate keys the duplicate
+     * on a LIVE THREAD, not the app id:
+     * {@code RuntimeClientLaunchDelegate.findDebugTargetThreadsForSameApplication}
+     * collects the non-terminated {@code IThread}s of every same-app-id target and
+     * {@code checkExistingDebugSessions} raises no modal when that list is empty.
+     * A server/profiling target carries zero live threads, so we mirror that test
+     * exactly: a same-app-id+project target matches ONLY when it also has at least
+     * one non-terminated thread ({@link #findFirstLiveThread}). Without this a
+     * thread-less server target wrongly short-circuited every client launch as
+     * {@code alreadyRunning} and {@code restartIfRunning=true} then killed the server
+     * and hung on its relaunch.
+     *
      * <p>Best-effort and fully guarded — returns {@code null} (never throws) when the
      * target manager is unavailable (headless), the API shape differs, or nothing
      * matches.
@@ -206,7 +222,14 @@ public final class DebugServerTargetSupport
             {
                 continue;
             }
-            if (projectName.equals(reflectApplicationProjectName(application)))
+            if (!projectName.equals(reflectApplicationProjectName(application)))
+            {
+                continue;
+            }
+            // A server/profiling target shares the client's app id+project but carries
+            // NO live thread — it is NOT the delegate's duplicate. Require a live
+            // thread, mirroring findDebugTargetThreadsForSameApplication(...).isEmpty().
+            if (findFirstLiveThread(target) != null)
             {
                 return target;
             }
@@ -349,6 +372,42 @@ public final class DebugServerTargetSupport
             for (IThread thread : target.getThreads())
             {
                 if (thread != null && thread.isSuspended() && !isStepping(thread))
+                {
+                    return thread;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // best-effort
+        }
+        return null;
+    }
+
+    /**
+     * Finds the first non-terminated {@link IThread} of a target, or {@code null}
+     * if it has none. Unlike {@link #findSuspendedThread}, this does NOT require the
+     * thread to be suspended — mere liveness is the discriminator EDT's launch
+     * delegate uses to tell a thin-CLIENT debug session (≥1 live thread) from a 1C
+     * standalone-SERVER / profiling target (0 threads). Used by
+     * {@link #findRuntimeClientDebugTarget} so a thread-less server target no longer
+     * blocks a client launch (Bitrix 20074). Best-effort and fully guarded — never
+     * throws.
+     *
+     * @param target the target viewed as an Eclipse debug target
+     * @return a non-terminated thread, or {@code null}
+     */
+    public static IThread findFirstLiveThread(IDebugTarget target)
+    {
+        if (target == null || target.isTerminated())
+        {
+            return null;
+        }
+        try
+        {
+            for (IThread thread : target.getThreads())
+            {
+                if (thread != null && !thread.isTerminated())
                 {
                     return thread;
                 }

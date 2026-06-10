@@ -93,9 +93,11 @@ import com.ditrix.edt.mcp.server.Activator;
  * bundle — English ("Application update") and Russian ("Обновление приложения") —
  * so the filter matches BOTH. An English-only match (the previous behaviour)
  * silently fails on a Russian-locale stand: the unattended launch then hangs on
- * the un-dismissed modal (Bitrix 20074). The default button is the same choice in
- * both locales ("Update then run" / "Обновить и запустить", button index 0), so
- * {@link #pressDefaultButton(Shell)} stays locale-agnostic.
+ * the un-dismissed modal (Bitrix 20074). The update modal's default button is the
+ * same choice in both locales ("Update then run" / "Обновить и запустить", button
+ * index 0), so {@link #pressConfirmButton(Shell)} stays locale-agnostic for it; the
+ * code-1003 modal instead presses its localized "Keep existing and start new" /
+ * "Сохранить старую и запустить новую" button, matched by label.
  */
 public final class LaunchUpdateDialogAutoConfirmer
 {
@@ -152,6 +154,37 @@ public final class LaunchUpdateDialogAutoConfirmer
     static final Set<String> DEBUG_SESSION_EXISTS_BODY_PREFIXES = Collections.unmodifiableSet(
         new LinkedHashSet<>(Arrays.asList(
             DEBUG_SESSION_EXISTS_BODY_PREFIX, DEBUG_SESSION_EXISTS_BODY_PREFIX_RU)));
+
+    /**
+     * English label of the code-1003 modal's "keep the existing session and start a
+     * new one alongside it" button (EDT's {@code Launch_anyway} → LAUNCH_ANYWAY,
+     * button index 1). This is the choice that lets a thin CLIENT come up WHILE a
+     * standalone-server debug session for the same application is already running
+     * (or alongside another client in a race) instead of terminating it. The default
+     * button (index 0, {@code Restart_application} → RESTART_APPLICATION) would STOP
+     * the existing session — wrong for the "launch client while debug-server is up"
+     * scenario (Bitrix 20074).
+     */
+    static final String DEBUG_SESSION_KEEP_BUTTON = "Keep existing and start new"; //$NON-NLS-1$
+
+    /**
+     * Russian label of the same "keep existing and start new" button (decodes to
+     * "Сохранить старую и запустить новую"). Kept {@code \\uXXXX}-escaped (no raw
+     * Cyrillic in source) so it compiles identically whatever encoding the Tycho
+     * compiler picks. The stand that hit Bitrix 20074 runs a Russian EDT.
+     */
+    static final String DEBUG_SESSION_KEEP_BUTTON_RU =
+        "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0441\u0442\u0430\u0440\u0443\u044e \u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u0443\u044e"; //$NON-NLS-1$
+
+    /**
+     * Every shipped localized label of the 1003 "keep existing and start new"
+     * (LAUNCH_ANYWAY) button. Matching the button by its label — rather than by a
+     * fixed index — keeps the press correct even if EDT reorders the button bar; an
+     * exact, whole-label compare so no unrelated button is pressed. If none of these
+     * labels is found, the press falls back to the shell's default button.
+     */
+    static final Set<String> DEBUG_SESSION_KEEP_BUTTONS = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList(DEBUG_SESSION_KEEP_BUTTON, DEBUG_SESSION_KEEP_BUTTON_RU)));
 
     /** Cap on the widget-tree walk depth when reading a dialog's message body. */
     private static final int MAX_BODY_SCAN_DEPTH = 6;
@@ -411,7 +444,7 @@ public final class LaunchUpdateDialogAutoConfirmer
 
     /**
      * Creates the single {@link Display} filter that watches for the modals we
-     * auto-confirm and schedules the default-button auto-press. Two matchers share
+     * auto-confirm and schedules the per-dialog auto-press. Two matchers share
      * this ONE global filter (reconciled under {@code LOCK} — no second filter, no
      * deadlock), but each acts only while its OWN matcher is armed:
      * <ul>
@@ -424,12 +457,13 @@ public final class LaunchUpdateDialogAutoConfirmer
      * </ul>
      * Gating per-matcher preserves the update opt-out: an arm with
      * {@code updateDialog=false} leaves the update branch inert (its modal is left
-     * for a human) while the session branch still fires. Pressing the default
-     * button (index 0) of either dialog completes it non-interactively: "Update
-     * then run" for the update modal, "Stop existing and start new" for the 1003
-     * modal — and we only reach config.launch (where this filter is armed) after
-     * primary detection already decided to launch, so stopping the old session
-     * honors that intent.
+     * for a human) while the session branch still fires. The auto-press is chosen
+     * PER DIALOG by {@link #pressConfirmButton}: the update modal completes via its
+     * DEFAULT button ("Update then run"); the 1003 modal completes via its <b>"Keep
+     * existing and start new"</b> (LAUNCH_ANYWAY) button so an already-running session
+     * — a standalone-server debug target, or another client in a race — survives and
+     * the new client comes up alongside it, instead of the default button's "Stop
+     * existing and start new" terminating it (Bitrix 20074).
      */
     private static Listener createFilterListener()
     {
@@ -468,7 +502,7 @@ public final class LaunchUpdateDialogAutoConfirmer
             }
             // Defer so the modal finishes building its button bar and enters
             // its event loop; the press then runs inside that loop.
-            shell.getDisplay().asyncExec(() -> pressDefaultButton(shell));
+            shell.getDisplay().asyncExec(() -> pressConfirmButton(shell));
         };
     }
 
@@ -606,12 +640,25 @@ public final class LaunchUpdateDialogAutoConfirmer
     }
 
     /**
-     * Presses the default (index 0) button of the given dialog shell — "Update then
-     * run" for the D4 update modal, or "Stop existing and start new" /
-     * "Завершить старую и запустить новую" for the code-1003 "Debug session already
-     * exists" modal. Guarded against disposal and never throws onto the UI thread.
+     * Auto-completes a matched dialog by pressing the right button, chosen PER
+     * DIALOG (Bitrix 20074):
+     * <ul>
+     *   <li><b>code-1003 "Debug session already exists"</b> (body matches
+     *       {@link #isDebugSessionExistsBody}) → press the <b>"Keep existing and
+     *       start new" / "Сохранить старую и запустить новую"</b> button
+     *       (LAUNCH_ANYWAY, index 1), located by its label among the shell's buttons
+     *       ({@link #findKeepExistingButton}). This keeps the already-running session
+     *       (a standalone-server debug target, or another client in a race) ALIVE and
+     *       starts the new client alongside it — pressing the DEFAULT button here
+     *       (index 0, "Stop existing and start new" / RESTART_APPLICATION) would
+     *       wrongly TERMINATE it. If the keep-button label is not found, falls back to
+     *       the default button.</li>
+     *   <li><b>D4 "Application update" modal</b> (everything else this filter matched)
+     *       → press the <b>default</b> button ("Update then run", index 0), unchanged.</li>
+     * </ul>
+     * Guarded against disposal and never throws onto the UI thread.
      */
-    private static void pressDefaultButton(Shell shell)
+    private static void pressConfirmButton(Shell shell)
     {
         try
         {
@@ -619,35 +666,151 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 return;
             }
-            Button button = shell.getDefaultButton();
+            // Distinguish the two modals (the body walk is cheap and also drives the
+            // per-dialog button choice + the log trail an unattended run leaves).
+            boolean debugSessionDialog = isDebugSessionExistsBody(readDialogBody(shell));
+            Button button = null;
+            String reason;
+            if (debugSessionDialog)
+            {
+                // The 1003 modal: keep the existing session, start the new one ALONGSIDE
+                // it (LAUNCH_ANYWAY) — never the default "stop existing" button.
+                button = findKeepExistingButton(shell);
+                if (button != null)
+                {
+                    reason = "keep existing and start new"; //$NON-NLS-1$
+                }
+                else
+                {
+                    // No labelled keep-button found — fall back to the default button so
+                    // the launch still completes rather than hanging on the modal.
+                    button = shell.getDefaultButton();
+                    reason = "keep-button not found, fell back to default button"; //$NON-NLS-1$
+                }
+            }
+            else
+            {
+                // The update modal: press its default button ("Update then run").
+                button = shell.getDefaultButton();
+                reason = "default button"; //$NON-NLS-1$
+            }
             if (button == null || button.isDisposed())
             {
                 return;
             }
-            // Distinguish the two modals in the log so an unattended run's trail shows
-            // exactly which dialog was auto-completed (Bitrix 20074).
-            boolean debugSessionDialog = isDebugSessionExistsBody(readDialogBody(shell));
             if (debugSessionDialog)
             {
                 Activator.logInfo("Auto-confirming debug-session dialog '" //$NON-NLS-1$
                     + safeShellText(shell) + "' via button '" + safeText(button) //$NON-NLS-1$
-                    + "' (stop existing and start new)"); //$NON-NLS-1$
+                    + "' (" + reason + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             else
             {
                 Activator.logInfo("Auto-confirming launch dialog '" + safeShellText(shell) //$NON-NLS-1$
                     + "' via button '" + safeText(button) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            Event event = new Event();
-            event.widget = button;
-            // Mirrors a user click: JFace dialog buttons fire buttonPressed() on
-            // SWT.Selection, which sets the return code and closes the dialog.
-            button.notifyListeners(SWT.Selection, event);
+            pressButton(button);
         }
         catch (RuntimeException e)
         {
             Activator.logError("Failed to auto-confirm the launch update dialog", e); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Locates the code-1003 modal's "Keep existing and start new" (LAUNCH_ANYWAY)
+     * button by its label — in either EDT locale ({@link #DEBUG_SESSION_KEEP_BUTTONS})
+     * — among all {@link Button}s in the shell's widget tree. Matching by label,
+     * rather than a fixed index, stays correct if EDT reorders the button bar. Returns
+     * the first non-disposed match, or {@code null} when no labelled keep-button is
+     * present (caller then falls back to the default button). Bounded-depth, fully
+     * guarded — never throws onto the UI thread.
+     *
+     * @param shell the 1003 dialog shell (may be {@code null}/disposed)
+     * @return the keep-existing button, or {@code null}
+     */
+    static Button findKeepExistingButton(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+        {
+            return null;
+        }
+        try
+        {
+            return findButtonByLabel(shell, 0);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Depth-bounded pre-order walk returning the first {@link Button} whose text is a
+     * known "keep existing and start new" label ({@link #isKeepExistingLabel}).
+     */
+    private static Button findButtonByLabel(Control control, int depth)
+    {
+        if (control == null || control.isDisposed() || depth > MAX_BODY_SCAN_DEPTH)
+        {
+            return null;
+        }
+        if (control instanceof Button)
+        {
+            Button b = (Button)control;
+            try
+            {
+                if (isKeepExistingLabel(b.getText()))
+                {
+                    return b;
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // ignore this button, keep scanning
+            }
+        }
+        if (control instanceof Composite)
+        {
+            for (Control child : ((Composite)control).getChildren())
+            {
+                Button found = findButtonByLabel(child, depth + 1);
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Pure decision (and test seam): is the given button label the 1003 modal's
+     * "Keep existing and start new" / "Сохранить старую и запустить новую"
+     * (LAUNCH_ANYWAY) button, in either EDT locale? JFace strips no mnemonic here, so
+     * a leading {@code &} mnemonic marker (if any) is removed before the exact compare.
+     *
+     * @param label a button label (may be {@code null})
+     * @return {@code true} when {@code label} is a known keep-existing label
+     */
+    static boolean isKeepExistingLabel(String label)
+    {
+        if (label == null)
+        {
+            return false;
+        }
+        String normalized = label.replace("&", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+        return DEBUG_SESSION_KEEP_BUTTONS.contains(normalized);
+    }
+
+    /** Fires {@code SWT.Selection} on the button — mirrors a user click. */
+    private static void pressButton(Button button)
+    {
+        Event event = new Event();
+        event.widget = button;
+        // Mirrors a user click: JFace dialog buttons fire buttonPressed() on
+        // SWT.Selection, which sets the return code and closes the dialog.
+        button.notifyListeners(SWT.Selection, event);
     }
 
     private static String safeText(Button button)

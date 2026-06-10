@@ -597,6 +597,18 @@ public class DebugLaunchTool implements IMcpTool
         }
 
         // restartIfRunning: stop the existing session non-interactively, then proceed.
+        // findRuntimeClientDebugTarget only returns a target with a LIVE thread — i.e. a
+        // real CLIENT session, never a thread-less standalone-SERVER/profiling target —
+        // so terminate() here can never kill a debug server (Bitrix 20074). Re-assert
+        // that invariant defensively: if the matched target somehow lost its last live
+        // thread between detection and now, do NOT terminate it; just proceed to launch.
+        if (DebugServerTargetSupport.findFirstLiveThread(existing) == null)
+        {
+            Activator.logInfo("debug_launch restartIfRunning: matched target has no live " //$NON-NLS-1$
+                + "thread (server/profiling target) — not terminating; proceeding: project=" //$NON-NLS-1$
+                + projectName + ", applicationId=" + delegateAppId); //$NON-NLS-1$
+            return null;
+        }
         Activator.logInfo("debug_launch restartIfRunning: terminating existing target-manager " //$NON-NLS-1$
             + "session: project=" + projectName + ", applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
         terminateExistingSessionAndWait(existing, delegateAppId);
