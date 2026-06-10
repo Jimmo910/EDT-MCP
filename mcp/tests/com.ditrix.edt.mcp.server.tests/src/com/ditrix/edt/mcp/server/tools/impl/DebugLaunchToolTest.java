@@ -27,7 +27,9 @@ import java.util.Optional;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
@@ -176,9 +178,9 @@ public class DebugLaunchToolTest
     @Test
     public void testGuideDescribesAsyncLaunch()
     {
-        // The launch dispatch is non-blocking (asyncExec): the guide must tell the
-        // caller it returns status:"launching" immediately and to poll debug_status
-        // for readiness rather than expecting a running session synchronously.
+        // The launch dispatch is non-blocking (a background Job since D7a): the guide
+        // must tell the caller it returns status:"launching" immediately and to poll
+        // debug_status for readiness rather than expecting a running session synchronously.
         String guide = new DebugLaunchTool().getGuide();
         assertNotNull(guide);
         assertTrue(guide.contains("launching")); //$NON-NLS-1$
@@ -283,6 +285,82 @@ public class DebugLaunchToolTest
         String error = new DebugLaunchTool().performLaunch(config, false);
         assertNotNull("headless launch failure must be surfaced synchronously", error);
         assertTrue(error.contains("launch refused")); //$NON-NLS-1$
+    }
+
+    // ============ D7a: launch runs in a background Job, off the EDT UI thread (Bitrix 20091) ============
+    //
+    // performLaunch used to dispatch config.launch via display.asyncExec, which ran the
+    // ENTIRE RuntimeClientLaunchDelegate.doLaunch (incl. a minutes-long standalone-server
+    // non-debug→debug restart) ON the SWT UI thread and froze the workbench. It now
+    // schedules a background Job (mirroring EDT's DebugUIPlugin.launchInBackground) whose
+    // body is the package-private seam runLaunchJobBody. Scheduling a real Job needs a
+    // live workbench (covered E2E); these headless tests exercise the seam directly:
+    // success → OK_STATUS, CoreException → its own status (logged, not thrown), any other
+    // Throwable → an ERROR status (logged, not thrown — the Job must never die silently),
+    // and in EVERY outcome the confirmer disarm in finally runs without breaking the chain
+    // (arm/disarm are headless no-ops here, so "the finally chain never throws" is the
+    // observable pairing contract).
+
+    @Test
+    public void testRunLaunchJobBodySuccessReturnsOkAndPassesMonitor() throws Exception
+    {
+        // The Job body launches with the JOB'S monitor (so the Progress view shows the
+        // delegate's steps) and reports OK — and the arm/disarm pair around the launch
+        // completes cleanly.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        IProgressMonitor monitor = new NullProgressMonitor();
+        IStatus status = DebugLaunchTool.runLaunchJobBody(config, true, monitor);
+        assertNotNull(status);
+        assertTrue("successful launch must report OK", status.isOK());
+        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, monitor);
+    }
+
+    @Test
+    public void testRunLaunchJobBodyCoreExceptionReturnsItsStatusNotThrown() throws Exception
+    {
+        // A CoreException from the delegate is logged and surfaced as the Job's result
+        // status (the exception's OWN status, as DebugUIPlugin does) — never rethrown,
+        // so the Job can't die on it; the finally-disarm still ran (no exception here).
+        Status refusal = new Status(IStatus.ERROR, "test", "launch refused"); //$NON-NLS-1$ //$NON-NLS-2$
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        Mockito.when(config.launch(eq(ILaunchManager.DEBUG_MODE), any()))
+            .thenThrow(new CoreException(refusal));
+        IStatus status = DebugLaunchTool.runLaunchJobBody(config, false, new NullProgressMonitor());
+        assertNotNull(status);
+        assertSame("the CoreException's own status must be the Job result", refusal, status);
+    }
+
+    @Test
+    public void testRunLaunchJobBodyRuntimeExceptionReturnsErrorStatusNotThrown() throws Exception
+    {
+        // A NON-CoreException failure must not escape either (an uncaught Throwable
+        // kills the Job silently): it is logged and converted to an ERROR status that
+        // carries the original exception.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        IllegalStateException boom = new IllegalStateException("boom"); //$NON-NLS-1$
+        Mockito.when(config.launch(eq(ILaunchManager.DEBUG_MODE), any())).thenThrow(boom);
+        IStatus status = DebugLaunchTool.runLaunchJobBody(config, true, new NullProgressMonitor());
+        assertNotNull(status);
+        assertEquals("a runtime failure must be an ERROR status", IStatus.ERROR, status.getSeverity());
+        assertSame("the status must carry the original exception", boom, status.getException());
+        assertTrue("the status message must name the failure",
+            status.getMessage().contains("boom")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsBackgroundJobLaunch()
+    {
+        // D7a ratchet (Bitrix 20091): the guide must document that the launch runs as a
+        // background EDT Job — the workbench stays responsive even through a minutes-long
+        // standalone-server mode-switch restart, with progress in the Progress view.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the background-Job dispatch",
+            guide.contains("background EDT Job")); //$NON-NLS-1$
+        assertTrue("guide must say the workbench stays responsive",
+            guide.contains("stays responsive")); //$NON-NLS-1$
+        assertTrue("guide must point to the Progress view",
+            guide.contains("Progress view")); //$NON-NLS-1$
     }
 
     // ==================== updateBeforeLaunch synthetic-id contract (rv1 review FIND-1) ====================
