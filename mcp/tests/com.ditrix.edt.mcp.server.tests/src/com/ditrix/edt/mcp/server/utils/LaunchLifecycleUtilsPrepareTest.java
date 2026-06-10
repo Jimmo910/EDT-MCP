@@ -13,10 +13,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +37,9 @@ import org.junit.Test;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.PreLaunchResult;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
 import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationEvent;
+import com.e1c.g5.dt.applications.IApplicationEvent.ApplicationEventType;
+import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
@@ -228,6 +233,90 @@ public class LaunchLifecycleUtilsPrepareTest
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals(1, result.getTerminatedCount());
         verify(runtimeLaunch, atLeastOnce()).terminate();
+    }
+
+    @Test
+    public void testUnknownUpdateScopeFailsFastBeforeTerminating() throws Exception
+    {
+        // Review fix B4: a typo'd extension name in updateScope must be a HARD
+        // ERROR raised BEFORE any live launch is terminated — a stale-green guard
+        // must not cost the user a running client. Headless, no extension
+        // projects are discoverable, so the requested name is guaranteed unknown.
+        ILaunchConfiguration runtimeCfg = mockRuntimeConfig(
+            "MyApp.RuntimeClient", PROJECT_NAME, RUNTIME_APP_ID);
+        ILaunch runtimeLaunch = mock(ILaunch.class);
+        when(runtimeLaunch.getLaunchConfiguration()).thenReturn(runtimeCfg);
+        wireSelfTerminating(runtimeLaunch);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[] { runtimeLaunch });
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2,
+            "extension:NoSuchExtension");
+
+        assertFalse("an unknown extension name must fail the chain", result.isOk());
+        assertTrue("error must name the unknown extension",
+            result.getError() != null && result.getError().contains("NoSuchExtension"));
+        verify(runtimeLaunch, never()).terminate();
+    }
+
+    @Test
+    public void testSettleWindowSkippedWhenNoUpdateEventDuringRecompute() throws Exception
+    {
+        // Review fix B5: the recompute drain pushed no UPDATE_STATE_CHANGED event
+        // for this application, so the post-recompute settle window must be
+        // SKIPPED — the IB state is read exactly once (the cheap entry read)
+        // instead of being polled for the full settle window on a genuinely
+        // in-sync IB.
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, times(1)).getUpdateState(app);
+    }
+
+    @Test
+    public void testSettleWindowKeptWhenUpdateEventSeenDuringRecompute() throws Exception
+    {
+        // Review fix B5, conservative side: when an UPDATE_STATE_CHANGED event IS
+        // observed while the probe listener is registered, the lagging-cache
+        // suspicion stands and the settle window must be KEPT — the state is
+        // re-polled beyond the single entry read.
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+        // Deliver an UPDATE_STATE_CHANGED for this application the moment ANY
+        // listener registers — this covers the probe window around the recompute.
+        doAnswer(inv -> {
+            IApplicationListener listener = inv.getArgument(0);
+            IApplicationEvent event = mock(IApplicationEvent.class);
+            when(event.getApplication()).thenReturn(app);
+            when(event.getEventType()).thenReturn(ApplicationEventType.UPDATE_STATE_CHANGED);
+            when(event.getUpdateState()).thenReturn(ApplicationUpdateState.UPDATED);
+            listener.applicationChanged(event);
+            return null;
+        }).when(mgr).addAppllicationListener(any(IApplicationListener.class));
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, atLeast(2)).getUpdateState(app);
     }
 
     @Test
