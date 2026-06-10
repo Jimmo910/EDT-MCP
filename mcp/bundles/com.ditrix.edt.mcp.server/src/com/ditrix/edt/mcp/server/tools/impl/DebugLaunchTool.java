@@ -24,6 +24,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
@@ -86,6 +87,11 @@ public class DebugLaunchTool implements IMcpTool
                     + "'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog " //$NON-NLS-1$
                     + "is auto-confirmed); false skips the update and the platform may then show that " //$NON-NLS-1$
                     + "modal. Ignored for Attach.") //$NON-NLS-1$
+            .booleanProperty("restartIfRunning", //$NON-NLS-1$
+                "Default false: if a matching session is already running, short-circuit with " //$NON-NLS-1$
+                    + "alreadyRunning:true and do NOT relaunch (call terminate_launch to restart). " //$NON-NLS-1$
+                    + "true: non-interactively terminate the existing session, then relaunch — no " //$NON-NLS-1$
+                    + "'Debug session already exists' modal blocks the call.") //$NON-NLS-1$
             .build();
     }
 
@@ -120,11 +126,12 @@ public class DebugLaunchTool implements IMcpTool
         String applicationId = JsonUtils.extractStringArgument(params, "applicationId"); //$NON-NLS-1$
         String configName = JsonUtils.extractStringArgument(params, "launchConfigurationName"); //$NON-NLS-1$
         boolean updateBeforeLaunch = JsonUtils.extractBooleanArgument(params, "updateBeforeLaunch", true); //$NON-NLS-1$
+        boolean restartIfRunning = JsonUtils.extractBooleanArgument(params, "restartIfRunning", false); //$NON-NLS-1$
 
         // Mode 1: explicit config name — no project/application required.
         if (configName != null && !configName.isEmpty())
         {
-            return launchByConfigName(configName, updateBeforeLaunch);
+            return launchByConfigName(configName, updateBeforeLaunch, restartIfRunning);
         }
 
         // Mode 2: project + application (runtime-client only).
@@ -147,14 +154,15 @@ public class DebugLaunchTool implements IMcpTool
             return ToolResult.error(building).toJson();
         }
 
-        return launchDebug(projectName, applicationId, updateBeforeLaunch);
+        return launchDebug(projectName, applicationId, updateBeforeLaunch, restartIfRunning);
     }
 
     /**
      * Launches a specific EDT debug configuration by name.
      * Works for both runtime-client and Attach configuration types.
      */
-    private String launchByConfigName(String configName, boolean updateBeforeLaunch)
+    private String launchByConfigName(String configName, boolean updateBeforeLaunch,
+        boolean restartIfRunning)
     {
         try
         {
@@ -225,6 +233,27 @@ public class DebugLaunchTool implements IMcpTool
                 return already.toJson();
             }
 
+            // Delegate-criterion duplicate guard (Bitrix 20074). Runtime-client DEBUG
+            // path only: the "Debug session already exists" code-1003 modal is raised
+            // by RuntimeClientLaunchDelegate, which scans
+            // IRuntimeDebugClientTargetManager.listDebugTargets() (NOT ILaunchManager)
+            // and keys on ATTR_PROJECT_NAME + (ATTR_APPLICATION_ID else default app).
+            // Our findActiveTarget/findActiveLaunch guards above scan ILaunchManager
+            // and key on getApplicationIdFor() — so a UI-started ("Debug As") session,
+            // or a config without a persisted ATTR_APPLICATION_ID (we mint a synthetic
+            // launch:<name> the delegate never uses), slips past them and the unattended
+            // call then hangs on the human modal. This supplements them with the
+            // delegate's own set + key.
+            if (!isAttach && configProject != null && !configProject.isEmpty())
+            {
+                String dupResult = handleDelegateDuplicateSession(config, configProject,
+                    isAttach, typeId, restartIfRunning);
+                if (dupResult != null)
+                {
+                    return dupResult;
+                }
+            }
+
             // For runtime-client configs, run the usual DB-update preflight.
             if (!isAttach && updateBeforeLaunch && configProject != null && !configProject.isEmpty())
             {
@@ -279,7 +308,8 @@ public class DebugLaunchTool implements IMcpTool
     /**
      * Legacy path: launch a runtime-client config matched by project+application.
      */
-    private String launchDebug(String projectName, String applicationId, boolean updateBeforeLaunch)
+    private String launchDebug(String projectName, String applicationId, boolean updateBeforeLaunch,
+        boolean restartIfRunning)
     {
         try
         {
@@ -425,6 +455,18 @@ public class DebugLaunchTool implements IMcpTool
                 + ", project=" + projectName //$NON-NLS-1$
                 + ", application=" + applicationId); //$NON-NLS-1$
 
+            // Delegate-criterion duplicate guard (Bitrix 20074) — same supplement as
+            // the by-name path: catch a UI-started / target-manager-only DEBUG session
+            // the ILaunchManager guards above cannot see, BEFORE config.launch raises
+            // the human "Debug session already exists" modal. See
+            // handleDelegateDuplicateSession.
+            String dupResult = handleDelegateDuplicateSession(matchingConfig, projectName,
+                false, LaunchConfigUtils.getConfigTypeId(matchingConfig), restartIfRunning);
+            if (dupResult != null)
+            {
+                return dupResult;
+            }
+
             String launchError = performLaunch(matchingConfig, updateBeforeLaunch);
             if (launchError != null)
             {
@@ -496,6 +538,160 @@ public class DebugLaunchTool implements IMcpTool
             .orElse(null);
     }
 
+    /** Max wait (ms) for a non-interactive terminate to take effect — mirrors the
+     * delegate's {@code terminateOldDebugSessions} ~3s grace. */
+    private static final long RESTART_TERMINATE_TIMEOUT_MS = 3000L;
+
+    /**
+     * Detects a live runtime-client DEBUG session for {@code config}'s
+     * {@code (project, delegate-app-id)} the EXACT way EDT's
+     * {@code RuntimeClientLaunchDelegate.checkExistingDebugSessions} does — via
+     * {@link DebugServerTargetSupport#findRuntimeClientDebugTarget} over the target
+     * manager's {@code listDebugTargets()} set, keyed on the delegate's app id
+     * ({@code ATTR_APPLICATION_ID} else {@code getDefaultApplication(project)}, see
+     * {@link #resolveDelegateApplicationId}). This is the primary fix for Bitrix
+     * 20074: it fires BEFORE {@code config.launch} can raise the human
+     * "Debug session already exists" code-1003 modal that hangs an unattended call.
+     *
+     * <ul>
+     *   <li>No live duplicate → returns {@code null}; the caller proceeds to launch.</li>
+     *   <li>Duplicate found, {@code restartIfRunning=false} (default) → returns the
+     *       {@code alreadyRunning:true} short-circuit JSON (no dialog, no launch),
+     *       consistent with the documented contract.</li>
+     *   <li>Duplicate found, {@code restartIfRunning=true} → terminates the existing
+     *       session NON-interactively, {@code forgetApplication}s it, waits up to
+     *       ~3s for process death, then returns {@code null} so the caller relaunches.</li>
+     * </ul>
+     *
+     * @return the short-circuit JSON, or {@code null} to proceed with the launch
+     */
+    private String handleDelegateDuplicateSession(ILaunchConfiguration config, String projectName,
+        boolean isAttach, String typeId, boolean restartIfRunning)
+    {
+        String delegateAppId = resolveDelegateApplicationId(config, projectName);
+        IDebugTarget existing =
+            DebugServerTargetSupport.findRuntimeClientDebugTarget(projectName, delegateAppId);
+        if (existing == null)
+        {
+            return null;
+        }
+
+        if (!restartIfRunning)
+        {
+            Activator.logInfo("debug_launch short-circuit (alreadyRunning, target-manager): " //$NON-NLS-1$
+                + "project=" + projectName + ", applicationId=" + delegateAppId //$NON-NLS-1$ //$NON-NLS-2$
+                + ", config=" + config.getName()); //$NON-NLS-1$
+            ToolResult already = ToolResult.success()
+                .put("launchConfiguration", config.getName()) //$NON-NLS-1$
+                .put("configurationType", typeId) //$NON-NLS-1$
+                .put("attach", isAttach) //$NON-NLS-1$
+                .put("project", projectName) //$NON-NLS-1$
+                .put("applicationId", delegateAppId) //$NON-NLS-1$
+                .put("alreadyRunning", true) //$NON-NLS-1$
+                .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("message", "Debug session is already running (detected via EDT's debug " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "target manager — e.g. a UI-started 'Debug As' session) — skipped re-launch " //$NON-NLS-1$
+                    + "to avoid the 'Debug session already exists' modal. Call terminate_launch " //$NON-NLS-1$
+                    + "first, or pass restartIfRunning=true, to start a fresh session."); //$NON-NLS-1$
+            return already.toJson();
+        }
+
+        // restartIfRunning: stop the existing session non-interactively, then proceed.
+        Activator.logInfo("debug_launch restartIfRunning: terminating existing target-manager " //$NON-NLS-1$
+            + "session: project=" + projectName + ", applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
+        terminateExistingSessionAndWait(existing, delegateAppId);
+        return null;
+    }
+
+    /**
+     * Resolves the application id EXACTLY the way EDT's launch delegate's
+     * {@code findConfiguredApplicationIdentifier} does: the config's persisted
+     * {@code ATTR_APPLICATION_ID} when present, else the project's
+     * {@code IApplicationManager.getDefaultApplication(project)} id. NOT the
+     * synthetic {@code launch:<configName>} our {@code getApplicationIdFor} mints
+     * when no real id is persisted — that synthetic id is what made the duplicate
+     * guard miss the delegate's session in Bitrix 20074. Returns {@code null} if the
+     * id cannot be resolved (no persisted id and no default application).
+     */
+    private String resolveDelegateApplicationId(ILaunchConfiguration config, String projectName)
+    {
+        String realId = LaunchConfigUtils.readAttribute(config,
+            LaunchConfigUtils.ATTR_APPLICATION_ID, ""); //$NON-NLS-1$
+        if (realId != null && !realId.isEmpty())
+        {
+            return realId;
+        }
+        ProjectContext ctx = ProjectContext.of(projectName);
+        if (!ctx.isOpen())
+        {
+            return null;
+        }
+        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
+        if (appManager == null)
+        {
+            return null;
+        }
+        // resolveDefaultApplicationId returns the original (empty) value when there is
+        // no default — normalize that to null so findRuntimeClientDebugTarget's
+        // empty-id guard short-circuits instead of matching on "".
+        String resolved = LaunchLifecycleUtils.resolveDefaultApplicationId(
+            ctx.project(), null, appManager);
+        return resolved != null && !resolved.isEmpty() ? resolved : null;
+    }
+
+    /**
+     * Terminates the given live debug target non-interactively and waits up to
+     * {@link #RESTART_TERMINATE_TIMEOUT_MS} for it to die, then clears the
+     * registry for {@code appId} — mirroring the delegate's
+     * {@code terminateOldDebugSessions} (terminate → short wait → proceed) and the
+     * {@code terminate_launch} cleanup (forget the application so a half-dead client
+     * is not raced). Best-effort: a termination failure is logged, not thrown — the
+     * caller proceeds to launch regardless, and if a stale client lingers the launch
+     * delegate's modal is the armed auto-confirmer's job.
+     */
+    private void terminateExistingSessionAndWait(IDebugTarget target, String appId)
+    {
+        try
+        {
+            if (target.canTerminate())
+            {
+                target.terminate();
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error terminating existing debug session before restart", e); //$NON-NLS-1$
+        }
+        long deadline = System.currentTimeMillis() + RESTART_TERMINATE_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline)
+        {
+            try
+            {
+                if (target.isTerminated())
+                {
+                    break;
+                }
+            }
+            catch (Exception e)
+            {
+                break;
+            }
+            try
+            {
+                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (appId != null && !appId.isEmpty())
+        {
+            DebugSessionRegistry.get().forgetApplication(appId);
+        }
+    }
+
     /**
      * Launches the given configuration in debug mode, asynchronously.
      *
@@ -519,25 +715,36 @@ public class DebugLaunchTool implements IMcpTool
      * async lambda instead. Only the synchronous (headless, no UI thread) path can
      * still return an error message.
      *
-     * <p>When {@code autoConfirmUpdateDialog} is {@code true}, the
-     * {@code config.launch(...)} call is wrapped in
-     * {@link LaunchUpdateDialogAutoConfirmer#arm()}/{@link LaunchUpdateDialogAutoConfirmer#disarm()}
-     * as a belt-and-suspenders safeguard: even though the pre-launch update
-     * ({@code updateApplicationIfNeeded}) normally leaves the IB {@code UPDATED} so
-     * the EDT launch delegate skips its modal, an IB whose DB config is genuinely
-     * behind (e.g. a restructure that the launch delegate re-detects) can still pop
-     * the application-modal "Update then run / Run without update" dialog. While
-     * armed, a {@link Display} filter auto-presses its default ("Update then run")
-     * button so the launch proceeds without a human — see Bitrix 20074. The
-     * arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread the
-     * modal blocks, so the auto-press is dispatched by the modal's nested event loop;
-     * the MCP worker has already returned, so the server is never hung on the modal.
+     * <p>The {@code config.launch(...)} call is always wrapped in
+     * {@link LaunchUpdateDialogAutoConfirmer#arm(boolean, boolean)}/{@link LaunchUpdateDialogAutoConfirmer#disarm(boolean, boolean)}.
+     * Two independently-gated matchers share one {@link Display} filter:
+     * <ul>
+     *   <li>the D4 "Application update" matcher is armed only when
+     *       {@code autoConfirmUpdateDialog} is {@code true}. Even though the
+     *       pre-launch update ({@code updateApplicationIfNeeded}) normally leaves the
+     *       IB {@code UPDATED} so the EDT launch delegate skips its modal, an IB whose
+     *       DB config is genuinely behind (e.g. a restructure the delegate re-detects)
+     *       can still pop the "Update then run / Run without update" dialog; while
+     *       armed the filter auto-presses its default ("Update then run") button — see
+     *       Bitrix 20074.</li>
+     *   <li>the D5 code-1003 "debug session already exists" matcher is armed
+     *       <em>unconditionally</em> on this debug path (independent of
+     *       {@code autoConfirmUpdateDialog}). With {@code restartIfRunning=true} and a
+     *       {@code terminate()} that times out, the relaunch can still race a residual
+     *       1003 modal; auto-pressing its default ("stop existing and start new")
+     *       keeps an unattended call from hanging. Pressing it performs NO DB update,
+     *       so it does not undo the {@code updateBeforeLaunch=false} opt-out.</li>
+     * </ul>
+     * The arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread
+     * the modal blocks, so the auto-press is dispatched by the modal's nested event
+     * loop; the MCP worker has already returned, so the server is never hung.
      *
      * <p>Callers pass {@code updateBeforeLaunch} for {@code autoConfirmUpdateDialog}:
      * with {@code updateBeforeLaunch=false} the documented contract is that the
-     * platform "may then show that modal" — auto-pressing its default button would
-     * silently perform the very DB update the caller disabled, so the confirmer is
-     * NOT armed and the dialog is left for a human.
+     * platform "may then show that modal" — auto-pressing the UPDATE dialog's default
+     * button would silently perform the very DB update the caller disabled, so the
+     * UPDATE matcher is NOT armed and that dialog is left for a human. The 1003
+     * matcher, which performs no update, stays armed regardless.
      *
      * <p>Package-private (not {@code private}) so the headless unit tests can
      * exercise the synchronous fallback directly.
@@ -557,13 +764,13 @@ public class DebugLaunchTool implements IMcpTool
             // immediately so a 1C startup dialog can never block the HTTP socket.
             // The launch outcome can no longer be returned to the caller, so log it.
             display.asyncExec(() -> {
-                // Auto-confirm EDT's blocking "Application update" modal for the
-                // duration of this single launch only. Manual EDT launches outside
-                // this window still prompt normally.
-                if (autoConfirmUpdateDialog)
-                {
-                    LaunchUpdateDialogAutoConfirmer.arm();
-                }
+                // Auto-confirm EDT's blocking launch modals for the duration of this
+                // single launch only. The "Application update" (D4) modal is pressed
+                // only when the caller did NOT opt out of the DB update; the
+                // code-1003 "debug session already exists" (D5) modal is ALWAYS
+                // auto-confirmed on this debug path (it is independent of the update
+                // opt-out). Manual EDT launches outside this window still prompt.
+                LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
                 try
                 {
                     config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -574,19 +781,13 @@ public class DebugLaunchTool implements IMcpTool
                 }
                 finally
                 {
-                    if (autoConfirmUpdateDialog)
-                    {
-                        LaunchUpdateDialogAutoConfirmer.disarm();
-                    }
+                    LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
                 }
             });
             return null;
         }
         // No UI thread (headless tests): launch synchronously and surface errors.
-        if (autoConfirmUpdateDialog)
-        {
-            LaunchUpdateDialogAutoConfirmer.arm();
-        }
+        LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
         try
         {
             config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -599,10 +800,7 @@ public class DebugLaunchTool implements IMcpTool
         }
         finally
         {
-            if (autoConfirmUpdateDialog)
-            {
-                LaunchUpdateDialogAutoConfirmer.disarm();
-            }
+            LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
         }
     }
 

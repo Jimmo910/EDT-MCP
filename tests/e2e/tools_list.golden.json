@@ -269,6 +269,10 @@
           "description": "EDT project name; required unless launchConfigurationName is given.",
           "type": "string"
         },
+        "restartIfRunning": {
+          "description": "Default false: if a matching session is already running, short-circuit with alreadyRunning:true and do NOT relaunch (call terminate_launch to restart). true: non-interactively terminate the existing session, then relaunch — no 'Debug session already exists' modal blocks the call.",
+          "type": "boolean"
+        },
         "updateBeforeLaunch": {
           "description": "Default true: silently apply the configuration->DB update before launching so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog is auto-confirmed); false skips the update and the platform may then show that modal. Ignored for Attach.",
           "type": "boolean"

@@ -152,6 +152,69 @@ public final class DebugServerTargetSupport
     }
 
     /**
+     * Finds a live runtime-client DEBUG target that EDT's launch delegate would
+     * consider a duplicate of a launch for {@code (projectName, resolvedAppId)} —
+     * the criterion behind the "Debug session already exists" code-1003 modal.
+     *
+     * <p>This mirrors
+     * {@code RuntimeClientLaunchDelegate.checkExistingDebugSessions}: it enumerates
+     * EDT's own {@code IRuntimeDebugClientTargetManager.listDebugTargets()} view
+     * (the SAME set the delegate scans — which includes UI-started "Debug As" and
+     * otherwise-unregistered runtime-client sessions that never surface in
+     * {@link org.eclipse.debug.core.ILaunchManager#getLaunches()}, and so are
+     * invisible to {@link DebugSessionRegistry#findActiveTarget}/
+     * {@link DebugSessionRegistry#findActiveLaunch}), and matches a target whose
+     * bound {@code IApplication} has the same project name AND the same application
+     * id as the launch about to start.
+     *
+     * <p>{@code resolvedAppId} MUST already be resolved the delegate's way:
+     * {@code ATTR_APPLICATION_ID} if the config has it, else the project's
+     * {@code IApplicationManager.getDefaultApplication(project)} id — see
+     * {@code DebugLaunchTool} call sites. The synthetic {@code launch:<configName>}
+     * id is NOT the delegate's key; passing one here never matches (that mismatch is
+     * exactly the bug 20074 missed).
+     *
+     * <p>Best-effort and fully guarded — returns {@code null} (never throws) when the
+     * target manager is unavailable (headless), the API shape differs, or nothing
+     * matches.
+     *
+     * @param projectName the launch's target project name (may be {@code null}/empty)
+     * @param resolvedAppId the delegate-resolved application id (may be {@code null}/empty)
+     * @return the matching live runtime-client debug target, or {@code null}
+     */
+    public static IDebugTarget findRuntimeClientDebugTarget(String projectName, String resolvedAppId)
+    {
+        if (projectName == null || projectName.isEmpty()
+            || resolvedAppId == null || resolvedAppId.isEmpty())
+        {
+            return null;
+        }
+        for (ServerTarget st : listServerTargets())
+        {
+            IDebugTarget target = st.target;
+            if (target == null || target.isTerminated())
+            {
+                continue;
+            }
+            Object application = reflectApplication(target);
+            if (application == null)
+            {
+                continue;
+            }
+            String appId = reflectString(application, "getId"); //$NON-NLS-1$
+            if (!resolvedAppId.equals(appId))
+            {
+                continue;
+            }
+            if (projectName.equals(reflectApplicationProjectName(application)))
+            {
+                return target;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Resolves an {@code applicationId} to a debug-server target. Accepts, in
      * order of preference:
      * <ul>
@@ -439,6 +502,22 @@ public final class DebugServerTargetSupport
     /** Reflectively resolves {@code getApplication()} (possibly an Optional) to its name. */
     private static String reflectApplicationName(Object target)
     {
+        Object app = reflectApplication(target);
+        if (app == null)
+        {
+            return null;
+        }
+        String name = reflectString(app, "getName"); //$NON-NLS-1$
+        return name != null ? name : app.toString();
+    }
+
+    /**
+     * Reflectively resolves the target's bound {@code IApplication}
+     * ({@code getApplication()}, unwrapping an {@link java.util.Optional}); null on
+     * any failure or when no application is bound.
+     */
+    private static Object reflectApplication(Object target)
+    {
         try
         {
             Method m = target.getClass().getMethod("getApplication"); //$NON-NLS-1$
@@ -448,12 +527,32 @@ public final class DebugServerTargetSupport
             {
                 app = ((java.util.Optional<?>)app).orElse(null);
             }
-            if (app == null)
+            return app;
+        }
+        catch (Throwable e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Reflectively resolves an {@code IApplication}'s project name
+     * ({@code getProject().getName()}); null on any failure. The
+     * {@code com.e1c.g5.dt.applications.IApplication} interface is in a different
+     * bundle, so this stays reflective like the rest of this support class.
+     */
+    private static String reflectApplicationProjectName(Object application)
+    {
+        try
+        {
+            Method m = application.getClass().getMethod("getProject"); //$NON-NLS-1$
+            m.setAccessible(true);
+            Object project = m.invoke(application);
+            if (project == null)
             {
                 return null;
             }
-            String name = reflectString(app, "getName"); //$NON-NLS-1$
-            return name != null ? name : app.toString();
+            return reflectString(project, "getName"); //$NON-NLS-1$
         }
         catch (Throwable e)
         {

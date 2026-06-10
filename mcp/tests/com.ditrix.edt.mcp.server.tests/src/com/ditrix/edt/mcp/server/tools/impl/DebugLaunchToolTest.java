@@ -74,6 +74,51 @@ public class DebugLaunchToolTest
     }
 
     @Test
+    public void testSchemaDeclaresRestartIfRunning()
+    {
+        // D5 (Bitrix 20074): restartIfRunning must be a declared input so the
+        // schema<->execute parity test passes and clients can discover it. Its
+        // read in execute() is enforced by SchemaExecuteParamParityTest.
+        String schema = new DebugLaunchTool().getInputSchema();
+        assertNotNull(schema);
+        assertTrue("schema must declare restartIfRunning",
+            schema.contains("\"restartIfRunning\"")); //$NON-NLS-1$
+        assertTrue("schema must document the default short-circuit contract",
+            schema.contains("alreadyRunning:true")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testRestartIfRunningDefaultsToFalse()
+    {
+        // Default-false contract is reachable headlessly only through the
+        // project+application validation that runs BEFORE any launch-manager touch:
+        // omitting restartIfRunning must NOT change the required-arg behavior. The
+        // launch path itself (where false => alreadyRunning short-circuit) needs a
+        // live workbench and is covered E2E.
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "MyProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new DebugLaunchTool().execute(params);
+        assertTrue(result.contains("applicationId is required")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsRestartIfRunningAndTargetManagerGuard()
+    {
+        // D5: the guide must document both halves of the fix — the new
+        // restartIfRunning switch and that the already-running guard now also catches
+        // a session EDT tracks only through its debug target manager (the code-1003
+        // "Debug session already exists" modal source). Ratchet so it can't drift.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document restartIfRunning",
+            guide.contains("restartIfRunning")); //$NON-NLS-1$
+        assertTrue("guide must document the target-manager already-running detection",
+            guide.contains("target manager")); //$NON-NLS-1$
+        assertTrue("guide must reference the 'Debug session already exists' modal it prevents",
+            guide.contains("Debug session already exists")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testOutputSchemaDeclaresLaunchingStatus()
     {
         // The launch is async: a fresh launch emits status:"launching" so the caller
@@ -231,5 +276,35 @@ public class DebugLaunchToolTest
         assertNotNull(guide);
         assertTrue("guide must document the synthetic-id preflight skip",
             guide.contains("launch:<configName>")); //$NON-NLS-1$
+    }
+
+    // ============ D5 follow-up: 1003 confirmer armed independently of updateBeforeLaunch ============
+
+    @Test
+    public void testPerformLaunchHeadlessWithUpdateConfirmExecutesSynchronously() throws Exception
+    {
+        // The debug path now arms with (updateDialog=autoConfirmUpdateDialog,
+        // sessionDialog=true) via the split arm(boolean,boolean). The synchronous
+        // headless path must still launch cleanly with autoConfirmUpdateDialog=true:
+        // the confirmer arm/disarm is a no-op in this no-workbench harness and must
+        // not break the launch or its finally chain.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        String error = new DebugLaunchTool().performLaunch(config, true);
+        assertNull("successful headless launch must return null even with update auto-confirm", error);
+        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
+    }
+
+    @Test
+    public void testGuideDocuments1003ConfirmerIndependentOfUpdateBeforeLaunch()
+    {
+        // D5 follow-up: the code-1003 "debug session already exists" auto-confirmer
+        // is armed on EVERY debug launch, independent of updateBeforeLaunch (it
+        // performs no DB update, so it does not undo the updateBeforeLaunch=false
+        // opt-out). Only the separate 'Application update' modal stays gated on
+        // updateBeforeLaunch (review-fix A). Ratchet the guide so this can't drift.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the 1003 confirmer fires regardless of updateBeforeLaunch",
+            guide.contains("regardless of `updateBeforeLaunch`")); //$NON-NLS-1$
     }
 }

@@ -89,4 +89,25 @@ public class DebugServerTargetSupportTest
         long elapsed = System.currentTimeMillis() - start;
         assertTrue("must not block for the full timeout on a null target", elapsed < 1500L); //$NON-NLS-1$
     }
+
+    // === findRuntimeClientDebugTarget — the delegate-criterion duplicate guard (D5/20074) ===
+
+    @Test
+    public void testFindRuntimeClientDebugTargetNullArgsReturnNull()
+    {
+        // Both keys are required — a null/empty project or app id can never identify the
+        // delegate's session, so the guard must never match (and never throw) on them.
+        assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget(null, "app")); //$NON-NLS-1$
+        assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget("Proj", null)); //$NON-NLS-1$
+        assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget("", "app")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget("Proj", "")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testFindRuntimeClientDebugTargetHeadlessReturnsNull()
+    {
+        // Headless: no IRuntimeDebugClientTargetManager OSGi service is registered, so
+        // listDebugTargets() yields nothing and the guard resolves to null (never throws).
+        assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget("Proj", "app")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
 }
