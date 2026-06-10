@@ -11,6 +11,10 @@ import java.util.Optional;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.DebugPlugin;
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchConfiguration;
@@ -1059,24 +1063,33 @@ public class DebugLaunchTool implements IMcpTool
     /**
      * Launches the given configuration in debug mode, asynchronously.
      *
-     * <p>Uses a direct {@code config.launch(DEBUG_MODE, null)} — not
+     * <p>Uses a direct {@code config.launch(DEBUG_MODE, monitor)} — not
      * {@code DebugUITools.launch} — because the latter may open modal dialogs
      * (save-prompt, perspective-switch, already-running-confirmation) that
      * block the MCP worker thread indefinitely and eventually close the HTTP
      * socket. {@code debug_yaxunit_tests} uses the same direct path.
      *
-     * <p>The launch is scheduled on the UI thread via {@code asyncExec} and this
-     * method returns immediately — it does NOT wait for the 1C client to finish
-     * starting. A runtime client typically shows GUI dialogs at startup (login,
-     * database update), so blocking here (as the previous {@code syncExec} did)
-     * would hang the MCP worker until it timed out and would freeze the EDT UI
-     * while the modal dialog is up. Callers therefore report
-     * {@code status: "launching"}; readiness is observed separately via
-     * {@code debug_status} / {@code wait_for_break}.
+     * <p>The launch runs in a BACKGROUND {@link Job} (D7a, Bitrix 20091) — never
+     * on the SWT UI thread — and this method returns immediately: it does NOT
+     * wait for the 1C client to finish starting. The previous {@code asyncExec}
+     * dispatch ran the ENTIRE {@code RuntimeClientLaunchDelegate.doLaunch} —
+     * including the standalone-server non-debug→debug stop+restart, which takes
+     * minutes — ON the UI thread, freezing the whole workbench ("not responding",
+     * pale window) for that whole time. A manual EDT launch never freezes because
+     * {@code DebugUIPlugin.launchInBackground} runs the launch in a background Job;
+     * this Job mirrors that exact shape: {@link Job#INTERACTIVE} priority, no
+     * scheduling rule, neither {@code setUser} nor {@code setSystem} — so it shows
+     * in the Progress view like EDT's own launches. The delegate's modals
+     * self-marshal to the UI thread ({@code syncCall}), so they still appear there
+     * and the armed auto-confirmer (whose {@link Display} filter fires on the UI
+     * thread regardless of which thread ran {@code launch()}) still presses them.
+     * Callers therefore report {@code status: "launching"}; readiness is observed
+     * separately via {@code debug_status} / {@code wait_for_break}.
      *
      * <p>Because the launch now runs after this method returns, any failure can no
      * longer be surfaced synchronously to the caller — it is logged from inside the
-     * async lambda instead. Only the synchronous (headless, no UI thread) path can
+     * Job body ({@link #runLaunchJobBody}) and reflected in the Job's result
+     * {@link IStatus}. Only the synchronous (headless, no workbench) path can
      * still return an error message.
      *
      * <p>The {@code config.launch(...)} call is always wrapped in
@@ -1099,9 +1112,11 @@ public class DebugLaunchTool implements IMcpTool
      *       keeps an unattended call from hanging. Pressing it performs NO DB update,
      *       so it does not undo the {@code updateBeforeLaunch=false} opt-out.</li>
      * </ul>
-     * The arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread
-     * the modal blocks, so the auto-press is dispatched by the modal's nested event
-     * loop; the MCP worker has already returned, so the server is never hung.
+     * The arm/disarm runs INSIDE the Job body's try/finally — both are thread-safe
+     * from any thread (counters under a lock + a {@code syncExec} reconcile), and
+     * the dialog shells are always created on the UI thread, so the filter fires
+     * there no matter which thread ran the launch. The MCP worker has already
+     * returned, so the server is never hung.
      *
      * <p>Callers pass {@code updateBeforeLaunch} for {@code autoConfirmUpdateDialog}:
      * with {@code updateBeforeLaunch=false} the documented contract is that the
@@ -1118,39 +1133,32 @@ public class DebugLaunchTool implements IMcpTool
      */
     String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog)
     {
-        // Workbench-aware probe (rv1 review FIND-2): never creates a display, so
-        // a truly headless runtime takes the synchronous fallback below instead
-        // of queueing onto an event loop no thread ever pumps.
+        // Workbench-aware probe (rv1 review FIND-2): never creates a display. It
+        // decides Job-vs-headless ONLY: with a live workbench the launch is
+        // dispatched as a background Job; a truly headless runtime takes the
+        // synchronous fallback below instead of scheduling work nothing observes.
         Display display = LaunchLifecycleUtils.workbenchDisplayOrNull();
         if (display != null && !display.isDisposed())
         {
-            // Fire-and-forget on the UI thread: returns control to the MCP worker
-            // immediately so a 1C startup dialog can never block the HTTP socket.
-            // The launch outcome can no longer be returned to the caller, so log it.
-            display.asyncExec(() -> {
-                // Auto-confirm EDT's blocking launch modals for the duration of this
-                // single launch only. The "Application update" (D4) modal is pressed
-                // only when the caller did NOT opt out of the DB update; the
-                // code-1003 "debug session already exists" (D5) modal is ALWAYS
-                // auto-confirmed on this debug path (it is independent of the update
-                // opt-out). Manual EDT launches outside this window still prompt.
-                LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
-                try
+            // Fire-and-forget in a background Job (mirroring EDT's own
+            // DebugUIPlugin.launchInBackground): returns control to the MCP worker
+            // immediately, keeps the EDT UI thread free — a minutes-long delegate
+            // (e.g. the standalone-server mode-switch restart) no longer freezes
+            // the workbench. The launch outcome can no longer be returned to the
+            // caller, so the Job body logs it and reports it as its result status.
+            Job job = new Job("Launching " + config.getName()) //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
                 {
-                    config.launch(ILaunchManager.DEBUG_MODE, null);
+                    return runLaunchJobBody(config, autoConfirmUpdateDialog, monitor);
                 }
-                catch (Exception e)
-                {
-                    Activator.logError("Error launching debug session (async)", e); //$NON-NLS-1$
-                }
-                finally
-                {
-                    LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
-                }
-            });
+            };
+            job.setPriority(Job.INTERACTIVE);
+            job.schedule();
             return null;
         }
-        // No UI thread (headless tests): launch synchronously and surface errors.
+        // No workbench (headless tests): launch synchronously and surface errors.
         LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
         try
         {
@@ -1161,6 +1169,59 @@ public class DebugLaunchTool implements IMcpTool
         {
             Activator.logError("Error launching debug session", e); //$NON-NLS-1$
             return e.getMessage();
+        }
+        finally
+        {
+            LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
+        }
+    }
+
+    /**
+     * The body of the background launch {@link Job} (D7a, Bitrix 20091) — the
+     * seam {@link #performLaunch} schedules and the headless unit tests exercise
+     * directly. Arms the {@link LaunchUpdateDialogAutoConfirmer} (update matcher
+     * gated on {@code autoConfirmUpdateDialog}, code-1003 matcher unconditional —
+     * the same flags the asyncExec dispatch used), runs the launch, and ALWAYS
+     * disarms in {@code finally} — both calls are thread-safe from a Job thread.
+     *
+     * <p>Never throws: a Job that dies on an uncaught exception fails silently for
+     * the MCP caller, so EVERY failure — {@link CoreException} or any other
+     * {@link Throwable} — is logged to the EDT error log and returned as an error
+     * {@link IStatus} (visible as the Job's result in the Progress view).
+     *
+     * @param config the launch configuration to start in debug mode
+     * @param autoConfirmUpdateDialog arm the D4 "Application update" matcher
+     * @param monitor the Job's progress monitor, passed through to
+     *        {@code config.launch} so the Progress view shows the delegate's steps
+     * @return {@link Status#OK_STATUS} on success, else an error status
+     */
+    static IStatus runLaunchJobBody(ILaunchConfiguration config, boolean autoConfirmUpdateDialog,
+        IProgressMonitor monitor)
+    {
+        // Auto-confirm EDT's blocking launch modals for the duration of this
+        // single launch only. The "Application update" (D4) modal is pressed
+        // only when the caller did NOT opt out of the DB update; the
+        // code-1003 "debug session already exists" (D5) modal is ALWAYS
+        // auto-confirmed on this debug path (it is independent of the update
+        // opt-out). Manual EDT launches outside this window still prompt.
+        LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
+        try
+        {
+            config.launch(ILaunchManager.DEBUG_MODE, monitor);
+            return Status.OK_STATUS;
+        }
+        catch (CoreException e)
+        {
+            Activator.logError("debug_launch failed asynchronously: " + e.getMessage(), e); //$NON-NLS-1$
+            return e.getStatus();
+        }
+        catch (Throwable t)
+        {
+            // Never let the Job die on an uncaught exception — it would vanish
+            // without a trace for the MCP caller. Log + report an error status.
+            Activator.logError("debug_launch failed asynchronously: " + t.getMessage(), t); //$NON-NLS-1$
+            return new Status(IStatus.ERROR, Activator.PLUGIN_ID,
+                "debug_launch failed asynchronously: " + t.getMessage(), t); //$NON-NLS-1$
         }
         finally
         {
