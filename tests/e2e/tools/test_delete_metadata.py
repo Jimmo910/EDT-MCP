@@ -350,8 +350,27 @@ def test_delete_form_object_preview_then_confirm():
     assert r.structured.get("fqn") == fqn, "must echo the target form fqn"
     poll_disk_path_gone("src/Catalogs/Catalog/Forms/%s/Form.form" % form,
                         ctx="the deleted form's content Form.form must be gone from disk")
+    # FIX-2b: the form's whole resource FOLDER (not just Form.form) must be gone - an orphan
+    # Forms/<Name>/ folder survived the model delete, the owner delete and resync_to_disk before.
+    poll_disk_path_gone("src/Catalogs/Catalog/Forms/%s" % form,
+                        ctx="the deleted form's resource folder must be gone from disk (FIX-2b)")
     poll_disk_lacks("src/Catalogs/Catalog/Catalog.mdo", form,
                     ctx="the deleted form's <forms> entry must be gone from the owner .mdo")
+    # FIX-2b: with the orphan folder gone, get_metadata_details on the form FQN no longer resolves it -
+    # it must NOT render a live structure, and must behave exactly like a form that NEVER existed (the
+    # form branch reports the same unresolvable-form ERROR for both, so the deleted form is now
+    # indistinguishable from a never-existed one rather than half-resolving off the orphan file).
+    gd = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
+    body = (gd.text or "") + (gd.error_text() if gd.is_error else "")
+    assert_not_contains(body, "Form Structure",
+                        "the deleted form must no longer render a structure")
+    never = call("get_metadata_details",
+                 {"projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ZZ_NeverExisted_e2e"]})
+    never_body = (never.text or "") + (never.error_text() if never.is_error else "")
+    deleted_unresolved = ("ERROR" in body) or ("no editable content model" in body)
+    never_unresolved = ("ERROR" in never_body) or ("no editable content model" in never_body)
+    assert deleted_unresolved and never_unresolved, \
+        "the deleted form FQN must be as unresolvable as a never-existed one: %r vs %r" % (body, never_body)
     # Anti-cheat: re-creating the same form must SUCCEED (would fail "already exists" on a no-op delete).
     wait_for_project_ready()
     again = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})

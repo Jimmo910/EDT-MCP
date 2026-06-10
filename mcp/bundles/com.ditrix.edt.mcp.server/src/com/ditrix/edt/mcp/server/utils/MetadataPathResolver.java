@@ -79,6 +79,33 @@ public final class MetadataPathResolver
     }
 
     /**
+     * Resolves the FOLDER that holds a form's resource files (e.g. {@code Form.form} and its
+     * {@code Module.bsl}), relative to the project root - the directory portion of
+     * {@link #resolveFormFilePath(String)} without the trailing {@code /Form.form}.
+     *
+     * <p>Supported formats (same as {@link #resolveFormFilePath(String)}):
+     * <ul>
+     *   <li>{@code "Catalog.Products.Forms.ItemForm"} &rarr;
+     *       {@code "src/Catalogs/Products/Forms/ItemForm"}</li>
+     *   <li>{@code "CommonForm.MyForm"} &rarr; {@code "src/CommonForms/MyForm"}</li>
+     * </ul>
+     *
+     * @param formPath FQN path
+     * @return the form-folder path relative to the project root, or {@code null} if cannot resolve
+     */
+    public static String resolveFormFolderPath(String formPath)
+    {
+        String filePath = resolveFormFilePath(formPath);
+        if (filePath == null)
+        {
+            return null;
+        }
+        int slash = filePath.lastIndexOf('/');
+        // resolveFormFilePath always ends in "/Form.form", so a slash is guaranteed; defensive anyway.
+        return slash > 0 ? filePath.substring(0, slash) : null;
+    }
+
+    /**
      * Resolves a metadata type string to the directory name under {@code src/}.
      * Handles English/Russian, singular/plural forms via {@link MetadataTypeUtils}.
      *
