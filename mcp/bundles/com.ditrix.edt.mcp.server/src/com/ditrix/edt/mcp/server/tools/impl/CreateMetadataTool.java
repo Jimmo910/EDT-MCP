@@ -40,7 +40,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.base.AbstractMetadataWriteTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
-import com.ditrix.edt.mcp.server.utils.FormStructureReader;
+import com.ditrix.edt.mcp.server.utils.FormValidationException;
 import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
@@ -557,94 +557,64 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         IProject project = ctx.project;
         Configuration config = ctx.config;
 
-        MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
-        if (mdForm == null)
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName' or 'CommonForm.FormName'; check with " //$NON-NLS-1$
-                + "get_metadata_objects and get_metadata_details.").toJson(); //$NON-NLS-1$
-        }
-        if (!(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form is not a BM object").toJson(); //$NON-NLS-1$
-        }
-
-        final String titleLanguage;
-        if (titleVal != null && !titleVal.isEmpty())
-        {
-            titleLanguage = MetadataLanguageUtils.resolveLanguageCode(config, titleLang);
-            if (titleLanguage == null)
-            {
-                return ToolResult.error("Cannot determine a language code for the title in this " //$NON-NLS-1$
-                    + "configuration. Specify a 'language' code (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
-            }
-        }
-        else
-        {
-            titleLanguage = null;
-        }
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final FormElementWriter.Kind fKind = kind;
-        final String name = ref.name;
         final String parent = parentName;
         final String bind = bindTarget;
         final String titleText = titleVal;
         final String[] createdKind = new String[1];
 
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "CreateFormMember", (tx, pm) -> //$NON-NLS-1$
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(project, config,
+                ref.formPath, "Form not found for '" + normFqn + "'. Address a form as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName' or 'CommonForm.FormName'; check with " //$NON-NLS-1$
+                    + "get_metadata_objects and get_metadata_details."); //$NON-NLS-1$
+
+            final String titleLanguage;
+            if (titleVal != null && !titleVal.isEmpty())
             {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
+                titleLanguage = MetadataLanguageUtils.resolveLanguageCode(config, titleLang);
+                if (titleLanguage == null)
                 {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+                    return ToolResult.error("Cannot determine a language code for the title in this " //$NON-NLS-1$
+                        + "configuration. Specify a 'language' code (e.g. 'en' or 'ru').").toJson(); //$NON-NLS-1$
                 }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
+            }
+            else
+            {
+                titleLanguage = null;
+            }
+
+            persisted = FormElementWriter.writeEditableForm(fctx, "CreateFormMember", //$NON-NLS-1$
+                (formModel, tx) ->
                 {
-                    throw new RuntimeException("the form has no editable content model (it may be " //$NON-NLS-1$
-                        + "empty, an ordinary/legacy form, or not yet built)"); //$NON-NLS-1$
-                }
-                String err = FormElementWriter.createMember(formModel, fKind, name, parent, bind,
-                    titleLanguage, titleText, createdKind);
-                if (err != null)
-                {
-                    throw new RuntimeException(err);
-                }
-                // The content Form is a separate top object serialized to Form.form - export ITS fqn.
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+                    String err = FormElementWriter.createMember(formModel, fKind, ref.name, parent,
+                        bind, titleLanguage, titleText, createdKind);
+                    if (err != null)
+                    {
+                        throw new RuntimeException(err);
+                    }
+                });
         }
         catch (Exception e)
         {
+            String ready = FormValidationException.jsonOf(e);
+            if (ready != null)
+            {
+                return ready;
+            }
             Activator.logError("Error creating form member", e); //$NON-NLS-1$
             return ToolResult.error("Failed to create form element: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
-
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(project, contentFormFqn);
 
         ToolResult formResult = ToolResult.success()
             .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("kind", createdKind[0] != null ? createdKind[0] : fKind.name()) //$NON-NLS-1$
-            .put("name", name) //$NON-NLS-1$
+            .put("name", ref.name) //$NON-NLS-1$
             .put("persisted", persisted); //$NON-NLS-1$
-        addNormalization(formResult, normReport);
+        normReport.addTo(formResult);
         return formResult.put("message", "Created " + normFqn).toJson(); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -790,7 +760,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         {
             result.put("synonym", props.synonym).put("language", synonymLanguage); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        addNormalization(result, normReport);
+        normReport.addTo(result);
         return result.put("message", "Created form " + normFqn //$NON-NLS-1$ //$NON-NLS-2$
             + ". Add structure with create_metadata on a form-member FQN " //$NON-NLS-1$
             + "(e.g. " + normFqn + ".Attribute.<Name>).").toJson(); //$NON-NLS-1$ //$NON-NLS-2$
@@ -835,17 +805,6 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         IProject project = ctx.project;
         Configuration config = ctx.config;
 
-        MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
-        if (mdForm == null)
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName' or 'CommonForm.FormName'.").toJson(); //$NON-NLS-1$
-        }
-        if (!(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form is not a BM object").toJson(); //$NON-NLS-1$
-        }
-
         IV8ProjectManager v8ProjectManager = Activator.getDefault().getV8ProjectManager();
         IV8Project v8Project = v8ProjectManager != null ? v8ProjectManager.getProject(project) : null;
         final Version version = v8Project != null ? v8Project.getVersion() : null;
@@ -856,68 +815,50 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         }
         final String langCode = MetadataLanguageUtils.resolveLanguageCode(config, null);
 
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available for project: " + projectName).toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final String eventName = ref.name;
         final String fProc = procName;
         final String fItemName = ref.isItemLevel() ? ref.itemName : null;
         final String[] createdKind = new String[1];
 
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "CreateFormHandler", (tx, pm) -> //$NON-NLS-1$
-            {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(project, config,
+                ref.formPath, "Form not found for '" + normFqn + "'. Address a form as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName' or 'CommonForm.FormName'."); //$NON-NLS-1$
+            persisted = FormElementWriter.writeEditableForm(fctx, "CreateFormHandler", //$NON-NLS-1$
+                (formModel, tx) ->
                 {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new RuntimeException("the form has no editable content model (it may be " //$NON-NLS-1$
-                        + "empty, an ordinary/legacy form, or not yet built)"); //$NON-NLS-1$
-                }
-                // Form-level handlers attach to the form root; item-level handlers
-                // (Type.Object.Form.F.Field.Item.Handler.Event) attach to the named item.
-                EObject container = formModel;
-                if (fItemName != null)
-                {
-                    container = FormElementWriter.findFormItem(formModel, fItemName);
-                    if (container == null)
+                    // Form-level handlers attach to the form root; item-level handlers
+                    // (Type.Object.Form.F.Field.Item.Handler.Event) attach to the named item.
+                    EObject container = formModel;
+                    if (fItemName != null)
                     {
-                        throw new RuntimeException("Form item not found: " + fItemName //$NON-NLS-1$
-                            + ". Create the item first, then add the handler."); //$NON-NLS-1$
+                        container = FormElementWriter.findFormItem(formModel, fItemName);
+                        if (container == null)
+                        {
+                            throw new RuntimeException("Form item not found: " + fItemName //$NON-NLS-1$
+                                + ". Create the item first, then add the handler."); //$NON-NLS-1$
+                        }
                     }
-                }
-                String err = FormElementWriter.createHandler(container, eventName, fProc, version,
-                    langCode, createdKind);
-                if (err != null)
-                {
-                    throw new RuntimeException(err);
-                }
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+                    String err = FormElementWriter.createHandler(container, eventName, fProc, version,
+                        langCode, createdKind);
+                    if (err != null)
+                    {
+                        throw new RuntimeException(err);
+                    }
+                });
         }
         catch (Exception e)
         {
+            String ready = FormValidationException.jsonOf(e);
+            if (ready != null)
+            {
+                return ready;
+            }
             Activator.logError("Error creating form handler", e); //$NON-NLS-1$
             return ToolResult.error("Failed to create form handler: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
-
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(project, contentFormFqn);
 
         return ToolResult.success()
             .put("action", "created") //$NON-NLS-1$ //$NON-NLS-2$
@@ -1078,7 +1019,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 result.put("targetNamespace", typeSpecific.xdtoNamespace); //$NON-NLS-1$
             }
         }
-        addNormalization(result, normReport);
+        normReport.addTo(result);
         return result
             .put("message", "Created " + fqn) //$NON-NLS-1$ //$NON-NLS-2$
             .toJson();
@@ -1104,15 +1045,6 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             return normFqn;
         }
         return dot >= 0 ? normFqn.substring(0, dot + 1) + normalizedLeaf : normalizedLeaf;
-    }
-
-    /** Adds the {@code normalized} report field to a result when the normalization rewrote anything. */
-    private static void addNormalization(ToolResult result, MdNameNormalizer.Report normReport)
-    {
-        if (normReport.hasChanges())
-        {
-            result.put("normalized", normReport.normalizedFields()); //$NON-NLS-1$
-        }
     }
 
     /**

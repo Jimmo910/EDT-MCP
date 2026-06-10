@@ -163,9 +163,16 @@ public final class LaunchConfigUtils
 
     /**
      * Returns {@code true} if the given applicationId is a synthetic id this plugin
-     * minted ({@code attach:…} or {@code launch:…}) rather than a real 1C
-     * {@code ATTR_APPLICATION_ID}. Synthetic ids are addressable for debug tracking
-     * but cannot be resolved through {@link com.e1c.g5.dt.applications.IApplicationManager}.
+     * minted rather than a real 1C {@code ATTR_APPLICATION_ID}: {@code attach:…} /
+     * {@code launch:…} (minted by {@link #getApplicationIdFor(ILaunchConfiguration)})
+     * or {@code ServerApplication.…} (minted by {@link DebugServerTargetSupport} for
+     * 1C debug-server targets). Synthetic ids are addressable for debug tracking but
+     * cannot be resolved through {@link com.e1c.g5.dt.applications.IApplicationManager}.
+     * <p>
+     * This is THE single authority for the synthetic-prefix classification — every
+     * minted prefix must be known here, or a preflight that feeds an id into
+     * {@code IApplicationManager} fails with "Application not found" for a perfectly
+     * trackable session.
      *
      * @param applicationId the id to test (may be {@code null})
      * @return {@code true} if the id starts with a synthetic prefix
@@ -174,7 +181,8 @@ public final class LaunchConfigUtils
     {
         return applicationId != null
             && (applicationId.startsWith(ATTACH_APP_ID_PREFIX)
-                || applicationId.startsWith(LAUNCH_APP_ID_PREFIX));
+                || applicationId.startsWith(LAUNCH_APP_ID_PREFIX)
+                || applicationId.startsWith(DebugServerTargetSupport.SERVER_APP_ID_PREFIX));
     }
 
     /**

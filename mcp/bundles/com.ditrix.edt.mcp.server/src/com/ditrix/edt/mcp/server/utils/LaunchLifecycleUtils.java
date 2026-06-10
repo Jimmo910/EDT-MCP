@@ -24,7 +24,6 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchManager;
-import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.PlatformUI;
@@ -1275,38 +1274,6 @@ public final class LaunchLifecycleUtils
      *   <li>Find every live launch matching {@code project + applicationId};</li>
      *   <li>Politely terminate each and wait — aborts on timeout (the IB would
      *       still be locked, defeating the purpose);</li>
-     *   <li>Run {@link #updateApplicationIfNeeded} to settle the IB in
-     *       {@code UPDATED} state — the launch delegate then skips its dialog.</li>
-     * </ol>
-     *
-     * <p>If any step fails, the result has {@code ok=false} and the caller must
-     * abort instead of falling through to a launch that would hang on a modal.
-     *
-     * <p>This 5-arg overload uses the full {@code updateScope} ("all") — the
-     * configuration plus its dependent extensions. Prefer the 6-arg overload to
-     * narrow the recompute to a specific {@code extension:<Name>}.
-     *
-     * @param launchManager           Eclipse launch manager
-     * @param project                 target project
-     * @param applicationId           target {@code ATTR_APPLICATION_ID}
-     * @param appManager              EDT application manager
-     * @param terminateTimeoutSeconds polite-wait window per live launch
-     */
-    public static PreLaunchResult prepareForFreshLaunch(ILaunchManager launchManager,
-            IProject project, String applicationId, IApplicationManager appManager,
-            int terminateTimeoutSeconds)
-    {
-        return prepareForFreshLaunch(launchManager, project, applicationId, appManager,
-            terminateTimeoutSeconds, null);
-    }
-
-    /**
-     * Auto-chain executed before {@code workingCopy.launch()} when the caller
-     * wants to bypass EDT's interactive "Update database?" dialog:
-     * <ol>
-     *   <li>Find every live launch matching {@code project + applicationId};</li>
-     *   <li>Politely terminate each and wait — aborts on timeout (the IB would
-     *       still be locked, defeating the purpose);</li>
      *   <li>FORCE a derived-data recompute of the requested projects so a freshly
      *       edited extension {@code .cfe} is regenerated, then wait for it to settle;</li>
      *   <li>Run {@link #updateApplicationIfNeeded} to settle the IB in
@@ -1530,24 +1497,20 @@ public final class LaunchLifecycleUtils
      * an {@link ExecutionContext} so EDT can parent its dialogs correctly.
      * Returns {@code null} in headless environments where no shell exists.
      *
+     * <p>Probes via {@link #workbenchDisplayOrNull()} — NOT
+     * {@code Display.getDefault()}, which would CREATE a display owned by the
+     * calling thread in a headless runtime (the rv1 FIND-2 trap): the stray
+     * display is never pumped, so the {@code syncExec} below would block forever
+     * when issued from another thread. With the workbench probe, headless
+     * callers simply get {@code null} (no dialogs can appear there anyway).
+     *
      * <p>Shared by every tool that builds an {@code ExecutionContext} before
      * calling {@link IApplicationManager#update} (update_database, debug_launch,
      * the YAXUnit auto-chain) so the SWT-grab logic lives in exactly one place.
      */
     public static Shell grabActiveShell()
     {
-        Display display;
-        try
-        {
-            // Headless environments (CI Linux with no X server, EDT via CLI with
-            // no UI) cannot initialise SWT — gtk_init_check() throws SWTError.
-            // No dialogs will appear there anyway, so we return null.
-            display = Display.getDefault();
-        }
-        catch (SWTError | UnsatisfiedLinkError e)
-        {
-            return null;
-        }
+        Display display = workbenchDisplayOrNull();
         if (display == null || display.isDisposed())
         {
             return null;

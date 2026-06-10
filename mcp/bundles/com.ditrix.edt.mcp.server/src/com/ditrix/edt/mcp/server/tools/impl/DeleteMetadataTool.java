@@ -22,8 +22,6 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 
 import com._1c.g5.v8.bm.core.IBmObject;
-import com._1c.g5.v8.bm.integration.IBmModel;
-import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.md.refactoring.core.IMdRefactoringService;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
@@ -40,6 +38,7 @@ import com.ditrix.edt.mcp.server.tools.base.AbstractMetadataWriteTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormStructureReader;
+import com.ditrix.edt.mcp.server.utils.FormValidationException;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataPathResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
@@ -103,12 +102,11 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             .stringProperty("fqn", "FQN of the node targeted for deletion") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("refactoringTitle", "Title of the delete refactoring (preview)") //$NON-NLS-1$ //$NON-NLS-2$
             .objectArrayProperty("items", "Metadata items the deletion would remove (preview)") //$NON-NLS-1$ //$NON-NLS-2$
-            .objectArrayProperty("affectedReferences", "References that would be affected (preview)") //$NON-NLS-1$ //$NON-NLS-2$
-            .integerProperty("affectedReferencesCount", "Count of affected references (preview)") //$NON-NLS-1$ //$NON-NLS-2$
-            .booleanProperty("blocking", "Whether the listed affected references are BLOCKING (the " //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("blocking", "Whether the listed blockingReferences BLOCK the delete (the " //$NON-NLS-1$ //$NON-NLS-2$
                 + "refactoring cannot auto-clean them; a confirm=true delete is refused unless force=true)") //$NON-NLS-1$
-            .objectArrayProperty("blockingReferences", "Incoming references that block the delete " //$NON-NLS-1$ //$NON-NLS-2$
-                + "(action='blocked'), or that were left dangling when force=true (action='executed')") //$NON-NLS-1$
+            .objectArrayProperty("blockingReferences", "Incoming references the refactoring cannot " //$NON-NLS-1$ //$NON-NLS-2$
+                + "auto-clean: listed in the preview, the reason a delete is refused " //$NON-NLS-1$
+                + "(action='blocked'), or left dangling when force=true (action='executed')") //$NON-NLS-1$
             .integerProperty("blockingReferencesCount", "Count of blocking references") //$NON-NLS-1$ //$NON-NLS-2$
             .booleanProperty("forced", "Whether the delete was forced past blocking references") //$NON-NLS-1$ //$NON-NLS-2$
             .stringProperty("message", "Human-readable description of the result") //$NON-NLS-1$ //$NON-NLS-2$
@@ -215,13 +213,13 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             : "Preview of delete refactoring. References listed above will be cleaned up. " //$NON-NLS-1$
                 + "Call with confirm=true to apply."; //$NON-NLS-1$
 
+        // Post-M1 the preview's "affected" references ARE exactly the blocking set, so the list is
+        // serialized ONCE under the blocking* fields shared with action='blocked' / 'executed'.
         return ToolResult.success()
             .put("action", "preview") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", fqn) //$NON-NLS-1$
             .put("refactoringTitle", title) //$NON-NLS-1$
             .put("items", allItems) //$NON-NLS-1$
-            .put("affectedReferences", blocking) //$NON-NLS-1$
-            .put("affectedReferencesCount", blocking.size()) //$NON-NLS-1$
             .put("blocking", hasBlocking) //$NON-NLS-1$
             .put("blockingReferences", blocking) //$NON-NLS-1$
             .put("blockingReferencesCount", blocking.size()) //$NON-NLS-1$
@@ -412,39 +410,29 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     private String deleteFormMember(ProjectContext ctx, String normFqn,
         FormElementWriter.FormMemberRef ref, boolean confirm)
     {
-        IProject project = ctx.project;
-        Configuration config = ctx.config;
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
-        if (mdForm == null)
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form member as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name' " //$NON-NLS-1$
-                + "(Kind = Attribute / Command / Field / Button / Group / Decoration / Table / " //$NON-NLS-1$
-                + "Handler).").toJson(); //$NON-NLS-1$
-        }
-        if (!(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form is not a BM object").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final boolean handler = FormElementWriter.isHandlerToken(ref.kindToken);
-
-        return confirm
-            ? performFormDelete(project, bmModel, mdFormBmId, normFqn, ref, handler)
-            : buildFormDeletePreview(bmModel, mdFormBmId, normFqn, ref, handler);
+        try
+        {
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(ctx.project,
+                ctx.config, ref.formPath,
+                "Form not found for '" + normFqn + "'. Address a form member as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name' " //$NON-NLS-1$
+                    + "(Kind = Attribute / Command / Field / Button / Group / Decoration / Table / " //$NON-NLS-1$
+                    + "Handler)."); //$NON-NLS-1$
+            return confirm
+                ? performFormDelete(fctx, normFqn, ref, handler)
+                : buildFormDeletePreview(fctx, normFqn, ref, handler);
+        }
+        catch (Exception e)
+        {
+            String ready = FormValidationException.jsonOf(e);
+            if (ready != null)
+            {
+                return ready;
+            }
+            Activator.logError("Error deleting form member", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to delete form member: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
     }
 
     /** Resolves the delete target: a handler (form/item container) or a member (attribute/command/item). */
@@ -473,41 +461,27 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     }
 
     /** Preview inside a READ transaction (no mutation): capture the target type + item descendants. */
-    private String buildFormDeletePreview(IBmModel bmModel, long mdFormBmId, String normFqn,
+    private String buildFormDeletePreview(FormElementWriter.FormEditContext fctx, String normFqn,
         FormElementWriter.FormMemberRef ref, boolean handler)
     {
-        FormDeletePreview data = BmTransactions.read(bmModel, "DeleteFormMemberPreview", (tx, pm) -> //$NON-NLS-1$
-        {
-            EObject txMdForm = tx.getObjectById(mdFormBmId);
-            if (txMdForm == null)
+        FormDeletePreview data = FormElementWriter.readEditableForm(fctx, "DeleteFormMemberPreview", //$NON-NLS-1$
+            (formModel, tx) ->
             {
-                return FormDeletePreview.notManaged();
-            }
-            EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-            if (formModel == null)
-            {
-                return FormDeletePreview.notManaged();
-            }
-            EObject target = resolveFormTarget(formModel, ref, handler);
-            if (target == null)
-            {
-                return new FormDeletePreview(); // found stays false
-            }
-            FormDeletePreview d = new FormDeletePreview();
-            d.found = true;
-            d.type = target.eClass().getName();
-            if (!handler)
-            {
-                collectItemDescendants(target, d.descendants);
-            }
-            return d;
-        });
+                EObject target = resolveFormTarget(formModel, ref, handler);
+                if (target == null)
+                {
+                    return new FormDeletePreview(); // found stays false
+                }
+                FormDeletePreview d = new FormDeletePreview();
+                d.found = true;
+                d.type = target.eClass().getName();
+                if (!handler)
+                {
+                    collectItemDescendants(target, d.descendants);
+                }
+                return d;
+            });
 
-        if (data == null || data.notManaged)
-        {
-            return ToolResult.error("the form has no editable content model (it may be empty, an " //$NON-NLS-1$
-                + "ordinary/legacy form, or not yet built): " + ref.formPath).toJson(); //$NON-NLS-1$
-        }
         if (!data.found)
         {
             return formMemberNotFound(ref, handler);
@@ -525,8 +499,9 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("refactoringTitle", "Delete form " + (handler ? "handler" : "member") + " " + ref.name) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             .put("items", removed) //$NON-NLS-1$
-            .put("affectedReferences", Collections.emptyList()) //$NON-NLS-1$
-            .put("affectedReferencesCount", 0) //$NON-NLS-1$
+            .put("blocking", false) //$NON-NLS-1$
+            .put("blockingReferences", Collections.emptyList()) //$NON-NLS-1$
+            .put("blockingReferencesCount", 0) //$NON-NLS-1$
             .put("message", "Preview: deleting '" + ref.name + "' (" + data.type + ") from " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 + ref.formPath + " would remove " //$NON-NLS-1$
                 + (data.descendants.isEmpty()
@@ -539,50 +514,23 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     }
 
     /** Delete inside a WRITE transaction: EcoreUtil.remove the target, then export the content form. */
-    private String performFormDelete(IProject project, IBmModel bmModel, long mdFormBmId, String normFqn,
+    private String performFormDelete(FormElementWriter.FormEditContext fctx, String normFqn,
         FormElementWriter.FormMemberRef ref, boolean handler)
     {
         final String[] capturedType = new String[1];
-        final boolean[] missing = new boolean[1];
-        String formFqn;
-        try
-        {
-            formFqn = BmTransactions.<String>write(bmModel, "DeleteFormMember", (tx, pm) -> //$NON-NLS-1$
+        boolean persisted = FormElementWriter.writeEditableForm(fctx, "DeleteFormMember", //$NON-NLS-1$
+            (formModel, tx) ->
             {
-                EObject txMdForm = tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
-                {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new RuntimeException("the form has no editable content model"); //$NON-NLS-1$
-                }
                 EObject target = resolveFormTarget(formModel, ref, handler);
                 if (target == null)
                 {
-                    missing[0] = true;
-                    return null;
+                    // Thrown (not flagged): rolls the unchanged tx back and skips the export.
+                    throw new FormValidationException(formMemberNotFound(ref, handler));
                 }
                 capturedType[0] = target.eClass().getName();
                 // items is containment, so removing a Group/Table cascades its contained subtree.
                 EcoreUtil.remove(target);
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
             });
-        }
-        catch (Exception e)
-        {
-            Activator.logError("Error deleting form member", e); //$NON-NLS-1$
-            return ToolResult.error("Failed to delete form member: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
-        }
-        if (missing[0])
-        {
-            return formMemberNotFound(ref, handler);
-        }
-
-        boolean persisted = formFqn != null && !formFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(project, formFqn);
 
         return ToolResult.success()
             .put("action", "executed") //$NON-NLS-1$ //$NON-NLS-2$
@@ -642,26 +590,15 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
                 .put("fqn", normFqn) //$NON-NLS-1$
                 .put("refactoringTitle", "Delete form " + ref.formName) //$NON-NLS-1$ //$NON-NLS-2$
                 .put("items", Collections.singletonList(formItem(ref.formName, mdForm.eClass().getName()))) //$NON-NLS-1$
-                .put("affectedReferences", Collections.emptyList()) //$NON-NLS-1$
-                .put("affectedReferencesCount", 0) //$NON-NLS-1$
+                .put("blocking", false) //$NON-NLS-1$
+                .put("blockingReferences", Collections.emptyList()) //$NON-NLS-1$
+                .put("blockingReferencesCount", 0) //$NON-NLS-1$
                 .put("message", "Preview: deleting form '" + ref.formName + "' from " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
                     + " would remove the form and its content Form.form. Cross-references to it " //$NON-NLS-1$
                     + "(a default-form setting) are cleared on the owner. Call confirm=true to apply.") //$NON-NLS-1$
                 .toJson();
         }
 
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         // The owner is a top object whose .mdo registers the form; force-export it after the removal so
         // the <forms> entry (and any cleared default-form ref) lands on disk. eContainer() is the owner.
         EObject ownerObj = mdForm.eContainer();
@@ -678,13 +615,9 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             (resolvedOwnerName == null || resolvedOwnerName.isEmpty()) ? ref.ownerName : resolvedOwnerName;
         try
         {
-            BmTransactions.<Void>write(bmModel, "DeleteFormObject", (tx, pm) -> //$NON-NLS-1$
+            FormElementWriter.FormEditContext fctx = FormElementWriter.editContextFor(project, mdForm);
+            FormElementWriter.writeMdForm(fctx, "DeleteFormObject", (txMdForm, tx) -> //$NON-NLS-1$
             {
-                EObject txMdForm = tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
-                {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
                 EObject owner = txMdForm.eContainer();
                 // Detach the content Form top object (the BM store the attach created) before removing the
                 // MD-form, so no store-less top object is left orphaned in the namespace.
@@ -701,11 +634,15 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
                 }
                 // Remove the MD-form from the owner's 'forms' containment list.
                 EcoreUtil.remove(txMdForm);
-                return null;
             });
         }
         catch (Exception e)
         {
+            String ready = FormValidationException.jsonOf(e);
+            if (ready != null)
+            {
+                return ready;
+            }
             Activator.logError("Error deleting form object", e); //$NON-NLS-1$
             return ToolResult.error("Failed to delete form: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
@@ -878,15 +815,7 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     private static final class FormDeletePreview
     {
         boolean found;
-        boolean notManaged;
         String type;
         final List<Map<String, Object>> descendants = new ArrayList<>();
-
-        static FormDeletePreview notManaged()
-        {
-            FormDeletePreview d = new FormDeletePreview();
-            d.notManaged = true;
-            return d;
-        }
     }
 }

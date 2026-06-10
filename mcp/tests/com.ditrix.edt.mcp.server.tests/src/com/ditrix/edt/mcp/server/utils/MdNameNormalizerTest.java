@@ -8,7 +8,6 @@ package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -16,6 +15,8 @@ import static org.junit.Assert.assertTrue;
 import java.util.List;
 
 import org.junit.Test;
+
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 
 /**
  * Tests for {@link MdNameNormalizer}: the "ё"->"е" / "Ё"->"Е" transformation
@@ -121,8 +122,13 @@ public class MdNameNormalizerTest
         List<String> fields = report.normalizedFields();
         assertEquals(1, fields.size());
         assertEquals("synonym", fields.get(0)); //$NON-NLS-1$
-        assertNotNull(report.note());
-        assertTrue(report.note().contains("synonym")); //$NON-NLS-1$
+
+        // addTo surfaces the rewritten fields as the 'normalized' result field.
+        ToolResult result = ToolResult.success();
+        report.addTo(result);
+        String json = result.toJson();
+        assertTrue(json.contains("\"normalized\"")); //$NON-NLS-1$
+        assertTrue(json.contains("synonym")); //$NON-NLS-1$
     }
 
     @Test
@@ -134,7 +140,9 @@ public class MdNameNormalizerTest
         assertSame(input, report.apply("synonym", input)); //$NON-NLS-1$
         assertFalse(report.hasChanges());
         assertTrue(report.normalizedFields().isEmpty());
-        assertNull(report.note());
+        ToolResult result = ToolResult.success();
+        report.addTo(result);
+        assertFalse(result.toJson().contains("\"normalized\"")); //$NON-NLS-1$
     }
 
     @Test
@@ -152,7 +160,9 @@ public class MdNameNormalizerTest
         String input = "Products"; //$NON-NLS-1$
         assertSame(input, report.apply("name", input)); //$NON-NLS-1$
         assertFalse(report.hasChanges());
-        assertNull(report.note());
+        ToolResult result = ToolResult.success();
+        report.addTo(result);
+        assertFalse(result.toJson().contains("\"normalized\"")); //$NON-NLS-1$
     }
 
     @Test

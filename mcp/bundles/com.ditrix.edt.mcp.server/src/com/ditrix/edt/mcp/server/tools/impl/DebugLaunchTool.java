@@ -455,12 +455,14 @@ public class DebugLaunchTool implements IMcpTool
      * Runs the EDT "update database before launch" step for a runtime-client launch.
      * Returns {@code null} on success, or an error message describing the failure.
      *
-     * <p>Synthetic application ids — {@code attach:<configName>} and
-     * {@code launch:<configName>}, see
+     * <p>Synthetic application ids — {@code attach:<configName>},
+     * {@code launch:<configName>} and {@code ServerApplication.<app>}, see
      * {@link LaunchConfigUtils#isSyntheticApplicationId} — skip the preflight.
      * They are minted by
-     * {@link LaunchConfigUtils#getApplicationIdFor(ILaunchConfiguration)} for
-     * configurations WITHOUT a persisted {@code ATTR_APPLICATION_ID} and cannot be
+     * {@link LaunchConfigUtils#getApplicationIdFor(ILaunchConfiguration)} (or, for
+     * the {@code ServerApplication.} form, by
+     * {@code DebugServerTargetSupport}) for sessions WITHOUT a persisted
+     * {@code ATTR_APPLICATION_ID} and cannot be
      * resolved through {@link IApplicationManager}: feeding one into
      * {@code updateApplicationIfNeeded} fails with "Application not found:
      * launch:&lt;name&gt;" and would refuse a perfectly launchable configuration.

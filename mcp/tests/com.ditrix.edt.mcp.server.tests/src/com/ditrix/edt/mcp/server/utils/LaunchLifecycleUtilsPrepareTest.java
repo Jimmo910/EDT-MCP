@@ -40,6 +40,8 @@ import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
  * Mock-driven tests for {@link LaunchLifecycleUtils#prepareForFreshLaunch}.
+ * A {@code null} updateScope means the full "all" scope (the configuration plus
+ * its dependent extensions) — the same default the production call sites use.
  *
  * <p>Covers the auto-chain's behaviour against live launches whose
  * {@code applicationId} does not match the one being prepared — specifically
@@ -159,7 +161,7 @@ public class LaunchLifecycleUtilsPrepareTest
         when(launchManager.getLaunches()).thenReturn(new ILaunch[] { attachLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals("stale attach must be counted as swept",
@@ -194,7 +196,7 @@ public class LaunchLifecycleUtilsPrepareTest
 
             PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
                 launchManager, mockOpenProject(), RUNTIME_APP_ID,
-                mockUpToDateAppManager(), 2);
+                mockUpToDateAppManager(), 2, null);
 
             assertFalse("owned attach must block the chain", result.isOk());
             assertTrue("error must mention the owning launch by name",
@@ -224,7 +226,7 @@ public class LaunchLifecycleUtilsPrepareTest
         when(launchManager.getLaunches()).thenReturn(new ILaunch[] { runtimeLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals(1, result.getTerminatedCount());
@@ -276,7 +278,7 @@ public class LaunchLifecycleUtilsPrepareTest
         when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         verify(mgr, atLeast(2)).getUpdateState(app);
@@ -305,7 +307,7 @@ public class LaunchLifecycleUtilsPrepareTest
             .thenReturn(new ILaunch[] { runtimeLaunch, attachLaunch });
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2);
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2, null);
 
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals("both runtime and attach must be counted",

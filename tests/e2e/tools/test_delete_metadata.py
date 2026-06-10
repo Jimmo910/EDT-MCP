@@ -9,7 +9,7 @@ forms and other metadata. It folds the former delete_metadata_object onto the un
 
 JSON-responseType tool (payload in r.structured). Two-phase:
   * confirm absent/false -> PREVIEW: action="preview", refactoringTitle, items,
-    affectedReferences, affectedReferencesCount, message. Model NOT mutated.
+    blocking, blockingReferences, blockingReferencesCount, message. Model NOT mutated.
   * confirm=true         -> EXECUTE: action="executed"; the node is gone and its
     references are cleaned.
 
@@ -191,7 +191,7 @@ def test_preview_without_confirm_lists_changepoints_and_does_not_mutate():
         "absent confirm must produce a preview: %r" % (r.structured,)
     assert r.structured.get("fqn") == "CommonModule.Calc", "preview must echo the target fqn"
     assert "items" in r.structured, "preview must list refactoring items"
-    assert "affectedReferencesCount" in r.structured, "preview must report the affected-reference count"
+    assert "blockingReferencesCount" in r.structured, "preview must report the blocking-reference count"
     assert_contains(r.structured.get("message", ""), "confirm=true",
                     "preview message must instruct re-calling with confirm=true")
 

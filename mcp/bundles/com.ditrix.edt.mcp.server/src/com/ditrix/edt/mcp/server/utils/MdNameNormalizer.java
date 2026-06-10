@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
+
 /**
  * Normalizes the Russian letter "ё"/"Ё" to "е"/"Е" in user-supplied identifier
  * and presentation text (names, synonyms, comments, presentations, titles).
@@ -159,18 +161,18 @@ public final class MdNameNormalizer
         }
 
         /**
-         * @return a short, human-readable note describing the normalization, or
-         *         {@code null} when nothing was changed
+         * Adds the {@code normalized} report field (the list of rewritten field
+         * names) to a tool result - only when the normalization actually rewrote
+         * something, so an untouched call carries no noise field.
+         *
+         * @param result the tool result being built
          */
-        public String note()
+        public void addTo(ToolResult result)
         {
-            if (normalizedFields.isEmpty())
+            if (hasChanges())
             {
-                return null;
+                result.put("normalized", normalizedFields()); //$NON-NLS-1$
             }
-            return "Normalized Russian 'ё'->'е' / 'Ё'->'Е' in: " //$NON-NLS-1$
-                + String.join(", ", normalizedFields) //$NON-NLS-1$
-                + " (per 1C standard mdo-ru-name-unallowed-letter)."; //$NON-NLS-1$
         }
     }
 }

@@ -56,53 +56,6 @@ public final class DebugTargetResolver
     }
 
     /**
-     * Classification of an {@code applicationId} string by its prefix. Pure and
-     * side-effect free — used to document/route which underlying resolver is the
-     * natural owner of an id form (both are still tried at runtime; this only names
-     * the expected primary owner).
-     */
-    public enum IdForm
-    {
-        /** {@code null} or empty — triggers lone-session auto-resolution. */
-        BLANK,
-        /** {@code "ServerApplication.<app>"} — owned by {@link DebugServerTargetSupport}. */
-        SERVER_APPLICATION,
-        /** {@code "attach:<configName>"} — owned by {@link DebugSessionRegistry}/launch manager. */
-        ATTACH,
-        /** {@code "launch:<configName>"} — owned by {@link DebugSessionRegistry}/launch manager. */
-        LAUNCH,
-        /** Anything else — a real {@code ATTR_APPLICATION_ID} or a bare application name. */
-        REAL_OR_BARE
-    }
-
-    /**
-     * Classifies an id by its prefix. Pure; never throws.
-     *
-     * @param applicationId the id (may be {@code null})
-     * @return its {@link IdForm}
-     */
-    public static IdForm classify(String applicationId)
-    {
-        if (applicationId == null || applicationId.isEmpty())
-        {
-            return IdForm.BLANK;
-        }
-        if (applicationId.startsWith(DebugServerTargetSupport.SERVER_APP_ID_PREFIX))
-        {
-            return IdForm.SERVER_APPLICATION;
-        }
-        if (applicationId.startsWith(LaunchConfigUtils.ATTACH_APP_ID_PREFIX))
-        {
-            return IdForm.ATTACH;
-        }
-        if (applicationId.startsWith(LaunchConfigUtils.LAUNCH_APP_ID_PREFIX))
-        {
-            return IdForm.LAUNCH;
-        }
-        return IdForm.REAL_OR_BARE;
-    }
-
-    /**
      * The outcome of resolving an {@code applicationId}: the underlying Eclipse
      * {@link IDebugTarget}, a canonical id the rest of the chain can reuse, and the
      * {@link DebugServerTargetSupport.ServerTarget} when the session was found

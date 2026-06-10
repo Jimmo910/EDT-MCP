@@ -132,7 +132,8 @@ public final class MetadataPropertyIntrospector
     }
 
     /**
-     * Finds the assignable property named {@code name} (case-insensitive) on {@code obj}.
+     * Finds the assignable property named {@code name} (case-insensitive) on {@code obj}, with the
+     * current value rendered.
      *
      * @param obj the object
      * @param name the feature name
@@ -155,8 +156,44 @@ public final class MetadataPropertyIntrospector
     }
 
     /**
+     * Lightweight variant of {@link #find}: locates and classifies ONLY the matched feature and
+     * skips the current-value rendering ({@code currentValue} stays {@code null}). {@link #find}
+     * runs the full {@link #introspect}, which renders the current value (an {@code eGet} + proxy +
+     * type rendering) for EVERY assignable feature of the object - per-property validation (e.g.
+     * {@code modify_metadata}'s prepare step, on the UI thread) never reads {@code currentValue},
+     * so it must not pay that cost N times.
+     *
+     * @param obj the object
+     * @param name the feature name (case-insensitive)
+     * @return the property info WITHOUT a rendered current value, or {@code null} if no such
+     *         assignable property exists
+     */
+    public static PropertyInfo findFeature(EObject obj, String name)
+    {
+        if (obj == null || name == null)
+        {
+            return null;
+        }
+        for (EStructuralFeature feature : obj.eClass().getEAllStructuralFeatures())
+        {
+            if (!feature.getName().equalsIgnoreCase(name) || !isAssignable(feature))
+            {
+                continue;
+            }
+            ValueKind kind = classify(feature);
+            if (kind == null)
+            {
+                continue;
+            }
+            return new PropertyInfo(feature.getName(), kind, null, allowedValuesFor(feature, kind),
+                feature);
+        }
+        return null;
+    }
+
+    /**
      * Returns the assignable property names of {@code obj}, for an actionable "available properties"
-     * error hint.
+     * error hint. Names-only iteration: no current value is rendered.
      *
      * @param obj the object
      * @return the assignable feature names (never {@code null})
@@ -164,9 +201,16 @@ public final class MetadataPropertyIntrospector
     public static List<String> assignableNames(EObject obj)
     {
         List<String> names = new ArrayList<>();
-        for (PropertyInfo info : introspect(obj))
+        if (obj == null)
         {
-            names.add(info.name);
+            return names;
+        }
+        for (EStructuralFeature feature : obj.eClass().getEAllStructuralFeatures())
+        {
+            if (isAssignable(feature) && classify(feature) != null)
+            {
+                names.add(feature.getName());
+            }
         }
         return names;
     }

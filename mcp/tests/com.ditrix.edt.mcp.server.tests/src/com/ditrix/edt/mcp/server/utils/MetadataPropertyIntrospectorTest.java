@@ -97,6 +97,47 @@ public class MetadataPropertyIntrospectorTest
     }
 
     @Test
+    public void testFindFeatureMatchesFindWithoutRenderingCurrentValue()
+    {
+        // findFeature is the per-property validation lookup: same feature / kind / allowedValues as
+        // find(), but the current value is never rendered (validation never reads it, and find()'s
+        // full introspect() renders the current value of EVERY assignable feature per lookup).
+        CatalogAttribute attr = newAttribute();
+        attr.getSynonym().put("en", "Weight"); //$NON-NLS-1$ //$NON-NLS-2$
+        List<PropertyInfo> all = MetadataPropertyIntrospector.introspect(attr);
+        assertFalse(all.isEmpty());
+        for (PropertyInfo full : all)
+        {
+            PropertyInfo light = MetadataPropertyIntrospector.findFeature(attr, full.name);
+            assertNotNull("findFeature must locate " + full.name, light); //$NON-NLS-1$
+            assertTrue("feature must match for " + full.name, light.feature == full.feature); //$NON-NLS-1$
+            assertTrue("kind must match for " + full.name, light.valueKind == full.valueKind); //$NON-NLS-1$
+            assertTrue("allowedValues must match for " + full.name, //$NON-NLS-1$
+                light.allowedValues.equals(full.allowedValues));
+            assertNull("findFeature must not render a current value", light.currentValue); //$NON-NLS-1$
+        }
+        assertNull(MetadataPropertyIntrospector.findFeature(attr, "noSuchProperty")); //$NON-NLS-1$
+        assertNull(MetadataPropertyIntrospector.findFeature(null, "name")); //$NON-NLS-1$
+        assertNull(MetadataPropertyIntrospector.findFeature(attr, null));
+    }
+
+    @Test
+    public void testAssignableNamesAgreeWithIntrospect()
+    {
+        // assignableNames uses a names-only iteration (no value rendering); it must list exactly
+        // the names the full introspect() yields, in the same model feature order.
+        CatalogAttribute attr = newAttribute();
+        List<String> names = MetadataPropertyIntrospector.assignableNames(attr);
+        List<PropertyInfo> all = MetadataPropertyIntrospector.introspect(attr);
+        assertTrue("name count must agree", names.size() == all.size()); //$NON-NLS-1$
+        for (int i = 0; i < all.size(); i++)
+        {
+            assertTrue("name #" + i + " must agree", names.get(i).equals(all.get(i).name)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        assertTrue(MetadataPropertyIntrospector.assignableNames(null).isEmpty());
+    }
+
+    @Test
     public void testAttributeTypeIsTypeDescription()
     {
         PropertyInfo type = MetadataPropertyIntrospector.find(newAttribute(), "type"); //$NON-NLS-1$

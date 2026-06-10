@@ -225,34 +225,27 @@ public class StepTool implements IMcpTool
 
     /**
      * Returns the debug-server target that owns the given thread (by identity of
-     * the thread's {@link org.eclipse.debug.core.model.IDebugTarget}), or
-     * {@code null} when the thread belongs to an ordinary Eclipse launch.
+     * the thread's {@link IDebugTarget}), or {@code null} when the thread belongs
+     * to an ordinary Eclipse launch. Delegates the identity scan to
+     * {@link DebugTargetResolver#serverTargetForTarget} (the shared, null-safe
+     * implementation), keeping only the thread-to-target hop here.
      *
      * @param thread the suspended thread being stepped
      * @return the owning server target, or {@code null}
      */
     private static DebugServerTargetSupport.ServerTarget serverTargetOf(IThread thread)
     {
+        IDebugTarget owner;
         try
         {
-            org.eclipse.debug.core.model.IDebugTarget owner = thread.getDebugTarget();
-            if (owner == null)
-            {
-                return null;
-            }
-            for (DebugServerTargetSupport.ServerTarget st : DebugServerTargetSupport.listServerTargets())
-            {
-                if (st.target == owner)
-                {
-                    return st;
-                }
-            }
+            owner = thread.getDebugTarget();
         }
         catch (Exception ex)
         {
             // best-effort — treat as a non-server thread
+            return null;
         }
-        return null;
+        return owner == null ? null : DebugTargetResolver.serverTargetForTarget(owner);
     }
 
     /**

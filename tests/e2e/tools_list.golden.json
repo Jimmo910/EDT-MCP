@@ -452,23 +452,12 @@
           "description": "Either 'preview', 'executed' or 'blocked'",
           "type": "string"
         },
-        "affectedReferences": {
-          "description": "References that would be affected (preview)",
-          "items": {
-            "type": "object"
-          },
-          "type": "array"
-        },
-        "affectedReferencesCount": {
-          "description": "Count of affected references (preview)",
-          "type": "integer"
-        },
         "blocking": {
-          "description": "Whether the listed affected references are BLOCKING (the refactoring cannot auto-clean them; a confirm=true delete is refused unless force=true)",
+          "description": "Whether the listed blockingReferences BLOCK the delete (the refactoring cannot auto-clean them; a confirm=true delete is refused unless force=true)",
           "type": "boolean"
         },
         "blockingReferences": {
-          "description": "Incoming references that block the delete (action='blocked'), or that were left dangling when force=true (action='executed')",
+          "description": "Incoming references the refactoring cannot auto-clean: listed in the preview, the reason a delete is refused (action='blocked'), or left dangling when force=true (action='executed')",
           "items": {
             "type": "object"
           },
