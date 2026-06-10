@@ -177,8 +177,19 @@ public final class FormElementWriter
         return null;
     }
 
-    private static boolean isFormToken(String token)
+    /**
+     * Whether {@code token} is a recognized FORM segment of an FQN / form path:
+     * {@code Form} / {@code Forms} and their Russian equivalents (singular / plural), case-insensitive.
+     * This is THE form-token predicate - every consumer that parses a form path (this writer,
+     * {@link MetadataPathResolver}) must share it so a form addressed one way (e.g. created via
+     * {@code Catalog.X.Form.Y}) stays addressable everywhere (screenshot / layout snapshot).
+     */
+    public static boolean isFormToken(String token)
     {
+        if (token == null)
+        {
+            return false;
+        }
         String s = token.toLowerCase();
         return "form".equals(s) || "forms".equals(s) //$NON-NLS-1$ //$NON-NLS-2$
             || RU_FORM.equals(s) || RU_FORMS.equals(s);
@@ -1393,11 +1404,14 @@ public final class FormElementWriter
                 + "' has no parent container and cannot be moved."); //$NON-NLS-1$
         }
 
-        // Resolve the destination container.
+        // Resolve the destination container. A non-null targetParent is a RE-PARENT: blank or the
+        // form name means the form root (per the contract above); only null keeps the current
+        // container (reorder in place).
         EObject destContainer;
         String destLabel;
-        boolean reparent = targetParent != null && !targetParent.isEmpty();
-        if (reparent && !targetParent.equalsIgnoreCase(formName))
+        boolean reparent = targetParent != null;
+        boolean toRoot = reparent && (targetParent.isEmpty() || targetParent.equalsIgnoreCase(formName));
+        if (reparent && !toRoot)
         {
             EObject group = findUniqueGroup(formModel, targetParent);
             if (group == null)
@@ -1415,13 +1429,13 @@ public final class FormElementWriter
         }
         else if (reparent)
         {
-            // targetParent equals the form name -> the form root.
+            // targetParent is blank or equals the form name -> the form root.
             destContainer = formModel;
             destLabel = "the form root"; //$NON-NLS-1$
         }
         else
         {
-            // No targetParent -> reorder within the current container.
+            // No targetParent (null) -> reorder within the current container.
             destContainer = sourceContainer;
             destLabel = (sourceContainer == formModel) ? "the form root" //$NON-NLS-1$
                 : "group '" + stringFeature(sourceContainer, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$

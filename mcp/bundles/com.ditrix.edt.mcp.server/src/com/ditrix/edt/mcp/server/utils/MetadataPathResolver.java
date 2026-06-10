@@ -29,7 +29,10 @@ public final class MetadataPathResolver
      *       {@code "src/CommonForms/MyForm/Form.form"}</li>
      * </ul>
      *
-     * <p>Russian type names are also supported (e.g. "Справочник.Товары.Forms.ФормаЭлемента").
+     * <p>The form segment accepts the same token set as
+     * {@link FormElementWriter#isFormToken(String)} - {@code Form} / {@code Forms} and their Russian
+     * equivalents, case-insensitive - so a form FQN accepted by create_metadata resolves here too.
+     * Russian type names are also supported (e.g. "Справочник.Товары.Forms.ФормаЭлемента").
      *
      * @param formPath FQN path
      * @return file path relative to project root, or {@code null} if cannot resolve
@@ -61,7 +64,9 @@ public final class MetadataPathResolver
             String formsKeyword = parts[2];
             String formName = parts[3];
 
-            if (!"forms".equalsIgnoreCase(formsKeyword)) //$NON-NLS-1$
+            // ONE shared predicate with the FQN parsers (Form/Forms + Russian, case-insensitive), so
+            // every form path create_metadata accepts is addressable by screenshot/snapshot too.
+            if (!FormElementWriter.isFormToken(formsKeyword))
             {
                 return null;
             }

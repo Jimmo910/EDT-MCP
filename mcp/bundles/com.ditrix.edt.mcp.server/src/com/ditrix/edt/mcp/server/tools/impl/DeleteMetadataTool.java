@@ -667,6 +667,15 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
         EObject ownerObj = mdForm.eContainer();
         final String ownerFqn = (ownerObj instanceof IBmObject) ? ((IBmObject)ownerObj).bmGetFqn()
             : ref.ownerFqn();
+        // Capture the RESOLVED names BEFORE the delete: the model lookup is case-INsensitive while the
+        // workspace folder path is case-sensitive, so the folder cleanup must address the names the
+        // model actually carries, not the user-typed FQN segments (which may differ in case).
+        String resolvedFormName = mdForm.getName();
+        final String formNameOnDisk =
+            (resolvedFormName == null || resolvedFormName.isEmpty()) ? ref.formName : resolvedFormName;
+        String resolvedOwnerName = (ownerObj instanceof MdObject) ? ((MdObject)ownerObj).getName() : null;
+        final String ownerNameOnDisk =
+            (resolvedOwnerName == null || resolvedOwnerName.isEmpty()) ? ref.ownerName : resolvedOwnerName;
         try
         {
             BmTransactions.<Void>write(bmModel, "DeleteFormObject", (tx, pm) -> //$NON-NLS-1$
@@ -710,8 +719,9 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
         // resolves the form FQN ("no editable content model") and clutters a fresh checkout / XML import.
         // Remove it physically through the workspace API (best-effort: never fail the delete the model
         // already committed). Only this EXACT form folder is removed, never the parent Forms/ (siblings)
-        // or the owner folder.
-        boolean folderRemoved = deleteFormResourceFolder(project, ref);
+        // or the owner folder. The path is built from the RESOLVED names captured above.
+        FolderCleanup folderCleanup =
+            deleteFormResourceFolder(project, ref.ownerType, ownerNameOnDisk, formNameOnDisk);
 
         return ToolResult.success()
             .put("action", "executed") //$NON-NLS-1$ //$NON-NLS-2$
@@ -720,58 +730,99 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
                 + (persisted ? " and persisted to disk." //$NON-NLS-1$
                     : " (in-memory only; on-disk write did not complete - re-check before relying on " //$NON-NLS-1$
                         + "it).") //$NON-NLS-1$
-                + (folderRemoved ? " The form resource folder was removed from disk." //$NON-NLS-1$
-                    : " (the form resource folder could not be removed - check it manually).")) //$NON-NLS-1$
+                + folderCleanupMessage(folderCleanup))
             .toJson();
+    }
+
+    /** Outcome of the orphan form-folder cleanup - never conflate "not found" with "removed". */
+    private enum FolderCleanup
+    {
+        /** The folder existed and was deleted. */
+        REMOVED,
+        /** No folder at the resolved path (nothing was removed). */
+        NOT_FOUND,
+        /** The path could not be resolved or the delete attempt failed. */
+        FAILED
+    }
+
+    /** The message fragment describing the folder-cleanup outcome (leading space included). */
+    private static String folderCleanupMessage(FolderCleanup cleanup)
+    {
+        switch (cleanup)
+        {
+        case REMOVED:
+            return " The form resource folder was removed from disk."; //$NON-NLS-1$
+        case NOT_FOUND:
+            return " The form resource folder was not found on disk (nothing was removed)."; //$NON-NLS-1$
+        case FAILED:
+        default:
+            return " (the form resource folder could not be removed - check it manually)."; //$NON-NLS-1$
+        }
     }
 
     /**
      * Physically removes an owned form's resource folder
      * ({@code src/<TypeDir>/<Owner>/Forms/<FormName>/}, containing {@code Form.form} and any sub-files)
-     * through the Eclipse workspace API so the workspace stays in sync. Best-effort: a non-existent
-     * folder is a quiet success (nothing to remove), and a delete failure is logged but never propagated
-     * - the BM-model delete already committed, so the orphan-folder cleanup must not turn a successful
-     * delete into an error. Only the EXACT {@code Forms/<FormName>} folder is targeted, never the parent
-     * {@code Forms/} directory (which may hold sibling forms) or the owner folder.
+     * through the Eclipse workspace API so the workspace stays in sync. The path is built from the
+     * RESOLVED owner / form names (the names the model actually carries), NOT the user-typed FQN
+     * segments: the model lookup is case-insensitive while the workspace path is case-sensitive, so a
+     * case-variant FQN would otherwise miss the real folder and leave the orphan behind. Best-effort: a
+     * delete failure is logged but never propagated - the BM-model delete already committed, so the
+     * orphan-folder cleanup must not turn a successful delete into an error. A folder that does not
+     * exist is reported as {@link FolderCleanup#NOT_FOUND}, never claimed as removed. Only the EXACT
+     * {@code Forms/<FormName>} folder is targeted, never the parent {@code Forms/} directory (which may
+     * hold sibling forms) or the owner folder.
      *
      * @param project the owning workspace project
-     * @param ref the parsed owned-form reference (owner type / name + form name)
-     * @return {@code true} when the folder was removed (or was already absent), {@code false} when a
-     *         delete attempt failed or the path could not be resolved
+     * @param ownerType the owner metadata TYPE token (English or Russian, as supplied)
+     * @param resolvedOwnerName the owner object Name AS RESOLVED on the model
+     * @param resolvedFormName the form Name AS RESOLVED on the model
+     * @return the cleanup outcome (removed / not found on disk / failed)
      */
-    private static boolean deleteFormResourceFolder(IProject project, FormElementWriter.FormObjectRef ref)
+    private static FolderCleanup deleteFormResourceFolder(IProject project, String ownerType,
+        String resolvedOwnerName, String resolvedFormName)
     {
-        // Same disk mapping the rest of the codebase uses (MetadataTypeUtils type-directory mapping,
-        // e.g. Catalog -> Catalogs): src/<TypeDir>/<Owner>/Forms/<FormName>. Reuse the shared resolver
-        // (it expects the Type.Object.forms.FormName shape) so create / delete address the SAME folder.
-        String folderRel = MetadataPathResolver.resolveFormFolderPath(
-            ref.ownerType + "." + ref.ownerName + ".forms." + ref.formName); //$NON-NLS-1$ //$NON-NLS-2$
+        String folderRel = formResourceFolderPath(ownerType, resolvedOwnerName, resolvedFormName);
         if (folderRel == null)
         {
-            Activator.logError("Could not resolve the form resource folder for " + ref.ownerFqn() //$NON-NLS-1$
-                + ".Form." + ref.formName + "; leaving any on-disk Forms/" + ref.formName //$NON-NLS-1$ //$NON-NLS-2$
-                + " folder in place.", null); //$NON-NLS-1$
-            return false;
+            Activator.logError("Could not resolve the form resource folder for " + ownerType + "." //$NON-NLS-1$ //$NON-NLS-2$
+                + resolvedOwnerName + ".Form." + resolvedFormName + "; leaving any on-disk Forms/" //$NON-NLS-1$ //$NON-NLS-2$
+                + resolvedFormName + " folder in place.", null); //$NON-NLS-1$
+            return FolderCleanup.FAILED;
         }
         try
         {
             IFolder folder = project.getFolder(new Path(folderRel));
             if (!folder.exists())
             {
-                // Nothing on disk (e.g. the form had no rendered content yet): a quiet success.
-                return true;
+                // Nothing on disk at the resolved path (e.g. the form had no rendered content yet).
+                // Reported as NOT_FOUND - never claimed as a removal.
+                return FolderCleanup.NOT_FOUND;
             }
             // delete(true, monitor): force-delete the folder and its contents, keeping the workspace
             // resource tree in sync with disk. DEPTH is implicitly infinite for a container.
             folder.delete(true, new NullProgressMonitor());
-            return true;
+            return FolderCleanup.REMOVED;
         }
         catch (Exception e)
         {
             Activator.logError("Failed to remove the form resource folder " + folderRel //$NON-NLS-1$
                 + " (the model delete already succeeded; remove it manually if it persists).", e); //$NON-NLS-1$
-            return false;
+            return FolderCleanup.FAILED;
         }
+    }
+
+    /**
+     * The project-relative resource folder of an owned form
+     * ({@code src/<TypeDir>/<Owner>/Forms/<FormName>}), built from the RESOLVED owner / form names via
+     * the shared {@link MetadataPathResolver} mapping (same disk layout create_metadata writes), or
+     * {@code null} when the type token is unknown. Pure; package-visible for tests.
+     */
+    static String formResourceFolderPath(String ownerType, String resolvedOwnerName,
+        String resolvedFormName)
+    {
+        return MetadataPathResolver.resolveFormFolderPath(
+            ownerType + "." + resolvedOwnerName + ".forms." + resolvedFormName); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** A {name, type} preview entry for the form object being removed. */

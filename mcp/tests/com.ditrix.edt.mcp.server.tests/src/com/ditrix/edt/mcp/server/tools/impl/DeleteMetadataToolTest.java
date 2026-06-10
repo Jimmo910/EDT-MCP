@@ -158,4 +158,27 @@ public class DeleteMetadataToolTest
         assertNull("a CommonForm is a top object, not an owned form", //$NON-NLS-1$
             FormElementWriter.parseFormObjectCreate("CommonForm.MyForm")); //$NON-NLS-1$
     }
+
+    // ---- FIX-2b/D4: the orphan form-folder path is built from the RESOLVED names ------------------
+
+    /**
+     * The on-disk folder of an owned form must be computed from the RESOLVED model names: the model
+     * lookup is case-INsensitive (delete 'Catalog.Catalog.Form.itemform' resolves the real ItemForm),
+     * while the workspace folder path is case-sensitive - so feeding the canonical names in must yield
+     * the exact on-disk folder, regardless of how the user typed the FQN.
+     */
+    @Test
+    public void testFormResourceFolderPathFromResolvedNames()
+    {
+        assertEquals("src/Catalogs/Products/Forms/ItemForm", //$NON-NLS-1$
+            DeleteMetadataTool.formResourceFolderPath("Catalog", "Products", "ItemForm")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // The TYPE token tolerates case (the type-directory lookup is case-insensitive); the NAME
+        // segments are emitted verbatim - exactly the resolved names the caller passes.
+        assertEquals("src/Catalogs/Products/Forms/ItemForm", //$NON-NLS-1$
+            DeleteMetadataTool.formResourceFolderPath("catalog", "Products", "ItemForm")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertEquals("src/Documents/SalesOrder/Forms/DocumentForm", //$NON-NLS-1$
+            DeleteMetadataTool.formResourceFolderPath("Document", "SalesOrder", "DocumentForm")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // An unknown type cannot be mapped to a directory - no path, no blind delete.
+        assertNull(DeleteMetadataTool.formResourceFolderPath("Bogus", "X", "Y")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
 }

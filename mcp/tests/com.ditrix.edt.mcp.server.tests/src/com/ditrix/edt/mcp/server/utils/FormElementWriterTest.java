@@ -7,8 +7,10 @@
 package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -16,6 +18,14 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.eclipse.emf.ecore.EAttribute;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EPackage;
+import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EcoreFactory;
+import org.eclipse.emf.ecore.EcorePackage;
+import org.eclipse.emf.ecore.impl.DynamicEObjectImpl;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormMemberRef;
@@ -344,6 +354,187 @@ public class FormElementWriterTest
             assertNotNull(e.getMessage());
             assertTrue("message should mention '" + fragment + "' but was: " + e.getMessage(), //$NON-NLS-1$ //$NON-NLS-2$
                 e.getMessage().contains(fragment));
+        }
+    }
+
+    // ---- form-token predicate (D3: shared with MetadataPathResolver) -----------------------------
+
+    @Test
+    public void testIsFormTokenAcceptsEnglishAndRussianSingularPlural()
+    {
+        assertTrue(FormElementWriter.isFormToken("Form")); //$NON-NLS-1$
+        assertTrue(FormElementWriter.isFormToken("forms")); //$NON-NLS-1$
+        assertTrue(FormElementWriter.isFormToken("FORMS")); //$NON-NLS-1$
+        // Forma (capital F-cyrillic, the predicate lowercases) -> accepted.
+        assertTrue(FormElementWriter.isFormToken(fromCp(0x0424, 0x043e, 0x0440, 0x043c, 0x0430)));
+        // Formy (plural) -> accepted.
+        assertTrue(FormElementWriter.isFormToken(fromCp(0x0424, 0x043e, 0x0440, 0x043c, 0x044b)));
+    }
+
+    @Test
+    public void testIsFormTokenRejectsOthers()
+    {
+        assertFalse(FormElementWriter.isFormToken("Template")); //$NON-NLS-1$
+        assertFalse(FormElementWriter.isFormToken("CommonForm")); //$NON-NLS-1$
+        assertFalse(FormElementWriter.isFormToken("")); //$NON-NLS-1$
+        assertFalse(FormElementWriter.isFormToken(null));
+    }
+
+    // ---- moveItem destination contract (D1: blank / form-name parent -> the form root) -----------
+
+    private static final MoveLikeModel MOVE = new MoveLikeModel();
+
+    @Test
+    public void testMoveItemBlankParentMovesToFormRoot()
+    {
+        // The javadoc contract: a BLANK targetParent means the FORM ROOT - it must re-parent, not fall
+        // into the reorder-in-place branch (which would silently leave the item in its group).
+        EObject form = MOVE.newForm();
+        EObject group = MOVE.newGroup("G"); //$NON-NLS-1$
+        EObject field = MOVE.newField("F"); //$NON-NLS-1$
+        MOVE.itemsOf(form).add(group);
+        MOVE.itemsOf(group).add(field);
+
+        String dest = FormElementWriter.moveItem(form, "F", "", null, "MyForm"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(dest, dest.contains("the form root")); //$NON-NLS-1$
+        assertSame(form, field.eContainer());
+        assertTrue(MOVE.itemsOf(group).isEmpty());
+        assertEquals(2, MOVE.itemsOf(form).size());
+    }
+
+    @Test
+    public void testMoveItemFormNameParentMovesToFormRoot()
+    {
+        // The form name (case-insensitive) as targetParent is the other spelling of "the form root".
+        EObject form = MOVE.newForm();
+        EObject group = MOVE.newGroup("G"); //$NON-NLS-1$
+        EObject field = MOVE.newField("F"); //$NON-NLS-1$
+        MOVE.itemsOf(form).add(group);
+        MOVE.itemsOf(group).add(field);
+
+        String dest = FormElementWriter.moveItem(form, "F", "myform", null, "MyForm"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(dest, dest.contains("the form root")); //$NON-NLS-1$
+        assertSame(form, field.eContainer());
+    }
+
+    @Test
+    public void testMoveItemNullParentReordersInCurrentContainer()
+    {
+        // null targetParent keeps the current container (reorder in place) - never re-parents.
+        EObject form = MOVE.newForm();
+        EObject group = MOVE.newGroup("G"); //$NON-NLS-1$
+        EObject a = MOVE.newField("A"); //$NON-NLS-1$
+        EObject b = MOVE.newField("B"); //$NON-NLS-1$
+        MOVE.itemsOf(form).add(group);
+        MOVE.itemsOf(group).add(a);
+        MOVE.itemsOf(group).add(b);
+
+        String dest = FormElementWriter.moveItem(form, "A", null, "last", "MyForm"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(dest, dest.contains("group 'G'")); //$NON-NLS-1$
+        assertSame(group, a.eContainer());
+        assertEquals(2, MOVE.itemsOf(group).size());
+        assertSame(b, MOVE.itemsOf(group).get(0));
+        assertSame(a, MOVE.itemsOf(group).get(1));
+    }
+
+    @Test
+    public void testMoveItemNamedGroupParentStillReparents()
+    {
+        // Regression guard for the changed branch predicate: a real group name still re-parents into
+        // that group.
+        EObject form = MOVE.newForm();
+        EObject group = MOVE.newGroup("G"); //$NON-NLS-1$
+        EObject field = MOVE.newField("F"); //$NON-NLS-1$
+        MOVE.itemsOf(form).add(group);
+        MOVE.itemsOf(form).add(field);
+
+        String dest = FormElementWriter.moveItem(form, "F", "G", null, "MyForm"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        assertTrue(dest, dest.contains("group 'G'")); //$NON-NLS-1$
+        assertSame(group, field.eContainer());
+    }
+
+    /**
+     * A tiny dynamic EMF metamodel reproducing the reflective feature names {@code moveItem} navigates
+     * ({@code items} / {@code name}) and the {@code FormGroup} classifier name {@code findUniqueGroup}
+     * matches, so the move destination contract is testable without the real form model (the same
+     * approach {@code FormStructureReaderTest} uses).
+     */
+    private static final class MoveLikeModel
+    {
+        final EClass form;
+        final EClass formGroup;
+        final EClass formField;
+        final EAttribute itemName;
+
+        MoveLikeModel()
+        {
+            EcoreFactory factory = EcoreFactory.eINSTANCE;
+            EPackage pkg = factory.createEPackage();
+            pkg.setName("movelike"); //$NON-NLS-1$
+            pkg.setNsPrefix("movelike"); //$NON-NLS-1$
+            pkg.setNsURI("http://ditrix.com/test/movelike"); //$NON-NLS-1$
+
+            EClass formItem = factory.createEClass();
+            formItem.setName("FormItem"); //$NON-NLS-1$
+            formItem.setAbstract(true);
+            itemName = factory.createEAttribute();
+            itemName.setName("name"); //$NON-NLS-1$
+            itemName.setEType(EcorePackage.Literals.ESTRING);
+            formItem.getEStructuralFeatures().add(itemName);
+
+            // The classifier NAME matters: findUniqueGroup matches eClass().getName() == "FormGroup".
+            formGroup = factory.createEClass();
+            formGroup.setName("FormGroup"); //$NON-NLS-1$
+            formGroup.getESuperTypes().add(formItem);
+            formGroup.getEStructuralFeatures().add(itemsReference(factory, formItem));
+
+            formField = factory.createEClass();
+            formField.setName("FormField"); //$NON-NLS-1$
+            formField.getESuperTypes().add(formItem);
+
+            form = factory.createEClass();
+            form.setName("Form"); //$NON-NLS-1$
+            form.getEStructuralFeatures().add(itemsReference(factory, formItem));
+
+            pkg.getEClassifiers().add(formItem);
+            pkg.getEClassifiers().add(formGroup);
+            pkg.getEClassifiers().add(formField);
+            pkg.getEClassifiers().add(form);
+        }
+
+        EObject newForm()
+        {
+            return new DynamicEObjectImpl(form);
+        }
+
+        EObject newGroup(String name)
+        {
+            EObject group = new DynamicEObjectImpl(formGroup);
+            group.eSet(itemName, name);
+            return group;
+        }
+
+        EObject newField(String name)
+        {
+            EObject field = new DynamicEObjectImpl(formField);
+            field.eSet(itemName, name);
+            return field;
+        }
+
+        @SuppressWarnings("unchecked")
+        List<EObject> itemsOf(EObject container)
+        {
+            return (List<EObject>)container.eGet(container.eClass().getEStructuralFeature("items")); //$NON-NLS-1$
+        }
+
+        private static EReference itemsReference(EcoreFactory factory, EClass itemType)
+        {
+            EReference reference = factory.createEReference();
+            reference.setName("items"); //$NON-NLS-1$
+            reference.setEType(itemType);
+            reference.setContainment(true);
+            reference.setUpperBound(-1);
+            return reference;
         }
     }
 }
