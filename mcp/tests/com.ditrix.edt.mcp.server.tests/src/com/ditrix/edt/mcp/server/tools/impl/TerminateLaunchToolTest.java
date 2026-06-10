@@ -77,6 +77,10 @@ public class TerminateLaunchToolTest
                 || guide.toLowerCase().contains("launch registry"));
         assertTrue("guide should mention clearing the stale already_terminated entry",
             guide.contains("already_terminated"));
+        // F1: selection now also matches already-terminated launches lingering in
+        // the registry, and batch responses report the distinct cleaned count.
+        assertTrue("guide should document stale already-terminated selection (F1)",
+            guide.contains("Stale already-terminated launches cleaned"));
     }
 
     // === Schema ===
