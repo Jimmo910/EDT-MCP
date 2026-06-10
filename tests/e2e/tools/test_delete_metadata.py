@@ -315,6 +315,78 @@ def test_delete_form_missing_member_is_error():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Happy — FORM OBJECT delete (FIX-2: symmetric with create_metadata). An owned form
+# created by the 4-part FQN 'Type.Object.Form.Name' is deletable by the SAME FQN
+# (previously returned "Node not found"). Preview (no confirm) lists it; confirm=true
+# removes the form + its content Form.form and clears the owner default-form ref.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_form_object_preview_then_confirm():
+    # Create a NEW owned form, PREVIEW its delete (no mutation), then confirm it is gone.
+    form = "Z_McpDelForm"
+    fqn = "Catalog.Catalog.Form." + form
+    cr = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})
+    assert_ok(cr, "seed form object to delete")
+    wait_for_project_ready()
+
+    # Preview (confirm omitted): the form is LISTED and nothing is removed.
+    pv = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn})
+    assert_ok(pv, "preview the form-object delete")
+    assert pv.structured.get("action") == "preview", "must be a preview: %r" % (pv.structured,)
+    names = [it.get("name") for it in (pv.structured.get("items") or [])]
+    assert form in names, "preview items must list the form: %r" % (pv.structured,)
+    assert_contains(pv.structured.get("message", ""), "confirm=true",
+                    "preview must instruct re-calling with confirm=true")
+    # The form must still render after a preview (not mutated).
+    d = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": [fqn]})
+    assert_ok(d, "the form must still resolve after a preview")
+    assert_contains(d.text, "Form Structure", "a preview must NOT remove the form")
+
+    # Confirm: the form is removed (no "Node not found"), persisted off the owner .mdo.
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn, "confirm": True})
+    assert_ok(r, "delete the form object (confirm)")
+    assert r.structured.get("action") == "executed", "confirm must execute: %r" % (r.structured,)
+    assert r.structured.get("fqn") == fqn, "must echo the target form fqn"
+    poll_disk_path_gone("src/Catalogs/Catalog/Forms/%s/Form.form" % form,
+                        ctx="the deleted form's content Form.form must be gone from disk")
+    poll_disk_lacks("src/Catalogs/Catalog/Catalog.mdo", form,
+                    ctx="the deleted form's <forms> entry must be gone from the owner .mdo")
+    # Anti-cheat: re-creating the same form must SUCCEED (would fail "already exists" on a no-op delete).
+    wait_for_project_ready()
+    again = call("create_metadata", {"projectName": PROJECT, "fqn": fqn})
+    assert_ok(again, "re-creating the form proves the delete actually removed it")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_default_form_object_clears_owner_ref():
+    # A form registered as the owner's default object form is deletable; the owner's
+    # defaultObjectForm reference is cleared (no dangling ref) so the owner stays valid.
+    form = "Z_McpDelDefaultForm"
+    fqn = "Catalog.Catalog.Form." + form
+    cr = call("create_metadata", {"projectName": PROJECT, "fqn": fqn, "setAsDefault": True})
+    assert_ok(cr, "seed default-object form to delete")
+    wait_for_project_ready()
+
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn, "confirm": True})
+    assert_ok(r, "delete the default-object form (confirm)")
+    assert r.structured.get("action") == "executed", "confirm must execute: %r" % (r.structured,)
+    poll_disk_lacks("src/Catalogs/Catalog/Catalog.mdo", form,
+                    ctx="the deleted default form must be gone from the owner .mdo (incl. the default ref)")
+
+
+@e2e_test(tool="delete_metadata", kind="write-metadata")
+def test_delete_form_object_missing_is_error():
+    # Deleting a non-existent owned form is a clean error, not a silent no-op.
+    fqn = "Catalog.Catalog.Form.NoSuchForm_zz"
+    r = call("delete_metadata", {"projectName": PROJECT, "fqn": fqn, "confirm": True})
+    e = assert_error(r, "delete a missing form object")
+    assert_error_quality(e, names=["NoSuchForm_zz"], suggests=["not found", "get_metadata_details"],
+                         ctx="a missing form object points to get_metadata_details")
+    assert_no_diff("a rejected form-object delete must change nothing")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Reference blocking + force override (the M1 graft). An object still referenced
 # by other metadata the refactoring CANNOT auto-clean must BLOCK a confirm=true
 # delete (action='blocked', success=false) unless force=true is also passed, in

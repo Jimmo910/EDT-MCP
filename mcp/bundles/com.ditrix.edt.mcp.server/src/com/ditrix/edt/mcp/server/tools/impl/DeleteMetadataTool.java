@@ -14,6 +14,7 @@ import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 
@@ -58,7 +59,8 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     @Override
     public String getDescription()
     {
-        return "Delete a metadata node (object or member, including a FORM member - item / attribute / " //$NON-NLS-1$
+        return "Delete a metadata node (object or member, including a FORM object " //$NON-NLS-1$
+            + "'Type.Object.Form.Name' or a FORM member - item / attribute / " //$NON-NLS-1$
             + "command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all " //$NON-NLS-1$
             + "references in BSL code, forms and other metadata. Two-phase: call without confirm to " //$NON-NLS-1$
             + "preview what would be removed, then confirm=true to apply (deletion is hard to reverse). " //$NON-NLS-1$
@@ -144,6 +146,17 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
         if (formRef != null)
         {
             return deleteFormMember(ctx, normFqn, formRef, confirm);
+        }
+
+        // A 4-part form FQN (Type.Object.Form.FormName) addresses the FORM OBJECT itself. create_metadata
+        // accepts this FQN to CREATE an owned form (F1); to stay symmetric, delete it the same way: an
+        // owned BasicForm is removed by cascade through its owner's 'forms' collection, not by the
+        // md-refactoring service (it is not a top object, so resolveExisting / the delete refactoring see
+        // nothing here). A CommonForm (2 parts) is NOT matched - it is a real top object handled below.
+        FormElementWriter.FormObjectRef formObjectRef = FormElementWriter.parseFormObjectCreate(normFqn);
+        if (formObjectRef != null)
+        {
+            return deleteFormObject(ctx, normFqn, formObjectRef, confirm);
         }
 
         MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(config, normFqn);
@@ -576,6 +589,157 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
                     : " (in-memory only; on-disk write did not complete - re-check before relying on " //$NON-NLS-1$
                         + "it).")) //$NON-NLS-1$
             .toJson();
+    }
+
+    // ==================== FORM object (owned BasicForm, symmetric with create) ====================
+
+    /**
+     * Deletes an OWNED form OBJECT addressed by a 4-part form FQN ({@code Type.Object.Form.FormName}) -
+     * the symmetric counterpart of {@code create_metadata}'s {@link FormElementWriter#createForm}. An
+     * owned form is not a top object (it lives on its owner's {@code forms} collection), so the
+     * md-refactoring service cannot see it; it is removed directly by re-fetching the owner inside a
+     * write transaction, detaching the content {@code Form} top object (the store created at attach), and
+     * removing the {@code BasicForm} from the {@code forms} collection while clearing any default-form
+     * reference the owner held to it (so no dangling {@code defaultObjectForm} / {@code defaultListForm}
+     * ref is left behind). Two-phase like the rest of the tool: {@code confirm=false} previews (no
+     * mutation), {@code confirm=true} removes it and force-exports the owner {@code .mdo}.
+     */
+    private String deleteFormObject(ProjectContext ctx, String normFqn,
+        FormElementWriter.FormObjectRef ref, boolean confirm)
+    {
+        IProject project = ctx.project;
+        Configuration config = ctx.config;
+
+        // Reuse F1's owner + owned-form resolution so create/delete address the SAME object. The
+        // resolver expects the 'forms' shape: Type.Object.forms.FormName.
+        String formPath = ref.ownerType + "." + ref.ownerName + ".forms." + ref.formName; //$NON-NLS-1$ //$NON-NLS-2$
+        MdObject mdForm = FormStructureReader.resolveMdForm(config, formPath);
+        if (mdForm == null)
+        {
+            // Distinguish a missing owner from a missing form for a sharper message.
+            MdObject owner = MetadataTypeUtils.findObject(config, ref.ownerType, ref.ownerName);
+            if (owner == null)
+            {
+                return ToolResult.error("Owner object not found: " + ref.ownerFqn() + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "Use get_metadata_objects to list available objects.").toJson(); //$NON-NLS-1$
+            }
+            return ToolResult.error("Form '" + ref.formName + "' not found on " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Use get_metadata_details to list the object's forms.").toJson(); //$NON-NLS-1$
+        }
+        if (!(mdForm instanceof IBmObject))
+        {
+            return ToolResult.error("Form is not a BM object").toJson(); //$NON-NLS-1$
+        }
+
+        if (!confirm)
+        {
+            return ToolResult.success()
+                .put("action", "preview") //$NON-NLS-1$ //$NON-NLS-2$
+                .put("fqn", normFqn) //$NON-NLS-1$
+                .put("refactoringTitle", "Delete form " + ref.formName) //$NON-NLS-1$ //$NON-NLS-2$
+                .put("items", Collections.singletonList(formItem(ref.formName, mdForm.eClass().getName()))) //$NON-NLS-1$
+                .put("affectedReferences", Collections.emptyList()) //$NON-NLS-1$
+                .put("affectedReferencesCount", 0) //$NON-NLS-1$
+                .put("message", "Preview: deleting form '" + ref.formName + "' from " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " would remove the form and its content Form.form. Cross-references to it " //$NON-NLS-1$
+                    + "(a default-form setting) are cleared on the owner. Call confirm=true to apply.") //$NON-NLS-1$
+                .toJson();
+        }
+
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
+        }
+
+        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
+        // The owner is a top object whose .mdo registers the form; force-export it after the removal so
+        // the <forms> entry (and any cleared default-form ref) lands on disk. eContainer() is the owner.
+        EObject ownerObj = mdForm.eContainer();
+        final String ownerFqn = (ownerObj instanceof IBmObject) ? ((IBmObject)ownerObj).bmGetFqn()
+            : ref.ownerFqn();
+        try
+        {
+            BmTransactions.<Void>write(bmModel, "DeleteFormObject", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txMdForm = tx.getObjectById(mdFormBmId);
+                if (txMdForm == null)
+                {
+                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+                }
+                EObject owner = txMdForm.eContainer();
+                // Detach the content Form top object (the BM store the attach created) before removing the
+                // MD-form, so no store-less top object is left orphaned in the namespace.
+                EObject content = FormElementWriter.getEditableForm(txMdForm);
+                if (content instanceof IBmObject)
+                {
+                    tx.detachTopObject((IBmObject)content);
+                }
+                // Clear any single-valued default-form reference on the owner that points at this form
+                // (defaultObjectForm / defaultListForm / ...), so removing the form leaves no dangling ref.
+                if (owner != null)
+                {
+                    clearReferencesTo(owner, txMdForm);
+                }
+                // Remove the MD-form from the owner's 'forms' containment list.
+                EcoreUtil.remove(txMdForm);
+                return null;
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error deleting form object", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to delete form: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = ownerFqn != null && !ownerFqn.isEmpty()
+            && BmTransactions.forceExportToDisk(project, ownerFqn);
+
+        return ToolResult.success()
+            .put("action", "executed") //$NON-NLS-1$ //$NON-NLS-2$
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("message", "Deleted form '" + ref.formName + "' from " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
+                + (persisted ? " and persisted to disk." //$NON-NLS-1$
+                    : " (in-memory only; on-disk write did not complete - re-check before relying on " //$NON-NLS-1$
+                        + "it)."))//$NON-NLS-1$
+            .toJson();
+    }
+
+    /** A {name, type} preview entry for the form object being removed. */
+    private static Map<String, Object> formItem(String name, String type)
+    {
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("name", name); //$NON-NLS-1$
+        entry.put("type", type); //$NON-NLS-1$
+        return entry;
+    }
+
+    /**
+     * Nulls out every single-valued (non-containment) reference on {@code holder} whose value is
+     * {@code target}. For a form owner these are the {@code defaultObjectForm} / {@code defaultListForm}
+     * / {@code defaultChoiceForm} / ... settings - all declared on the direct owner pointing at one of
+     * its own {@code BasicForm}s - so checking the owner's own features is sufficient to avoid a dangling
+     * reference once the form is removed. Containment / many-valued references (the {@code forms} list
+     * itself) are left to {@link EcoreUtil#remove}.
+     */
+    private static void clearReferencesTo(EObject holder, EObject target)
+    {
+        for (EReference reference : holder.eClass().getEAllReferences())
+        {
+            if (reference.isContainment() || reference.isMany() || !reference.isChangeable())
+            {
+                continue;
+            }
+            if (holder.eGet(reference) == target)
+            {
+                holder.eUnset(reference);
+            }
+        }
     }
 
     /**
