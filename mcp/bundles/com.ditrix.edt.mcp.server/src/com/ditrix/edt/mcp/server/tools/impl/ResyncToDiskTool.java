@@ -22,6 +22,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.bm.core.BmUriUtil;
 import com._1c.g5.v8.bm.core.IBmObject;
@@ -105,6 +106,20 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
 
     /** Cap on how many FQNs are listed back in the JSON to keep responses bounded. */
     private static final int MAX_LISTED_FQNS = 500;
+
+    /**
+     * Total time budget (ms) to wait for the post-export {@code .mdo} flush to be
+     * visible on the filesystem before counting a file as still missing.
+     * {@link BmTransactions#forceExportToDisk} runs the platform serializer
+     * synchronously, but a just-restored file can still lag a separate on-disk
+     * existence check by a beat (OS/filesystem write-visibility, plus any
+     * UI-scheduled tail of the export), so the re-check polls within this budget
+     * rather than judging on the first probe.
+     */
+    private static final long MDO_FLUSH_WAIT_MS = 2500L;
+
+    /** Poll interval (ms) between on-disk re-checks within {@link #MDO_FLUSH_WAIT_MS}. */
+    private static final long MDO_FLUSH_POLL_MS = 100L;
 
     @Override
     public String getName()
@@ -220,7 +235,15 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
         // Step 4: re-check on disk. After a successful export the missing-before set
         // should be empty; anything still missing is surfaced so the caller knows
         // the desync was not fully resolved (e.g. a type with no src/ layout).
-        List<String> stillMissing = findMissingMdoFiles(ctx.project, missingBefore);
+        // forceExportToDisk runs the platform serializer synchronously, but the just-
+        // written .mdo can still lag this separate on-disk existence check by a beat
+        // (OS/filesystem write-visibility, plus any UI-scheduled tail of the export),
+        // so an immediate re-check could observe a file that is about to land as still
+        // missing and mis-report stillMissingCount. Re-check with a short bounded wait:
+        // poll each previously-missing .mdo for existence, and only the files still
+        // absent after the budget elapses count as stillMissing.
+        List<String> stillMissing =
+            findMissingMdoFilesWithWait(ctx.project, missingBefore, MDO_FLUSH_WAIT_MS, MDO_FLUSH_POLL_MS);
 
         // Step 5: clean dangling/orphaned references in Configuration.mdo. These are
         // unresolved proxies registered in the Configuration's MdObject collections
@@ -624,13 +647,126 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
      */
     private static List<String> findMissingMdoFiles(IProject project, List<String> fqns)
     {
-        List<String> missing = new ArrayList<>();
-        IPath location = project.getLocation();
-        if (location == null)
+        File srcRoot = srcRootOf(project);
+        if (srcRoot == null)
         {
-            return missing;
+            return new ArrayList<>();
         }
-        File srcRoot = location.append("src").toFile(); //$NON-NLS-1$
+        return findMissingMdoFiles(srcRoot, fqns);
+    }
+
+    /**
+     * Re-checks the given FQNs against disk with a short bounded wait, so a
+     * {@code .mdo} that the post-export flush is about to write is counted as
+     * present rather than mis-reported as still missing.
+     * <p>
+     * The check runs immediately and then re-polls only the FQNs still missing,
+     * sleeping {@code pollMs} between rounds, until either nothing is missing or the
+     * cumulative {@code waitMs} budget is exhausted. The first round is free (no
+     * sleep), so an already-flushed configuration returns at once; the wait is only
+     * paid while files are genuinely still landing. Returns the FQNs whose
+     * {@code .mdo} is still absent after the budget elapses.
+     *
+     * @param project the workspace project
+     * @param fqns the FQNs to re-check (typically the pre-export missing set)
+     * @param waitMs total time budget in milliseconds for the file to appear
+     * @param pollMs sleep between re-checks in milliseconds
+     * @return the FQNs still missing on disk after the bounded wait (never {@code null})
+     */
+    private static List<String> findMissingMdoFilesWithWait(IProject project, List<String> fqns, long waitMs,
+        long pollMs)
+    {
+        File srcRoot = srcRootOf(project);
+        if (srcRoot == null)
+        {
+            return new ArrayList<>();
+        }
+        return findMissingMdoFilesWithWait(srcRoot, fqns, waitMs, pollMs);
+    }
+
+    /**
+     * Filesystem core of {@link #findMissingMdoFilesWithWait(IProject, List, long, long)}:
+     * polls {@code srcRoot} for each FQN's expected {@code .mdo} until none are
+     * missing or the {@code waitMs} budget is spent. Decoupled from
+     * {@link IProject} so the bounded-wait behaviour can be unit-tested against a
+     * plain temp directory.
+     * <p>
+     * This runs on the SWT UI thread (the tool's {@code executeOnUiThread} is
+     * invoked inside {@link Display#syncExec}). A bare {@link Thread#sleep} poll
+     * would freeze the workbench for the whole budget AND - if any part of the
+     * post-export {@code .mdo} flush tail is posted back to the UI thread
+     * (asyncExec / a UI job) - starve that flush so the file never lands during
+     * the wait, defeating the purpose. So when on the UI thread we PUMP the event
+     * loop between existence re-checks (mirroring
+     * {@code GetContentAssistTool.waitForResourceReadiness}/{@code pumpUi}): drain
+     * {@link Display#readAndDispatch()}, which keeps the workbench responsive and
+     * lets any UI-thread-scheduled flush run, and only sleep briefly when there
+     * are no pending events. When {@link Display#getCurrent()} is {@code null}
+     * (a non-UI / headless caller, including the unit tests) we fall back to the
+     * plain sleep loop, since that path is not on the UI thread.
+     */
+    static List<String> findMissingMdoFilesWithWait(File srcRoot, List<String> fqns, long waitMs, long pollMs)
+    {
+        long deadline = System.currentTimeMillis() + Math.max(0L, waitMs);
+        List<String> missing = findMissingMdoFiles(srcRoot, fqns);
+        // Display.getCurrent() is null off the UI thread (and in headless tests, where
+        // no SWT display thread exists); only then is the plain sleep path safe.
+        Display display = Display.getCurrent();
+        while (!missing.isEmpty() && System.currentTimeMillis() < deadline)
+        {
+            if (display != null)
+            {
+                // On the UI thread: drain queued events so the workbench stays
+                // responsive and any UI-scheduled flush tail can run. Only sleep
+                // briefly when there is nothing to dispatch, to keep the poll bounded.
+                if (!display.readAndDispatch())
+                {
+                    sleepQuietly(Math.max(1L, pollMs));
+                }
+            }
+            else
+            {
+                // Non-UI / headless caller: plain bounded sleep between re-checks.
+                if (!sleepQuietly(Math.max(1L, pollMs)))
+                {
+                    break;
+                }
+            }
+            // Re-check only the still-missing subset: a file that already appeared
+            // stays present, so it never returns to the missing set.
+            missing = findMissingMdoFiles(srcRoot, missing);
+        }
+        return missing;
+    }
+
+    /**
+     * Sleeps for {@code millis}, restoring the interrupt flag on interruption.
+     *
+     * @return {@code true} if it slept the full duration, {@code false} if it was
+     *         interrupted (the caller should stop waiting)
+     */
+    private static boolean sleepQuietly(long millis)
+    {
+        try
+        {
+            Thread.sleep(millis);
+            return true;
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * Filesystem core of {@link #findMissingMdoFiles(IProject, List)}: returns the
+     * FQNs whose {@code .mdo} is absent under {@code srcRoot} right now. Decoupled
+     * from {@link IProject} so it (and the bounded-wait variant) can be unit-tested.
+     */
+    static List<String> findMissingMdoFiles(File srcRoot, List<String> fqns)
+    {
+        List<String> missing = new ArrayList<>();
         for (String fqn : fqns)
         {
             String relative = mdoRelativePath(fqn);
@@ -646,6 +782,20 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
             }
         }
         return missing;
+    }
+
+    /**
+     * Resolves the project's {@code src/} root as a {@link File}, or {@code null}
+     * when the project has no on-disk location.
+     */
+    private static File srcRootOf(IProject project)
+    {
+        IPath location = project.getLocation();
+        if (location == null)
+        {
+            return null;
+        }
+        return location.append("src").toFile(); //$NON-NLS-1$
     }
 
     /**
