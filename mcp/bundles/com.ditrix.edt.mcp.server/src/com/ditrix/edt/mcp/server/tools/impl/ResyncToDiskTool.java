@@ -22,6 +22,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.bm.core.BmUriUtil;
 import com._1c.g5.v8.bm.core.IBmObject;
@@ -107,10 +108,13 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
     private static final int MAX_LISTED_FQNS = 500;
 
     /**
-     * Total time budget (ms) to wait for the asynchronous post-export {@code .mdo}
-     * flush to reach the filesystem before counting a file as still missing. The
-     * force-export enqueues the write and the platform serializer drains it off the
-     * UI thread, so a just-restored file can lag the on-disk check by a beat.
+     * Total time budget (ms) to wait for the post-export {@code .mdo} flush to be
+     * visible on the filesystem before counting a file as still missing.
+     * {@link BmTransactions#forceExportToDisk} runs the platform serializer
+     * synchronously, but a just-restored file can still lag a separate on-disk
+     * existence check by a beat (OS/filesystem write-visibility, plus any
+     * UI-scheduled tail of the export), so the re-check polls within this budget
+     * rather than judging on the first probe.
      */
     private static final long MDO_FLUSH_WAIT_MS = 2500L;
 
@@ -231,11 +235,13 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
         // Step 4: re-check on disk. After a successful export the missing-before set
         // should be empty; anything still missing is surfaced so the caller knows
         // the desync was not fully resolved (e.g. a type with no src/ layout).
-        // forceExportToDisk enqueues the .mdo write and the platform flushes it to the
-        // filesystem ASYNCHRONOUSLY, so an immediate re-check can observe a file that is
-        // about to land as still missing and mis-report stillMissingCount. Re-check with
-        // a short bounded wait: poll each previously-missing .mdo for existence, and only
-        // the files still absent after the budget elapses count as stillMissing.
+        // forceExportToDisk runs the platform serializer synchronously, but the just-
+        // written .mdo can still lag this separate on-disk existence check by a beat
+        // (OS/filesystem write-visibility, plus any UI-scheduled tail of the export),
+        // so an immediate re-check could observe a file that is about to land as still
+        // missing and mis-report stillMissingCount. Re-check with a short bounded wait:
+        // poll each previously-missing .mdo for existence, and only the files still
+        // absent after the budget elapses count as stillMissing.
         List<String> stillMissing =
             findMissingMdoFilesWithWait(ctx.project, missingBefore, MDO_FLUSH_WAIT_MS, MDO_FLUSH_POLL_MS);
 
@@ -684,27 +690,73 @@ public class ResyncToDiskTool extends AbstractMetadataWriteTool
      * missing or the {@code waitMs} budget is spent. Decoupled from
      * {@link IProject} so the bounded-wait behaviour can be unit-tested against a
      * plain temp directory.
+     * <p>
+     * This runs on the SWT UI thread (the tool's {@code executeOnUiThread} is
+     * invoked inside {@link Display#syncExec}). A bare {@link Thread#sleep} poll
+     * would freeze the workbench for the whole budget AND - if any part of the
+     * post-export {@code .mdo} flush tail is posted back to the UI thread
+     * (asyncExec / a UI job) - starve that flush so the file never lands during
+     * the wait, defeating the purpose. So when on the UI thread we PUMP the event
+     * loop between existence re-checks (mirroring
+     * {@code GetContentAssistTool.waitForResourceReadiness}/{@code pumpUi}): drain
+     * {@link Display#readAndDispatch()}, which keeps the workbench responsive and
+     * lets any UI-thread-scheduled flush run, and only sleep briefly when there
+     * are no pending events. When {@link Display#getCurrent()} is {@code null}
+     * (a non-UI / headless caller, including the unit tests) we fall back to the
+     * plain sleep loop, since that path is not on the UI thread.
      */
     static List<String> findMissingMdoFilesWithWait(File srcRoot, List<String> fqns, long waitMs, long pollMs)
     {
         long deadline = System.currentTimeMillis() + Math.max(0L, waitMs);
         List<String> missing = findMissingMdoFiles(srcRoot, fqns);
+        // Display.getCurrent() is null off the UI thread (and in headless tests, where
+        // no SWT display thread exists); only then is the plain sleep path safe.
+        Display display = Display.getCurrent();
         while (!missing.isEmpty() && System.currentTimeMillis() < deadline)
         {
-            try
+            if (display != null)
             {
-                Thread.sleep(Math.max(1L, pollMs));
+                // On the UI thread: drain queued events so the workbench stays
+                // responsive and any UI-scheduled flush tail can run. Only sleep
+                // briefly when there is nothing to dispatch, to keep the poll bounded.
+                if (!display.readAndDispatch())
+                {
+                    sleepQuietly(Math.max(1L, pollMs));
+                }
             }
-            catch (InterruptedException e)
+            else
             {
-                Thread.currentThread().interrupt();
-                break;
+                // Non-UI / headless caller: plain bounded sleep between re-checks.
+                if (!sleepQuietly(Math.max(1L, pollMs)))
+                {
+                    break;
+                }
             }
             // Re-check only the still-missing subset: a file that already appeared
             // stays present, so it never returns to the missing set.
             missing = findMissingMdoFiles(srcRoot, missing);
         }
         return missing;
+    }
+
+    /**
+     * Sleeps for {@code millis}, restoring the interrupt flag on interruption.
+     *
+     * @return {@code true} if it slept the full duration, {@code false} if it was
+     *         interrupted (the caller should stop waiting)
+     */
+    private static boolean sleepQuietly(long millis)
+    {
+        try
+        {
+            Thread.sleep(millis);
+            return true;
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**
