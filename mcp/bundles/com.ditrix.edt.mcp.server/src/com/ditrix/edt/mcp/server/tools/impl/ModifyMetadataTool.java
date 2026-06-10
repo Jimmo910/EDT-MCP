@@ -36,7 +36,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.base.AbstractMetadataWriteTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
-import com.ditrix.edt.mcp.server.utils.FormStructureReader;
+import com.ditrix.edt.mcp.server.utils.FormValidationException;
 import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
@@ -284,7 +284,7 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("applied", applied) //$NON-NLS-1$
             .put("persisted", persisted); //$NON-NLS-1$
-        addNormalization(result, normReport);
+        normReport.addTo(result);
         return result
             .put("message", "Modified " + normFqn + " (" + String.join(", ", applied) + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             .toJson();
@@ -358,30 +358,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         IV8Project v8Project = v8ProjectManager != null ? v8ProjectManager.getProject(ctx.project) : null;
         final Version version = v8Project != null ? v8Project.getVersion() : null;
 
-        MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
-        if (mdForm == null)
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form member as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name' " //$NON-NLS-1$
-                + "(Kind = Attribute / Command / Field / Button / Group / Decoration / Table).").toJson(); //$NON-NLS-1$
-        }
-        if (!(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form is not a BM object").toJson(); //$NON-NLS-1$
-        }
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(ctx.project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final List<String> applied = new ArrayList<>();
 
         // Validate + apply inside ONE BM write transaction: resolve the member, validate every
@@ -389,52 +365,45 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         // so the tx rolls back with no partial mutation), then apply. The member is re-navigated by
         // name inside the tx (only the form top object is re-fetchable by bmId). Building the change
         // values and setting them in the SAME tx avoids any cross-transaction detached-object concern.
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "ModifyFormMember", (tx, pm) -> //$NON-NLS-1$
-            {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(ctx.project,
+                config, ref.formPath,
+                "Form not found for '" + normFqn + "'. Address a form member as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name' " //$NON-NLS-1$
+                    + "(Kind = Attribute / Command / Field / Button / Group / Decoration / Table)."); //$NON-NLS-1$
+            persisted = FormElementWriter.writeEditableForm(fctx, "ModifyFormMember", //$NON-NLS-1$
+                (formModel, tx) ->
                 {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
-                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
-                        + "built)").toJson());
-                }
-                EObject member = FormElementWriter.resolveFormMember(formModel, ref);
-                if (member == null)
-                {
-                    throw new FormValidationException(ToolResult.error("Form member not found: " //$NON-NLS-1$
-                        + ref.name + " (kind '" + ref.kindToken + "') on " + ref.formPath //$NON-NLS-1$ //$NON-NLS-2$
-                        + ". Use get_metadata_details to list the members.").toJson()); //$NON-NLS-1$
-                }
-                List<PreparedChange> changes = new ArrayList<>();
-                for (JsonObject prop : properties)
-                {
-                    String guard = guardFormProperty(prop);
-                    if (guard != null)
+                    EObject member = FormElementWriter.resolveFormMember(formModel, ref);
+                    if (member == null)
                     {
-                        throw new FormValidationException(guard);
+                        throw new FormValidationException(ToolResult.error("Form member not found: " //$NON-NLS-1$
+                            + ref.name + " (kind '" + ref.kindToken + "') on " + ref.formPath //$NON-NLS-1$ //$NON-NLS-2$
+                            + ". Use get_metadata_details to list the members.").toJson()); //$NON-NLS-1$
                     }
-                    String pErr = prepare(config, version, member,
-                        normalizeFormProperty(member, prop), changes, normReport);
-                    if (pErr != null)
+                    List<PreparedChange> changes = new ArrayList<>();
+                    for (JsonObject prop : properties)
                     {
-                        throw new FormValidationException(pErr);
+                        String guard = guardFormProperty(prop);
+                        if (guard != null)
+                        {
+                            throw new FormValidationException(guard);
+                        }
+                        String pErr = prepare(config, version, member,
+                            normalizeFormProperty(member, prop), changes, normReport);
+                        if (pErr != null)
+                        {
+                            throw new FormValidationException(pErr);
+                        }
                     }
-                }
-                for (PreparedChange change : changes)
-                {
-                    change.applyTo(member, tx);
-                    applied.add(change.featureName());
-                }
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+                    for (PreparedChange change : changes)
+                    {
+                        change.applyTo(member, tx);
+                        applied.add(change.featureName());
+                    }
+                });
         }
         catch (Exception e)
         {
@@ -449,15 +418,12 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             return ToolResult.error("Failed to modify form member: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
 
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
-
         ToolResult result = ToolResult.success()
             .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
             .put("fqn", normFqn) //$NON-NLS-1$
             .put("applied", applied) //$NON-NLS-1$
             .put("persisted", persisted); //$NON-NLS-1$
-        addNormalization(result, normReport);
+        normReport.addTo(result);
         return result
             .put("message", "Modified " + normFqn + " (" + String.join(", ", applied) + ")") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             .toJson();
@@ -472,9 +438,10 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     private static final String PROP_PARENT = "parent"; //$NON-NLS-1$
     private static final String PROP_POSITION = "position"; //$NON-NLS-1$
     // ru "родитель" (roditel) / "позиция" (poziciya) - pure-ASCII source (matching the rest of the project).
-    private static final String RU_PROP_PARENT = cp(0x0440, 0x043e, 0x0434, 0x0438, 0x0442, 0x0435, 0x043b, 0x044c);
+    private static final String RU_PROP_PARENT =
+        MetadataLanguageUtils.cp(0x0440, 0x043e, 0x0434, 0x0438, 0x0442, 0x0435, 0x043b, 0x044c);
     private static final String RU_PROP_POSITION =
-        cp(0x043f, 0x043e, 0x0437, 0x0438, 0x0446, 0x0438, 0x044f);
+        MetadataLanguageUtils.cp(0x043f, 0x043e, 0x0437, 0x0438, 0x0446, 0x0438, 0x044f);
 
     /** Whether a property NAME is the {@code parent} move property (English or Russian). */
     private static boolean isParentProp(String name)
@@ -560,17 +527,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         return false;
     }
 
-    /** Builds a string from BMP code points (keeps this source pure ASCII, like FormElementWriter). */
-    private static String cp(int... codePoints)
-    {
-        StringBuilder sb = new StringBuilder(codePoints.length);
-        for (int c : codePoints)
-        {
-            sb.append((char)c);
-        }
-        return sb.toString();
-    }
-
     /**
      * Moves / reorders a form ITEM addressed by {@code ref} (a field / group / decoration / button /
      * table), expressed as the {@code parent} and/or {@code position} move properties. Resolves the
@@ -629,49 +585,19 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         final String targetParentFinal = hasParent ? (targetParent == null ? "" : targetParent) : null; //$NON-NLS-1$
         final String positionFinal = position;
 
-        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
-        if (mdForm == null || !(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a form item as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name'.").toJson(); //$NON-NLS-1$
-        }
-        final String mdFormName = mdForm.getName();
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(ctx.project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final String itemName = ref.name;
         final String[] destination = new String[1];
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "MoveFormItem", (tx, pm) -> //$NON-NLS-1$
-            {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
-                {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
-                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
-                        + "built)").toJson());
-                }
-                destination[0] =
-                    FormElementWriter.moveItem(formModel, itemName, targetParentFinal, positionFinal, mdFormName);
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(ctx.project,
+                ctx.config, ref.formPath,
+                "Form not found for '" + normFqn + "'. Address a form item as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName.<Kind>.Name' or 'CommonForm.FormName.<Kind>.Name'."); //$NON-NLS-1$
+            final String mdFormName = fctx.mdForm.getName();
+            persisted = FormElementWriter.writeEditableForm(fctx, "MoveFormItem", //$NON-NLS-1$
+                (formModel, tx) -> destination[0] = FormElementWriter.moveItem(formModel, itemName,
+                    targetParentFinal, positionFinal, mdFormName));
         }
         catch (Exception e)
         {
@@ -683,9 +609,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             Activator.logError("Error moving form item", e); //$NON-NLS-1$
             return ToolResult.error("Failed to move form item: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
-
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
 
         List<String> applied = new ArrayList<>();
         if (hasParent)
@@ -719,63 +642,37 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     private String rebindFormHandler(ProjectContext ctx, String normFqn,
         FormElementWriter.FormMemberRef ref, String procName)
     {
-        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
-        if (mdForm == null || !(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a handler as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName.Handler.Event' or " //$NON-NLS-1$
-                + "'Type.Object.Form.FormName.<ItemKind>.<ItemName>.Handler.Event'.").toJson(); //$NON-NLS-1$
-        }
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(ctx.project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final String eventName = ref.name;
         final String itemName = ref.isItemLevel() ? ref.itemName : null;
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "RebindFormHandler", (tx, pm) -> //$NON-NLS-1$
-            {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(ctx.project,
+                ctx.config, ref.formPath,
+                "Form not found for '" + normFqn + "'. Address a handler as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName.Handler.Event' or " //$NON-NLS-1$
+                    + "'Type.Object.Form.FormName.<ItemKind>.<ItemName>.Handler.Event'."); //$NON-NLS-1$
+            persisted = FormElementWriter.writeEditableForm(fctx, "RebindFormHandler", //$NON-NLS-1$
+                (formModel, tx) ->
                 {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
-                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
-                        + "built)").toJson());
-                }
-                // Form-level handlers live on the form root; item-level handlers on the named item.
-                EObject container = formModel;
-                if (itemName != null)
-                {
-                    container = FormElementWriter.findFormItem(formModel, itemName);
-                    if (container == null)
+                    // Form-level handlers live on the form root; item-level handlers on the named item.
+                    EObject container = formModel;
+                    if (itemName != null)
                     {
-                        throw new FormValidationException(ToolResult.error("Form item not found: " //$NON-NLS-1$
-                            + itemName + ". Use get_metadata_details to inspect the form items.").toJson()); //$NON-NLS-1$
+                        container = FormElementWriter.findFormItem(formModel, itemName);
+                        if (container == null)
+                        {
+                            throw new FormValidationException(ToolResult.error("Form item not found: " //$NON-NLS-1$
+                                + itemName + ". Use get_metadata_details to inspect the form items.") //$NON-NLS-1$
+                                .toJson());
+                        }
                     }
-                }
-                String err = FormElementWriter.rebindHandler(container, eventName, procName);
-                if (err != null)
-                {
-                    throw new FormValidationException(ToolResult.error(err).toJson());
-                }
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+                    String err = FormElementWriter.rebindHandler(container, eventName, procName);
+                    if (err != null)
+                    {
+                        throw new FormValidationException(ToolResult.error(err).toJson());
+                    }
+                });
         }
         catch (Exception e)
         {
@@ -787,9 +684,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             Activator.logError("Error rebinding form handler", e); //$NON-NLS-1$
             return ToolResult.error("Failed to rebind form handler: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
-
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
 
         return ToolResult.success()
             .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
@@ -835,57 +729,32 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                 + "property (e.g. {name:'command', value:'Refresh'}).").toJson(); //$NON-NLS-1$
         }
 
-        MdObject mdForm = FormStructureReader.resolveMdForm(ctx.config, ref.formPath);
-        if (mdForm == null || !(mdForm instanceof IBmObject))
-        {
-            return ToolResult.error("Form not found for '" + normFqn + "'. Address a button as " //$NON-NLS-1$ //$NON-NLS-2$
-                + "'Type.Object.Form.FormName.Button.Name' or 'CommonForm.FormName.Button.Name'.").toJson(); //$NON-NLS-1$
-        }
-
-        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
-        if (bmModelManager == null)
-        {
-            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
-        }
-        IBmModel bmModel = bmModelManager.getModel(ctx.project);
-        if (bmModel == null)
-        {
-            return ToolResult.error("BM model not available").toJson(); //$NON-NLS-1$
-        }
-
-        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
         final String buttonName = ref.name;
         final String commandNameFinal = commandName;
-        final String contentFormFqn;
+        final boolean persisted;
         try
         {
-            contentFormFqn = BmTransactions.<String>write(bmModel, "RebindButtonCommand", (tx, pm) -> //$NON-NLS-1$
-            {
-                EObject txMdForm = (EObject)tx.getObjectById(mdFormBmId);
-                if (txMdForm == null)
+            FormElementWriter.FormEditContext fctx = FormElementWriter.resolveForEdit(ctx.project,
+                ctx.config, ref.formPath,
+                "Form not found for '" + normFqn + "'. Address a button as " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "'Type.Object.Form.FormName.Button.Name' or 'CommonForm.FormName.Button.Name'."); //$NON-NLS-1$
+            persisted = FormElementWriter.writeEditableForm(fctx, "RebindButtonCommand", //$NON-NLS-1$
+                (formModel, tx) ->
                 {
-                    throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
-                }
-                EObject formModel = FormElementWriter.getEditableForm(txMdForm);
-                if (formModel == null)
-                {
-                    throw new FormValidationException(ToolResult.error("the form has no editable " //$NON-NLS-1$
-                        + "content model (it may be empty, an ordinary/legacy form, or not yet " //$NON-NLS-1$
-                        + "built)").toJson());
-                }
-                EObject button = FormElementWriter.findFormItem(formModel, buttonName);
-                if (button == null)
-                {
-                    throw new FormValidationException(ToolResult.error("Form button not found: " //$NON-NLS-1$
-                        + buttonName + ". Use get_metadata_details to inspect the form items.").toJson()); //$NON-NLS-1$
-                }
-                String err = FormElementWriter.rebindButtonCommand(formModel, button, commandNameFinal);
-                if (err != null)
-                {
-                    throw new FormValidationException(ToolResult.error(err).toJson());
-                }
-                return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
-            });
+                    EObject button = FormElementWriter.findFormItem(formModel, buttonName);
+                    if (button == null)
+                    {
+                        throw new FormValidationException(ToolResult.error("Form button not found: " //$NON-NLS-1$
+                            + buttonName + ". Use get_metadata_details to inspect the form items.") //$NON-NLS-1$
+                            .toJson());
+                    }
+                    String err =
+                        FormElementWriter.rebindButtonCommand(formModel, button, commandNameFinal);
+                    if (err != null)
+                    {
+                        throw new FormValidationException(ToolResult.error(err).toJson());
+                    }
+                });
         }
         catch (Exception e)
         {
@@ -897,9 +766,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             Activator.logError("Error rebinding button command", e); //$NON-NLS-1$
             return ToolResult.error("Failed to rebind button command: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
         }
-
-        boolean persisted = contentFormFqn != null && !contentFormFqn.isEmpty()
-            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
 
         return ToolResult.success()
             .put("action", "modified") //$NON-NLS-1$ //$NON-NLS-2$
@@ -947,38 +813,6 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     }
 
     /**
-     * Thrown out of the form write lambda when a property fails validation (or the form/member cannot
-     * be resolved): carries a ready {@code ToolResult.error(...).toJson()} so the caller surfaces the
-     * actionable message instead of a generic failure. Throwing BEFORE any {@code eSet} rolls the tx
-     * back with no partial mutation.
-     */
-    private static final class FormValidationException extends RuntimeException
-    {
-        private static final long serialVersionUID = 1L;
-
-        final String json;
-
-        FormValidationException(String json)
-        {
-            super("form member validation failed"); //$NON-NLS-1$
-            this.json = json;
-        }
-
-        /** Finds a {@link FormValidationException} in the cause chain and returns its JSON, or null. */
-        static String jsonOf(Throwable t)
-        {
-            for (Throwable c = t; c != null; c = c.getCause())
-            {
-                if (c instanceof FormValidationException)
-                {
-                    return ((FormValidationException)c).json;
-                }
-            }
-            return null;
-        }
-    }
-
-    /**
      * Validates one property against the introspected schema and, on success, appends a
      * {@link PreparedChange}. Returns a JSON error string on failure, or {@code null} on success.
      * Accepts any {@link EObject} so it serves both mdclass nodes and form members (the introspector
@@ -1000,7 +834,10 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         }
         String value = asString(prop.get("value")); //$NON-NLS-1$
 
-        PropertyInfo info = MetadataPropertyIntrospector.find(target, name);
+        // findFeature classifies ONLY the matched feature and skips the current-value rendering
+        // (eGet + proxy + type rendering) that the full introspect() performs for EVERY assignable
+        // feature - prepare() never reads currentValue, and this runs on the UI thread per property.
+        PropertyInfo info = MetadataPropertyIntrospector.findFeature(target, name);
         if (info == null)
         {
             return ToolResult.error("Property '" + name + "' is not assignable on " //$NON-NLS-1$ //$NON-NLS-2$
@@ -1389,14 +1226,5 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     {
         String[] parts = normFqn.split("\\."); //$NON-NLS-1$
         return parts.length >= 2 ? parts[0] + "." + parts[1] : normFqn; //$NON-NLS-1$
-    }
-
-    /** Adds the {@code normalized} report field to a result when the normalization rewrote anything. */
-    private static void addNormalization(ToolResult result, MdNameNormalizer.Report normReport)
-    {
-        if (normReport.hasChanges())
-        {
-            result.put("normalized", normReport.normalizedFields()); //$NON-NLS-1$
-        }
     }
 }

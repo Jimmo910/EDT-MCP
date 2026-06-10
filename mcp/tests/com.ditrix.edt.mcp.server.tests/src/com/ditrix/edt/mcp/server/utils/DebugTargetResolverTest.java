@@ -23,76 +23,18 @@ import org.junit.Test;
  * Headless tests for {@link DebugTargetResolver} — the unified resolver that maps
  * every accepted {@code applicationId} form to one underlying Eclipse debug target.
  *
- * <p>Exercised here: id-form classification (which prefix maps to which
- * {@link DebugTargetResolver.IdForm}), null/empty-safety, and the CANONICAL
- * snapshot-key policy ({@link DebugTargetResolver#canonicalIdFor}) against mocked
- * launch/server views — the policy that guarantees ONE snapshot key per session
- * whichever id form a tool call used (defect C-1/C-2). Actual target resolution
- * needs a live debug session (no {@code IRuntimeDebugClientTargetManager} service
- * and no active launches exist in the Tycho headless runtime), so it can only
- * assert that resolution yields {@code null} rather than throwing.
+ * <p>Exercised here: null/empty-safety and the CANONICAL snapshot-key policy
+ * ({@link DebugTargetResolver#canonicalIdFor}) against mocked launch/server views —
+ * the policy that guarantees ONE snapshot key per session whichever id form a tool
+ * call used (defect C-1/C-2). The synthetic-prefix classification authority is
+ * {@link LaunchConfigUtils#isSyntheticApplicationId} (covered by
+ * {@link LaunchConfigUtilsSyntheticIdTest}). Actual target resolution needs a live
+ * debug session (no {@code IRuntimeDebugClientTargetManager} service and no active
+ * launches exist in the Tycho headless runtime), so it can only assert that
+ * resolution yields {@code null} rather than throwing.
  */
 public class DebugTargetResolverTest
 {
-    // --- classify(): id-form / prefix routing ---
-
-    @Test
-    public void testClassifyNullIsBlank()
-    {
-        assertEquals(DebugTargetResolver.IdForm.BLANK, DebugTargetResolver.classify(null));
-    }
-
-    @Test
-    public void testClassifyEmptyIsBlank()
-    {
-        assertEquals(DebugTargetResolver.IdForm.BLANK, DebugTargetResolver.classify("")); //$NON-NLS-1$
-    }
-
-    @Test
-    public void testClassifyServerApplicationPrefix()
-    {
-        assertEquals(DebugTargetResolver.IdForm.SERVER_APPLICATION,
-            DebugTargetResolver.classify("ServerApplication.ГрафикДоставки")); //$NON-NLS-1$
-        // Use the prefix constant directly so the test tracks any rename.
-        assertEquals(DebugTargetResolver.IdForm.SERVER_APPLICATION,
-            DebugTargetResolver.classify(DebugServerTargetSupport.SERVER_APP_ID_PREFIX + "X")); //$NON-NLS-1$
-    }
-
-    @Test
-    public void testClassifyAttachPrefix()
-    {
-        assertEquals(DebugTargetResolver.IdForm.ATTACH,
-            DebugTargetResolver.classify(LaunchConfigUtils.ATTACH_APP_ID_PREFIX + "MyAttachConfig")); //$NON-NLS-1$
-    }
-
-    @Test
-    public void testClassifyLaunchPrefix()
-    {
-        assertEquals(DebugTargetResolver.IdForm.LAUNCH,
-            DebugTargetResolver.classify(LaunchConfigUtils.LAUNCH_APP_ID_PREFIX + "Standalone server")); //$NON-NLS-1$
-    }
-
-    @Test
-    public void testClassifyRealOrBare()
-    {
-        // A real ATTR_APPLICATION_ID (no synthetic prefix) or a bare application name.
-        assertEquals(DebugTargetResolver.IdForm.REAL_OR_BARE,
-            DebugTargetResolver.classify("ГрафикДоставки")); //$NON-NLS-1$
-        assertEquals(DebugTargetResolver.IdForm.REAL_OR_BARE,
-            DebugTargetResolver.classify("some-real-application-uuid")); //$NON-NLS-1$
-    }
-
-    @Test
-    public void testClassifyPrefixIsOrderSensitive()
-    {
-        // The server prefix must not be misclassified as attach/launch and vice versa.
-        assertEquals(DebugTargetResolver.IdForm.SERVER_APPLICATION,
-            DebugTargetResolver.classify("ServerApplication.attach:foo")); //$NON-NLS-1$
-        // A bare name that merely contains (but doesn't start with) a prefix token.
-        assertEquals(DebugTargetResolver.IdForm.REAL_OR_BARE,
-            DebugTargetResolver.classify("my-launch:thing")); //$NON-NLS-1$
-    }
-
     // --- resolve(): null-safety / headless behavior ---
 
     @Test

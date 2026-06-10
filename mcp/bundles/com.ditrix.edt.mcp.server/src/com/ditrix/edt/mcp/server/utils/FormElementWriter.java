@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.common.util.TreeIterator;
@@ -30,8 +31,10 @@ import org.eclipse.emf.ecore.util.EcoreUtil;
 
 import com._1c.g5.v8.bm.core.IBmObject;
 import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.form.model.AutoCommandBar;
 import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormChildrenGroup;
@@ -41,10 +44,13 @@ import com._1c.g5.v8.dt.form.model.FormPackage;
 import com._1c.g5.v8.dt.form.model.ItemHorizontalAlignment;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.Version;
+import com.ditrix.edt.mcp.server.Activator;
+import com.ditrix.edt.mcp.server.protocol.ToolResult;
 
 /**
  * Shared writer for the editable FORM CONTENT model ({@code com._1c.g5.v8.dt.form.model.Form}, a
@@ -59,8 +65,9 @@ import com._1c.g5.v8.dt.platform.version.Version;
  *
  * <p>This is the canonical home for the form-write logic that {@code create_metadata} (and, until
  * they are removed, the {@code add_form_*} tools) use. Mutation MUST run inside a BM write transaction
- * on the re-fetched content form; capturing the content form's own FQN for {@code forceExportToDisk}
- * is the caller's job.</p>
+ * on the re-fetched content form; the shared scaffold ({@link #resolveForEdit} +
+ * {@link #writeEditableForm} / {@link #readEditableForm}) owns the resolve -&gt; transact -&gt;
+ * force-export pipeline, so tools only supply the per-call work.</p>
  */
 public final class FormElementWriter
 {
@@ -330,15 +337,11 @@ public final class FormElementWriter
         return null;
     }
 
-    /** Builds a string from BMP code points (keeps this source pure ASCII). */
+    /** Builds a string from BMP code points (keeps this source pure ASCII). Delegates to the shared
+     * {@link MetadataLanguageUtils#cp}. */
     private static String cp(int... codePoints)
     {
-        StringBuilder sb = new StringBuilder(codePoints.length);
-        for (int c : codePoints)
-        {
-            sb.append((char)c);
-        }
-        return sb.toString();
+        return MetadataLanguageUtils.cp(codePoints);
     }
 
     /**
@@ -366,6 +369,228 @@ public final class FormElementWriter
             // No getForm() / inaccessible - treated as "no editable model".
         }
         return null;
+    }
+
+    // ---- shared form write-transaction scaffold ---------------------------------------------------
+    //
+    // Every form-editing tool repeats the same ~40-line pipeline: resolve the MD-form from a form
+    // path, null-check the BM services, capture the bmId, re-fetch the MD-form inside a BM
+    // transaction, hop to the editable content form, run the work, then force-export the content
+    // form's own FQN (it serializes to Form.form). The scaffold below owns that pipeline ONCE;
+    // tools supply only the per-call work and their user-visible "form not found" message. Every
+    // scaffold-level failure that carries an actionable message is thrown as a
+    // FormValidationException with the READY error JSON, so callers surface it verbatim
+    // (FormValidationException.jsonOf) from one catch block.
+
+    /** Work executed on the re-fetched editable content form inside a BM WRITE transaction. */
+    @FunctionalInterface
+    public interface FormWork
+    {
+        /**
+         * @param formModel the transaction-bound editable content form
+         * @param tx the active BM write transaction
+         */
+        void run(EObject formModel, IBmTransaction tx);
+    }
+
+    /** Read work executed on the re-fetched editable content form inside a BM READ transaction. */
+    @FunctionalInterface
+    public interface FormRead<T>
+    {
+        /**
+         * @param formModel the transaction-bound editable content form
+         * @param tx the active BM read transaction
+         * @return the read result (must not leak transaction-bound EObjects)
+         */
+        T run(EObject formModel, IBmTransaction tx);
+    }
+
+    /** Work executed on the re-fetched MD-form ({@code BasicForm}) inside a BM WRITE transaction. */
+    @FunctionalInterface
+    public interface MdFormWork
+    {
+        /**
+         * @param txMdForm the transaction-bound {@code BasicForm} mdo
+         * @param tx the active BM write transaction
+         */
+        void run(EObject txMdForm, IBmTransaction tx);
+    }
+
+    /**
+     * A resolved form-edit context: the project, its BM model and the MD-form (pre-transaction
+     * snapshot - re-fetched by {@link #mdFormBmId} inside the transaction for any mutation).
+     */
+    public static final class FormEditContext
+    {
+        /** The workspace project owning the form. */
+        public final IProject project;
+        /** The project's BM model. */
+        public final IBmModel bmModel;
+        /** Pre-transaction snapshot of the MD-form (safe for reads like {@code getName()}). */
+        public final MdObject mdForm;
+        /** The MD-form's bmId, used to re-fetch it inside the transaction. */
+        final long mdFormBmId;
+        /** The resolved form path (for error messages), or {@code null} for a pre-resolved form. */
+        final String formPath;
+
+        FormEditContext(IProject project, IBmModel bmModel, MdObject mdForm, long mdFormBmId,
+            String formPath)
+        {
+            this.project = project;
+            this.bmModel = bmModel;
+            this.mdForm = mdForm;
+            this.mdFormBmId = mdFormBmId;
+            this.formPath = formPath;
+        }
+    }
+
+    /**
+     * Resolves the form addressed by {@code formPath} (the {@code Type.Object.forms.FormName} /
+     * {@code CommonForm.Name} shape) and the BM services needed to edit it. Every failure is thrown
+     * as a {@link FormValidationException} carrying the ready error JSON ({@code formNotFoundMessage}
+     * for a missing form), so the caller's single catch block surfaces it verbatim.
+     *
+     * @param project the workspace project
+     * @param config the project configuration
+     * @param formPath the form path to resolve
+     * @param formNotFoundMessage the user-visible message when the form does not resolve
+     * @return the resolved context
+     */
+    public static FormEditContext resolveForEdit(IProject project, Configuration config,
+        String formPath, String formNotFoundMessage)
+    {
+        MdObject mdForm = FormStructureReader.resolveMdForm(config, formPath);
+        if (mdForm == null)
+        {
+            throw new FormValidationException(ToolResult.error(formNotFoundMessage).toJson());
+        }
+        return editContext(project, mdForm, formPath);
+    }
+
+    /**
+     * Builds a {@link FormEditContext} for an ALREADY-RESOLVED MD-form (a caller with its own
+     * resolution / error wording, e.g. the owned-form delete). Throws {@link FormValidationException}
+     * with the ready error JSON when the BM services are unavailable.
+     *
+     * @param project the workspace project
+     * @param mdForm the resolved MD-form
+     * @return the context
+     */
+    public static FormEditContext editContextFor(IProject project, MdObject mdForm)
+    {
+        return editContext(project, mdForm, null);
+    }
+
+    private static FormEditContext editContext(IProject project, MdObject mdForm, String formPath)
+    {
+        if (!(mdForm instanceof IBmObject))
+        {
+            throw new FormValidationException(ToolResult.error("Form is not a BM object").toJson()); //$NON-NLS-1$
+        }
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            throw new FormValidationException(
+                ToolResult.error("IBmModelManager not available").toJson()); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(project);
+        if (bmModel == null)
+        {
+            throw new FormValidationException(ToolResult.error("BM model not available for project: " //$NON-NLS-1$
+                + project.getName()).toJson());
+        }
+        return new FormEditContext(project, bmModel, mdForm, ((IBmObject)mdForm).bmGetId(), formPath);
+    }
+
+    /**
+     * Runs {@code work} against the editable content form inside ONE BM WRITE transaction, then
+     * force-exports the content form's OWN top-object FQN (forms serialize to {@code Form.form}).
+     * The MD-form is re-fetched by bmId inside the transaction; a missing editable content model is
+     * thrown as a {@link FormValidationException} (rolling the transaction back), so an exception
+     * from {@code work} (including a {@code FormValidationException} carrying a ready JSON error)
+     * leaves no partial mutation.
+     *
+     * @param ctx the resolved context (see {@link #resolveForEdit})
+     * @param taskName a short BM task name for diagnostics
+     * @param work the mutation to run on the content form
+     * @return whether the export persisted the change to disk
+     */
+    public static boolean writeEditableForm(FormEditContext ctx, String taskName, FormWork work)
+    {
+        String contentFormFqn = BmTransactions.<String>write(ctx.bmModel, taskName, (tx, pm) ->
+        {
+            EObject formModel = editableFormInTx(ctx, tx);
+            work.run(formModel, tx);
+            // The content Form is a separate top object serialized to Form.form - export ITS fqn.
+            return (formModel instanceof IBmObject) ? ((IBmObject)formModel).bmGetFqn() : null;
+        });
+        return contentFormFqn != null && !contentFormFqn.isEmpty()
+            && BmTransactions.forceExportToDisk(ctx.project, contentFormFqn);
+    }
+
+    /**
+     * Runs {@code work} against the editable content form inside ONE BM READ transaction (no
+     * mutation, nothing exported). Scaffold failures are thrown like {@link #writeEditableForm}.
+     *
+     * @param ctx the resolved context (see {@link #resolveForEdit})
+     * @param taskName a short BM task name for diagnostics
+     * @param work the read to run on the content form
+     * @param <T> the read result type
+     * @return the read result
+     */
+    public static <T> T readEditableForm(FormEditContext ctx, String taskName, FormRead<T> work)
+    {
+        return BmTransactions.read(ctx.bmModel, taskName,
+            (tx, pm) -> work.run(editableFormInTx(ctx, tx), tx));
+    }
+
+    /**
+     * Runs {@code work} against the re-fetched MD-form ({@code BasicForm}) itself inside ONE BM
+     * WRITE transaction - the variant for work that mutates the MD-form / its owner rather than the
+     * content form (e.g. deleting an owned form). No editable-content check is applied and nothing
+     * is exported; the caller exports whichever top object(s) it dirtied.
+     *
+     * @param ctx the resolved context (see {@link #editContextFor})
+     * @param taskName a short BM task name for diagnostics
+     * @param work the mutation to run on the MD-form
+     */
+    public static void writeMdForm(FormEditContext ctx, String taskName, MdFormWork work)
+    {
+        BmTransactions.<Void>write(ctx.bmModel, taskName, (tx, pm) ->
+        {
+            work.run(mdFormInTx(ctx, tx), tx);
+            return null;
+        });
+    }
+
+    /** Re-fetches the MD-form inside the transaction, failing clearly when it has gone. */
+    private static EObject mdFormInTx(FormEditContext ctx, IBmTransaction tx)
+    {
+        EObject txMdForm = (EObject)tx.getObjectById(ctx.mdFormBmId);
+        if (txMdForm == null)
+        {
+            throw new RuntimeException("Form object not found in transaction"); //$NON-NLS-1$
+        }
+        return txMdForm;
+    }
+
+    /** Re-fetches the MD-form and hops to its editable content form, failing on either gap. */
+    private static EObject editableFormInTx(FormEditContext ctx, IBmTransaction tx)
+    {
+        EObject formModel = getEditableForm(mdFormInTx(ctx, tx));
+        if (formModel == null)
+        {
+            throw new FormValidationException(noEditableContentError(ctx.formPath));
+        }
+        return formModel;
+    }
+
+    /** The canonical "no editable content model" error JSON (with the form path when known). */
+    private static String noEditableContentError(String formPath)
+    {
+        String suffix = (formPath != null && !formPath.isEmpty()) ? ": " + formPath : ""; //$NON-NLS-1$ //$NON-NLS-2$
+        return ToolResult.error("the form has no editable content model (it may be empty, an " //$NON-NLS-1$
+            + "ordinary/legacy form, or not yet built)" + suffix).toJson(); //$NON-NLS-1$
     }
 
     /**

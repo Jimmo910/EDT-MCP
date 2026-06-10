@@ -45,6 +45,20 @@ public class LaunchConfigUtilsSyntheticIdTest
     }
 
     @Test
+    public void testSyntheticServerApplicationId()
+    {
+        // ServerApplication.<app> is minted by DebugServerTargetSupport for 1C debug-server
+        // targets; per the contract it cannot be resolved through IApplicationManager, so the
+        // single classification authority must know this prefix too (G2: the DB-update preflight
+        // must skip it instead of failing with 'Application not found').
+        assertTrue(LaunchConfigUtils.isSyntheticApplicationId(
+            DebugServerTargetSupport.SERVER_APP_ID_PREFIX + "ГрафикДоставки")); //$NON-NLS-1$
+        assertTrue(LaunchConfigUtils.isSyntheticApplicationId("ServerApplication.App")); //$NON-NLS-1$
+        // A name merely CONTAINING a prefix token is not synthetic.
+        assertFalse(LaunchConfigUtils.isSyntheticApplicationId("my-launch:thing")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testRealApplicationIdIsNotSynthetic()
     {
         // A real ATTR_APPLICATION_ID looks like a UUID/opaque token — not synthetic.
