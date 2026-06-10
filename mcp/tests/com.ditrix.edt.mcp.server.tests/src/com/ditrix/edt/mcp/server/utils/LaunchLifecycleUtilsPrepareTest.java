@@ -18,7 +18,6 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -37,9 +36,6 @@ import org.junit.Test;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils.PreLaunchResult;
 import com.e1c.g5.dt.applications.ApplicationUpdateState;
 import com.e1c.g5.dt.applications.IApplication;
-import com.e1c.g5.dt.applications.IApplicationEvent;
-import com.e1c.g5.dt.applications.IApplicationEvent.ApplicationEventType;
-import com.e1c.g5.dt.applications.IApplicationListener;
 import com.e1c.g5.dt.applications.IApplicationManager;
 
 /**
@@ -262,13 +258,14 @@ public class LaunchLifecycleUtilsPrepareTest
     }
 
     @Test
-    public void testSettleWindowSkippedWhenNoUpdateEventDuringRecompute() throws Exception
+    public void testSettleWindowAlwaysKeptAfterRecompute() throws Exception
     {
-        // Review fix B5: the recompute drain pushed no UPDATE_STATE_CHANGED event
-        // for this application, so the post-recompute settle window must be
-        // SKIPPED — the IB state is read exactly once (the cheap entry read)
-        // instead of being polled for the full settle window on a genuinely
-        // in-sync IB.
+        // The post-recompute settle window is UNCONDITIONAL (#19925): the lagging
+        // UPDATE_STATE_CHANGED push it exists for is emitted by the
+        // applications-layer infobase-sync checker AFTER the recompute drain, so
+        // no during-drain observation can prove it will not come. Even with no
+        // update event delivered at all, the state must be re-polled beyond the
+        // single cheap entry read before "no update needed" is trusted.
         ILaunchManager launchManager = mock(ILaunchManager.class);
         when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
 
@@ -277,40 +274,6 @@ public class LaunchLifecycleUtilsPrepareTest
         when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
             .thenReturn(Optional.of(app));
         when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
-
-        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
-            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);
-
-        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
-        verify(mgr, times(1)).getUpdateState(app);
-    }
-
-    @Test
-    public void testSettleWindowKeptWhenUpdateEventSeenDuringRecompute() throws Exception
-    {
-        // Review fix B5, conservative side: when an UPDATE_STATE_CHANGED event IS
-        // observed while the probe listener is registered, the lagging-cache
-        // suspicion stands and the settle window must be KEPT — the state is
-        // re-polled beyond the single entry read.
-        ILaunchManager launchManager = mock(ILaunchManager.class);
-        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
-
-        IApplication app = mock(IApplication.class);
-        IApplicationManager mgr = mock(IApplicationManager.class);
-        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
-            .thenReturn(Optional.of(app));
-        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
-        // Deliver an UPDATE_STATE_CHANGED for this application the moment ANY
-        // listener registers — this covers the probe window around the recompute.
-        doAnswer(inv -> {
-            IApplicationListener listener = inv.getArgument(0);
-            IApplicationEvent event = mock(IApplicationEvent.class);
-            when(event.getApplication()).thenReturn(app);
-            when(event.getEventType()).thenReturn(ApplicationEventType.UPDATE_STATE_CHANGED);
-            when(event.getUpdateState()).thenReturn(ApplicationUpdateState.UPDATED);
-            listener.applicationChanged(event);
-            return null;
-        }).when(mgr).addAppllicationListener(any(IApplicationListener.class));
 
         PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
             launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);

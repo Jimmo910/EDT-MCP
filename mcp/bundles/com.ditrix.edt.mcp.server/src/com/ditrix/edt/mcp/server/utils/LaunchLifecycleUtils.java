@@ -16,7 +16,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
@@ -1458,89 +1457,24 @@ public final class LaunchLifecycleUtils
             // the stale export artifact — so the first test run executes the old
             // extension, missing freshly added tests (bug #19925). updateScope
             // narrows the recompute when only a specific extension changed.
-            //
-            // While the recompute + build/derived-data drain runs (it spans
-            // seconds), PROBE for UPDATE_STATE_CHANGED events for this
-            // application. The post-recompute settle window in
-            // updateApplicationIfNeeded exists only because the cached UPDATED
-            // can lag the just-regenerated .cfe — and that lag manifests as an
-            // UPDATE_STATE_CHANGED push. If the whole drain completes without ANY
-            // such event, there is nothing to lag behind, so the settle window (a
-            // guaranteed full syncSettleWindowMs sleep on a genuinely in-sync IB,
-            // paid per run under the per-IB lock) is safely skipped. If an event
-            // WAS seen — or probing is impossible — the settle window is kept.
-            boolean settleAfterRecompute = true;
-            IApplication probedApp = resolveApplicationQuietly(appManager, project, applicationId);
-            if (appManager != null && probedApp != null)
-            {
-                final IApplication probeTarget = probedApp;
-                final AtomicBoolean updateEventSeen = new AtomicBoolean(false);
-                IApplicationListener probe = event -> {
-                    if (event != null
-                        && event.getEventType() == ApplicationEventType.UPDATE_STATE_CHANGED
-                        && isSameApplication(event.getApplication(), probeTarget))
-                    {
-                        updateEventSeen.set(true);
-                    }
-                };
-                appManager.addAppllicationListener(probe);
-                try
-                {
-                    recomputeAndSettle(resolveUpdateScope(project, updateScope));
-                }
-                finally
-                {
-                    appManager.removeAppllicationListener(probe);
-                }
-                settleAfterRecompute = updateEventSeen.get();
-                if (!settleAfterRecompute)
-                {
-                    Activator.logInfo("Pre-launch: no UPDATE_STATE_CHANGED observed during the " //$NON-NLS-1$
-                        + "recompute drain — skipping the post-recompute settle window"); //$NON-NLS-1$
-                }
-            }
-            else
-            {
-                recomputeAndSettle(resolveUpdateScope(project, updateScope));
-            }
+            recomputeAndSettle(resolveUpdateScope(project, updateScope));
 
-            // settleAfterPossibleRecompute: we JUST forced a recompute, so a cached
+            // settleAfterPossibleRecompute=true: we JUST forced a recompute, so a cached
             // UPDATED may lag the freshly regenerated .cfe — wait out the settle window
-            // before trusting "no update needed" (bug #19925), UNLESS the probe above
-            // proved no update-state event fired during the drain. The plain
-            // debug_launch path passes false (immediate return on UPDATED).
+            // before trusting "no update needed" (bug #19925). The settle is kept
+            // UNCONDITIONALLY: the lagging UPDATE_STATE_CHANGED push this window
+            // exists for arrives AFTER the recompute drain (it is emitted by the
+            // applications-layer infobase-sync checker, which the drained build /
+            // derived-data job families do NOT cover), so no during-drain probe can
+            // prove it will not come. The plain debug_launch path passes false
+            // (immediate return on UPDATED) to avoid that ~5s cost.
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
-                appManager, settleAfterRecompute);
+                appManager, true);
             if (updateErr.isPresent())
             {
                 return new PreLaunchResult(false, terminated, updateErr.get());
             }
             return new PreLaunchResult(true, terminated, null);
-        }
-    }
-
-    /**
-     * Resolves the {@link IApplication} for the pre-launch settle probe without
-     * throwing: any {@link ApplicationException} (or a missing application)
-     * yields {@code null}, in which case the caller keeps the conservative
-     * settle window.
-     */
-    private static IApplication resolveApplicationQuietly(IApplicationManager appManager,
-            IProject project, String applicationId)
-    {
-        if (appManager == null || project == null)
-        {
-            return null;
-        }
-        try
-        {
-            Optional<IApplication> appOpt = appManager.getApplication(project, applicationId);
-            return appOpt != null ? appOpt.orElse(null) : null;
-        }
-        catch (ApplicationException e)
-        {
-            Activator.logError("Error resolving application for the pre-launch settle probe", e); //$NON-NLS-1$
-            return null;
         }
     }
 
