@@ -187,50 +187,30 @@ public class DebugLaunchTool implements IMcpTool
                 LaunchConfigUtils.ATTR_PROJECT_NAME, ""); //$NON-NLS-1$
             String effectiveAppId = LaunchConfigUtils.getApplicationIdFor(config);
 
-            // If the config is already running in debug mode, don't re-launch.
-            if (effectiveAppId != null
-                && DebugSessionRegistry.findActiveTarget(effectiveAppId) != null)
+            // Unified existing-session decision (D5c, Bitrix 20074). One
+            // (project, app-id) → at most one live CLIENT session, with the
+            // live-thread discriminator applied so a thread-less standalone-SERVER /
+            // profiling session sharing this app id NEVER short-circuits the client.
+            // Covers both a live DEBUG target and a debug-target-less RUN-mode launch
+            // (the former A12 guard). restartIfRunning is honored here exactly as in
+            // the target-manager path: false → alreadyRunning, true → non-interactive
+            // terminate + relaunch.
+            ExistingClientSession existingByName = resolveExistingClientSession(effectiveAppId);
+            if (existingByName != null)
             {
-                ToolResult already = ToolResult.success()
-                    .put("launchConfiguration", config.getName()) //$NON-NLS-1$
-                    .put("configurationType", typeId) //$NON-NLS-1$
-                    .put("attach", isAttach) //$NON-NLS-1$
-                    .put("applicationId", effectiveAppId) //$NON-NLS-1$
-                    .put("alreadyRunning", true) //$NON-NLS-1$
-                    .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
-                    .put("message", "Launch configuration is already running — skipped re-launch."); //$NON-NLS-1$ //$NON-NLS-2$
-                if (configProject != null && !configProject.isEmpty())
+                AlreadyRunningContext ctx = new AlreadyRunningContext(ALREADY_RUNNING_MESSAGE);
+                ctx.launchConfiguration = config.getName();
+                ctx.configurationType = typeId;
+                ctx.attach = Boolean.valueOf(isAttach);
+                ctx.project = configProject;
+                String shortCircuit = handleExistingClientSession(existingByName, effectiveAppId,
+                    restartIfRunning, ctx);
+                if (shortCircuit != null)
                 {
-                    already.put("project", configProject); //$NON-NLS-1$
+                    return shortCircuit;
                 }
-                return already.toJson();
-            }
-
-            // A non-terminated launch may exist for this config WITHOUT a debug
-            // target — e.g. it was started in RUN mode. findActiveTarget() (debug
-            // targets only) misses it, so without this guard the by-name path
-            // would start a SECOND client over the running one — the same A12
-            // guard the projectName+applicationId path applies.
-            ILaunch activeLaunch = effectiveAppId != null
-                ? DebugSessionRegistry.findActiveLaunch(effectiveAppId) : null;
-            if (activeLaunch != null)
-            {
-                String runningMode = activeLaunch.getLaunchMode();
-                ToolResult already = ToolResult.success()
-                    .put("launchConfiguration", config.getName()) //$NON-NLS-1$
-                    .put("configurationType", typeId) //$NON-NLS-1$
-                    .put("attach", isAttach) //$NON-NLS-1$
-                    .put("applicationId", effectiveAppId) //$NON-NLS-1$
-                    .put("alreadyRunning", true) //$NON-NLS-1$
-                    .put("mode", runningMode) //$NON-NLS-1$
-                    .put("message", "Application is already running (mode: " + runningMode //$NON-NLS-1$ //$NON-NLS-2$
-                        + ") - skipped launch to avoid a second client over the running session. " //$NON-NLS-1$
-                        + "Call terminate_launch first to force a fresh session."); //$NON-NLS-1$
-                if (configProject != null && !configProject.isEmpty())
-                {
-                    already.put("project", configProject); //$NON-NLS-1$
-                }
-                return already.toJson();
+                // restartIfRunning=true: the old client was terminated — fall through
+                // and relaunch.
             }
 
             // Delegate-criterion duplicate guard (Bitrix 20074). Runtime-client DEBUG
@@ -352,57 +332,33 @@ public class DebugLaunchTool implements IMcpTool
                 }
             }
 
-            // If this application already has a live debug session, short-circuit
-            // — mirrors the launchConfigurationName path so both call styles behave
-            // the same. To force a fresh launch, terminate_launch first.
-            IDebugTarget activeTarget = DebugSessionRegistry.findActiveTarget(applicationId);
-            if (activeTarget != null)
+            // Unified existing-session decision (D5c, Bitrix 20074) — the SAME
+            // live-thread-discriminated detector + restartIfRunning handling the
+            // by-name path uses, so both call styles behave identically. A live DEBUG
+            // client target OR a debug-target-less RUN-mode launch short-circuits (the
+            // former A12 guard); a thread-less standalone-SERVER session sharing this
+            // app id does NOT (the client proceeds and attaches). To force a fresh
+            // launch when restartIfRunning is false, terminate_launch first.
+            ExistingClientSession existingByApp = resolveExistingClientSession(applicationId);
+            if (existingByApp != null)
             {
-                String activeConfigName = activeTarget.getLaunch() != null
-                    && activeTarget.getLaunch().getLaunchConfiguration() != null
-                        ? activeTarget.getLaunch().getLaunchConfiguration().getName()
-                        : null;
-                Activator.logInfo("debug_launch short-circuit (alreadyRunning): project=" //$NON-NLS-1$
-                    + projectName + ", applicationId=" + applicationId //$NON-NLS-1$
-                    + ", activeConfig=" + activeConfigName); //$NON-NLS-1$
-                ToolResult already = ToolResult.success()
-                    .put("project", projectName) //$NON-NLS-1$
-                    .put("applicationId", applicationId) //$NON-NLS-1$
-                    .put("attach", false) //$NON-NLS-1$
-                    .put("alreadyRunning", true) //$NON-NLS-1$
-                    .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
-                    .put("message", "Launch configuration is already running — skipped re-launch. " //$NON-NLS-1$ //$NON-NLS-2$
-                        + "Call terminate_launch first to force a fresh session.");
-                if (activeConfigName != null)
-                {
-                    already.put("launchConfiguration", activeConfigName); //$NON-NLS-1$
-                }
-                return already.toJson();
-            }
-
-            // A non-terminated launch may exist for this application WITHOUT a debug
-            // target - e.g. it was started in RUN mode. findActiveTarget() (debug
-            // targets only) misses it, so without this guard debug_launch would start
-            // a SECOND client over the running one. (audit A12)
-            ILaunch activeLaunch = DebugSessionRegistry.findActiveLaunch(applicationId);
-            if (activeLaunch != null)
-            {
-                String runningMode = activeLaunch.getLaunchMode();
-                ILaunchConfiguration activeConfig = activeLaunch.getLaunchConfiguration();
-                ToolResult already = ToolResult.success()
-                    .put("project", projectName) //$NON-NLS-1$
-                    .put("applicationId", applicationId) //$NON-NLS-1$
-                    .put("attach", false) //$NON-NLS-1$
-                    .put("alreadyRunning", true) //$NON-NLS-1$
-                    .put("mode", runningMode) //$NON-NLS-1$
-                    .put("message", "Application is already running (mode: " + runningMode //$NON-NLS-1$ //$NON-NLS-2$
-                        + ") - skipped launch to avoid a second client over the running session. " //$NON-NLS-1$
-                        + "Call terminate_launch first to force a fresh session."); //$NON-NLS-1$
+                ILaunchConfiguration activeConfig = existingByApp.launch != null
+                    ? existingByApp.launch.getLaunchConfiguration() : null;
+                AlreadyRunningContext runningCtx = new AlreadyRunningContext(ALREADY_RUNNING_MESSAGE);
+                runningCtx.project = projectName;
+                runningCtx.attach = Boolean.FALSE;
                 if (activeConfig != null)
                 {
-                    already.put("launchConfiguration", activeConfig.getName()); //$NON-NLS-1$
+                    runningCtx.launchConfiguration = activeConfig.getName();
                 }
-                return already.toJson();
+                String shortCircuit = handleExistingClientSession(existingByApp, applicationId,
+                    restartIfRunning, runningCtx);
+                if (shortCircuit != null)
+                {
+                    return shortCircuit;
+                }
+                // restartIfRunning=true: the old client was terminated — fall through
+                // and relaunch.
             }
 
             // Update database before launch if requested. Routes through the
@@ -543,6 +499,344 @@ public class DebugLaunchTool implements IMcpTool
     private static final long RESTART_TERMINATE_TIMEOUT_MS = 3000L;
 
     /**
+     * The single existing-session decision (D5c, Bitrix 20074): one
+     * {@code (project, applicationId)} resolves to AT MOST one
+     * {@link ExistingClientSession} via {@link #resolveExistingClientSession}, and
+     * every call site funnels that result through
+     * {@link #handleExistingClientSession} so the {@code restartIfRunning} flag is
+     * honored identically in EVERY path — by-name and by-project+application, and
+     * BOTH the {@link DebugSessionRegistry} ({@code ILaunchManager}) guards and the
+     * {@link DebugServerTargetSupport} (target-manager) detect.
+     *
+     * <p>A session is a real CLIENT session worth short-circuiting/terminating only
+     * when it is either:
+     * <ul>
+     *   <li>a DEBUG launch/target with ≥1 non-terminated thread — a thin-client
+     *       debug session ({@link DebugServerTargetSupport#findFirstLiveThread} is
+     *       the same discriminator EDT's launch delegate uses), or</li>
+     *   <li>a RUN-mode launch — a genuine running 1C client that carries NO debug
+     *       target at all (the A12/A13 already-running guard); the live-thread gate
+     *       does not apply because there is no debug target to inspect.</li>
+     * </ul>
+     * A DEBUG launch/target whose every debug target is thread-less is a 1C
+     * standalone-SERVER / profiling session for the same app id — it is NEVER a
+     * client session: it must not short-circuit the client (the client proceeds and
+     * attaches) and must never be terminated by {@code restartIfRunning}.
+     */
+    static final class ExistingClientSession
+    {
+        /**
+         * The owning Eclipse launch. Non-{@code null} for the {@code ILaunchManager}
+         * paths (it IS the terminate handle when {@link #liveTarget} is {@code null},
+         * the RUN-mode case); may be {@code null} for the target-manager path, where
+         * {@link #liveTarget} is always set and is the terminate handle instead.
+         */
+        final ILaunch launch;
+        /**
+         * The matched live DEBUG target with ≥1 live thread, or {@code null} when
+         * the session is a RUN-mode launch (no debug target). Drives the terminate
+         * path: a target is terminated via the target; a RUN-mode launch via the
+         * launch.
+         */
+        final IDebugTarget liveTarget;
+        /** The session's launch mode (e.g. {@code debug}, {@code run}). */
+        final String mode;
+
+        ExistingClientSession(ILaunch launch, IDebugTarget liveTarget, String mode)
+        {
+            this.launch = launch;
+            this.liveTarget = liveTarget;
+            this.mode = mode;
+        }
+    }
+
+    /**
+     * Resolves the ONE live CLIENT session the {@code ILaunchManager} knows for the
+     * given applicationId, with the live-thread discriminator applied so a
+     * thread-less standalone-SERVER / profiling session never matches (Bitrix 20074).
+     *
+     * <p>Order, mirroring the legacy guards it unifies:
+     * <ol>
+     *   <li>{@link DebugSessionRegistry#findActiveTarget} — a non-terminated DEBUG
+     *       target for this app id. It matches ONLY when that target also carries a
+     *       live thread ({@link DebugServerTargetSupport#findFirstLiveThread}); a
+     *       thread-less server/profiling target is rejected so the client proceeds.</li>
+     *   <li>{@link DebugSessionRegistry#findActiveLaunch} — any non-terminated launch
+     *       for this app id, catching a RUN-mode (or otherwise debug-target-less)
+     *       client the target scan misses. A RUN-mode launch carries no debug target,
+     *       so it is a genuine running client (returned as a session with a
+     *       {@code null} target). A DEBUG launch is returned ONLY when one of its
+     *       debug targets has a live thread — otherwise it is the same thread-less
+     *       server session and is rejected.</li>
+     * </ol>
+     *
+     * @param applicationId the application id (real or synthetic); {@code null}/empty
+     *     never matches
+     * @return the live client session, or {@code null} when none exists (so the
+     *     caller proceeds to launch, including when only a thread-less server session
+     *     shares this app id)
+     */
+    static ExistingClientSession resolveExistingClientSession(String applicationId)
+    {
+        if (applicationId == null || applicationId.isEmpty())
+        {
+            return null;
+        }
+        // The two ILaunchManager views the legacy guards used, now run through one
+        // live-thread-discriminated decision (decideExistingClientSession). The lookups
+        // are the only workbench-bound part; the decision is pure and unit-tested.
+        return decideExistingClientSession(
+            DebugSessionRegistry.findActiveTarget(applicationId),
+            DebugSessionRegistry.findActiveLaunch(applicationId));
+    }
+
+    /**
+     * The PURE existing-client decision over the two {@code ILaunchManager} views
+     * (D5c, Bitrix 20074) — split out from {@link #resolveExistingClientSession} so
+     * the live-thread discrimination is unit-testable without a live workbench.
+     *
+     * <ol>
+     *   <li>{@code activeTarget} (from {@link DebugSessionRegistry#findActiveTarget}) —
+     *       a live DEBUG target. Matches a client ONLY when it carries a live thread
+     *       ({@link DebugServerTargetSupport#findFirstLiveThread}); a thread-less
+     *       server/profiling target is rejected here.</li>
+     *   <li>{@code activeLaunch} (from {@link DebugSessionRegistry#findActiveLaunch}) —
+     *       any non-terminated launch the target scan missed. A live-thread debug
+     *       target it owns ⇒ client; ZERO debug targets ⇒ genuine RUN-mode client (the
+     *       A12/A13 guard); debug target(s) but none with a live thread ⇒ standalone-
+     *       server session ⇒ NOT a client (returns {@code null}, so the client
+     *       proceeds and attaches).</li>
+     * </ol>
+     *
+     * @param activeTarget the live DEBUG target for the app id, or {@code null}
+     * @param activeLaunch a non-terminated launch for the app id, or {@code null}
+     * @return the live client session, or {@code null} when none is a real client
+     */
+    static ExistingClientSession decideExistingClientSession(IDebugTarget activeTarget,
+        ILaunch activeLaunch)
+    {
+        // 1) A live DEBUG target with a live thread = a real client debug session.
+        if (activeTarget != null && DebugServerTargetSupport.findFirstLiveThread(activeTarget) != null)
+        {
+            ILaunch launch = activeTarget.getLaunch();
+            String mode = launch != null ? launch.getLaunchMode() : ILaunchManager.DEBUG_MODE;
+            return new ExistingClientSession(launch, activeTarget, mode);
+        }
+
+        // 2) A non-terminated launch the target scan missed (e.g. RUN mode, no debug
+        //    target). A RUN-mode launch is a genuine running client and short-circuits
+        //    as before; a DEBUG launch whose every debug target is thread-less is the
+        //    same standalone-server session and must NOT short-circuit the client.
+        if (activeLaunch == null)
+        {
+            return null;
+        }
+        IDebugTarget liveTarget = firstLiveThreadTarget(activeLaunch);
+        if (liveTarget != null)
+        {
+            // A live DEBUG target this launch owns — a client debug session.
+            return new ExistingClientSession(activeLaunch, liveTarget, activeLaunch.getLaunchMode());
+        }
+        if (activeLaunch.getDebugTargets().length == 0)
+        {
+            // No debug target at all (RUN mode, or a launch that never produced one):
+            // a genuine running client — the A12/A13 already-running guard. There is
+            // no thread-less server target to confuse it with.
+            return new ExistingClientSession(activeLaunch, null, activeLaunch.getLaunchMode());
+        }
+        // The launch HAS debug target(s) but none carries a live thread — a
+        // standalone-server / profiling session. Do NOT short-circuit; the client
+        // proceeds and attaches (Bitrix 20074).
+        return null;
+    }
+
+    /**
+     * @return the first debug target of {@code launch} that carries a non-terminated
+     *     thread ({@link DebugServerTargetSupport#findFirstLiveThread}), or
+     *     {@code null} when the launch has no such live-client target. Best-effort.
+     */
+    static IDebugTarget firstLiveThreadTarget(ILaunch launch)
+    {
+        if (launch == null)
+        {
+            return null;
+        }
+        for (IDebugTarget target : launch.getDebugTargets())
+        {
+            if (target != null && !target.isTerminated()
+                && DebugServerTargetSupport.findFirstLiveThread(target) != null)
+            {
+                return target;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The single existing-CLIENT-session handler all {@code ILaunchManager}-sourced
+     * call sites funnel through, so {@code restartIfRunning} is honored identically
+     * everywhere (D5c, Bitrix 20074):
+     * <ul>
+     *   <li>{@code restartIfRunning=false} (default) → returns the
+     *       {@code alreadyRunning:true} short-circuit JSON (no launch), carrying the
+     *       identity fields the caller supplied.</li>
+     *   <li>{@code restartIfRunning=true} → non-interactively terminates the existing
+     *       client session (its live DEBUG target, or — for a RUN-mode launch — the
+     *       launch), {@code forgetApplication}s it and waits ≤3s for death, then
+     *       returns {@code null} so the caller relaunches — exactly what the
+     *       target-manager path ({@link #handleDelegateDuplicateSession}) already does.</li>
+     * </ul>
+     *
+     * @param session the resolved live client session (never {@code null})
+     * @param applicationId the application id under which the session was found
+     * @param restartIfRunning the flag from the request
+     * @param ctx identity fields to echo into the {@code alreadyRunning} payload
+     * @return the short-circuit JSON, or {@code null} to proceed with the launch
+     */
+    String handleExistingClientSession(ExistingClientSession session, String applicationId,
+        boolean restartIfRunning, AlreadyRunningContext ctx)
+    {
+        if (!restartIfRunning)
+        {
+            Activator.logInfo("debug_launch short-circuit (alreadyRunning): applicationId=" //$NON-NLS-1$
+                + applicationId + ", mode=" + session.mode //$NON-NLS-1$
+                + ", config=" + ctx.launchConfiguration); //$NON-NLS-1$
+            return ctx.buildAlreadyRunning(session.mode, applicationId).toJson();
+        }
+
+        // restartIfRunning: stop the existing client session non-interactively, then
+        // proceed. resolveExistingClientSession only ever returns a real client (a
+        // live-thread DEBUG target, or a RUN-mode launch), NEVER a thread-less
+        // server/profiling target — so this terminate can never kill a debug server
+        // (Bitrix 20074).
+        if (session.liveTarget != null)
+        {
+            Activator.logInfo("debug_launch restartIfRunning: terminating existing client debug " //$NON-NLS-1$
+                + "target: applicationId=" + applicationId); //$NON-NLS-1$
+            terminateExistingSessionAndWait(session.liveTarget, applicationId);
+        }
+        else
+        {
+            Activator.logInfo("debug_launch restartIfRunning: terminating existing client launch " //$NON-NLS-1$
+                + "(mode=" + session.mode + "): applicationId=" + applicationId); //$NON-NLS-1$ //$NON-NLS-2$
+            terminateExistingLaunchAndWait(session.launch, applicationId);
+        }
+        return null;
+    }
+
+    /**
+     * Identity fields echoed into an {@code alreadyRunning:true} short-circuit so the
+     * unified {@link #handleExistingClientSession} can build a per-call-site payload
+     * that matches what each legacy guard emitted (output-schema parity). Optional
+     * fields ({@code null}/empty) are omitted.
+     */
+    static final class AlreadyRunningContext
+    {
+        String launchConfiguration;
+        String configurationType;
+        Boolean attach;
+        String project;
+        final String message;
+
+        AlreadyRunningContext(String message)
+        {
+            this.message = message;
+        }
+
+        ToolResult buildAlreadyRunning(String mode, String applicationId)
+        {
+            ToolResult already = ToolResult.success()
+                .put("alreadyRunning", true) //$NON-NLS-1$
+                .put("mode", mode) //$NON-NLS-1$
+                .put("message", message); //$NON-NLS-1$
+            if (launchConfiguration != null && !launchConfiguration.isEmpty())
+            {
+                already.put("launchConfiguration", launchConfiguration); //$NON-NLS-1$
+            }
+            if (configurationType != null && !configurationType.isEmpty())
+            {
+                already.put("configurationType", configurationType); //$NON-NLS-1$
+            }
+            if (attach != null)
+            {
+                already.put("attach", attach.booleanValue()); //$NON-NLS-1$
+            }
+            if (project != null && !project.isEmpty())
+            {
+                already.put("project", project); //$NON-NLS-1$
+            }
+            if (applicationId != null && !applicationId.isEmpty())
+            {
+                already.put("applicationId", applicationId); //$NON-NLS-1$
+            }
+            return already;
+        }
+    }
+
+    /** Default short-circuit message for a still-running client session. */
+    private static final String ALREADY_RUNNING_MESSAGE =
+        "Launch configuration is already running — skipped re-launch. " //$NON-NLS-1$
+            + "Call terminate_launch first, or pass restartIfRunning=true, to start a fresh session."; //$NON-NLS-1$
+
+    /**
+     * Terminates the given running launch non-interactively (the RUN-mode / no-debug-
+     * target client case) and waits up to {@link #RESTART_TERMINATE_TIMEOUT_MS} for it
+     * to die, then clears the registry for {@code appId} — the launch analogue of
+     * {@link #terminateExistingSessionAndWait}. Best-effort: a failure is logged, not
+     * thrown; the caller proceeds to launch regardless.
+     */
+    void terminateExistingLaunchAndWait(ILaunch launch, String appId)
+    {
+        if (launch == null)
+        {
+            if (appId != null && !appId.isEmpty())
+            {
+                DebugSessionRegistry.get().forgetApplication(appId);
+            }
+            return;
+        }
+        try
+        {
+            if (launch.canTerminate())
+            {
+                launch.terminate();
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error terminating existing launch before restart", e); //$NON-NLS-1$
+        }
+        long deadline = System.currentTimeMillis() + RESTART_TERMINATE_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline)
+        {
+            try
+            {
+                if (launch.isTerminated())
+                {
+                    break;
+                }
+            }
+            catch (Exception e)
+            {
+                break;
+            }
+            try
+            {
+                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (appId != null && !appId.isEmpty())
+        {
+            DebugSessionRegistry.get().forgetApplication(appId);
+        }
+    }
+
+    /**
      * Detects a live runtime-client DEBUG session for {@code config}'s
      * {@code (project, delegate-app-id)} the EXACT way EDT's
      * {@code RuntimeClientLaunchDelegate.checkExistingDebugSessions} does — via
@@ -576,43 +870,36 @@ public class DebugLaunchTool implements IMcpTool
             return null;
         }
 
-        if (!restartIfRunning)
-        {
-            Activator.logInfo("debug_launch short-circuit (alreadyRunning, target-manager): " //$NON-NLS-1$
-                + "project=" + projectName + ", applicationId=" + delegateAppId //$NON-NLS-1$ //$NON-NLS-2$
-                + ", config=" + config.getName()); //$NON-NLS-1$
-            ToolResult already = ToolResult.success()
-                .put("launchConfiguration", config.getName()) //$NON-NLS-1$
-                .put("configurationType", typeId) //$NON-NLS-1$
-                .put("attach", isAttach) //$NON-NLS-1$
-                .put("project", projectName) //$NON-NLS-1$
-                .put("applicationId", delegateAppId) //$NON-NLS-1$
-                .put("alreadyRunning", true) //$NON-NLS-1$
-                .put("mode", "debug") //$NON-NLS-1$ //$NON-NLS-2$
-                .put("message", "Debug session is already running (detected via EDT's debug " //$NON-NLS-1$ //$NON-NLS-2$
-                    + "target manager — e.g. a UI-started 'Debug As' session) — skipped re-launch " //$NON-NLS-1$
-                    + "to avoid the 'Debug session already exists' modal. Call terminate_launch " //$NON-NLS-1$
-                    + "first, or pass restartIfRunning=true, to start a fresh session."); //$NON-NLS-1$
-            return already.toJson();
-        }
-
-        // restartIfRunning: stop the existing session non-interactively, then proceed.
-        // findRuntimeClientDebugTarget only returns a target with a LIVE thread — i.e. a
-        // real CLIENT session, never a thread-less standalone-SERVER/profiling target —
-        // so terminate() here can never kill a debug server (Bitrix 20074). Re-assert
-        // that invariant defensively: if the matched target somehow lost its last live
-        // thread between detection and now, do NOT terminate it; just proceed to launch.
+        // Defensive re-assert (Bitrix 20074): findRuntimeClientDebugTarget already
+        // required a live thread, but if the matched target lost its last live thread
+        // between detection and now it is no longer a client — do NOT short-circuit or
+        // terminate; just proceed to launch.
         if (DebugServerTargetSupport.findFirstLiveThread(existing) == null)
         {
-            Activator.logInfo("debug_launch restartIfRunning: matched target has no live " //$NON-NLS-1$
-                + "thread (server/profiling target) — not terminating; proceeding: project=" //$NON-NLS-1$
+            Activator.logInfo("debug_launch: target-manager match has no live thread " //$NON-NLS-1$
+                + "(server/profiling target) — not short-circuiting; proceeding: project=" //$NON-NLS-1$
                 + projectName + ", applicationId=" + delegateAppId); //$NON-NLS-1$
             return null;
         }
-        Activator.logInfo("debug_launch restartIfRunning: terminating existing target-manager " //$NON-NLS-1$
-            + "session: project=" + projectName + ", applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
-        terminateExistingSessionAndWait(existing, delegateAppId);
-        return null;
+
+        // Funnel through the SAME restartIfRunning-aware handler the ILaunchManager
+        // guards use, so the flag is honored identically across every path (D5c). The
+        // matched target carries a live thread, so the handler's terminate path stops a
+        // real client, never a debug server.
+        ExistingClientSession session = new ExistingClientSession(existing.getLaunch(), existing,
+            ILaunchManager.DEBUG_MODE);
+        AlreadyRunningContext ctx = new AlreadyRunningContext(
+            "Debug session is already running (detected via EDT's debug target manager — e.g. a " //$NON-NLS-1$
+                + "UI-started 'Debug As' session) — skipped re-launch to avoid the 'Debug session " //$NON-NLS-1$
+                + "already exists' modal. Call terminate_launch first, or pass " //$NON-NLS-1$
+                + "restartIfRunning=true, to start a fresh session."); //$NON-NLS-1$
+        ctx.launchConfiguration = config.getName();
+        ctx.configurationType = typeId;
+        ctx.attach = Boolean.valueOf(isAttach);
+        ctx.project = projectName;
+        // Force mode "debug" in the short-circuit payload (this path is the runtime-
+        // client DEBUG delegate) regardless of the synthetic launch's reported mode.
+        return handleExistingClientSession(session, delegateAppId, restartIfRunning, ctx);
     }
 
     /**
