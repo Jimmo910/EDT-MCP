@@ -715,25 +715,36 @@ public class DebugLaunchTool implements IMcpTool
      * async lambda instead. Only the synchronous (headless, no UI thread) path can
      * still return an error message.
      *
-     * <p>When {@code autoConfirmUpdateDialog} is {@code true}, the
-     * {@code config.launch(...)} call is wrapped in
-     * {@link LaunchUpdateDialogAutoConfirmer#arm()}/{@link LaunchUpdateDialogAutoConfirmer#disarm()}
-     * as a belt-and-suspenders safeguard: even though the pre-launch update
-     * ({@code updateApplicationIfNeeded}) normally leaves the IB {@code UPDATED} so
-     * the EDT launch delegate skips its modal, an IB whose DB config is genuinely
-     * behind (e.g. a restructure that the launch delegate re-detects) can still pop
-     * the application-modal "Update then run / Run without update" dialog. While
-     * armed, a {@link Display} filter auto-presses its default ("Update then run")
-     * button so the launch proceeds without a human — see Bitrix 20074. The
-     * arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread the
-     * modal blocks, so the auto-press is dispatched by the modal's nested event loop;
-     * the MCP worker has already returned, so the server is never hung on the modal.
+     * <p>The {@code config.launch(...)} call is always wrapped in
+     * {@link LaunchUpdateDialogAutoConfirmer#arm(boolean, boolean)}/{@link LaunchUpdateDialogAutoConfirmer#disarm(boolean, boolean)}.
+     * Two independently-gated matchers share one {@link Display} filter:
+     * <ul>
+     *   <li>the D4 "Application update" matcher is armed only when
+     *       {@code autoConfirmUpdateDialog} is {@code true}. Even though the
+     *       pre-launch update ({@code updateApplicationIfNeeded}) normally leaves the
+     *       IB {@code UPDATED} so the EDT launch delegate skips its modal, an IB whose
+     *       DB config is genuinely behind (e.g. a restructure the delegate re-detects)
+     *       can still pop the "Update then run / Run without update" dialog; while
+     *       armed the filter auto-presses its default ("Update then run") button — see
+     *       Bitrix 20074.</li>
+     *   <li>the D5 code-1003 "debug session already exists" matcher is armed
+     *       <em>unconditionally</em> on this debug path (independent of
+     *       {@code autoConfirmUpdateDialog}). With {@code restartIfRunning=true} and a
+     *       {@code terminate()} that times out, the relaunch can still race a residual
+     *       1003 modal; auto-pressing its default ("stop existing and start new")
+     *       keeps an unattended call from hanging. Pressing it performs NO DB update,
+     *       so it does not undo the {@code updateBeforeLaunch=false} opt-out.</li>
+     * </ul>
+     * The arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread
+     * the modal blocks, so the auto-press is dispatched by the modal's nested event
+     * loop; the MCP worker has already returned, so the server is never hung.
      *
      * <p>Callers pass {@code updateBeforeLaunch} for {@code autoConfirmUpdateDialog}:
      * with {@code updateBeforeLaunch=false} the documented contract is that the
-     * platform "may then show that modal" — auto-pressing its default button would
-     * silently perform the very DB update the caller disabled, so the confirmer is
-     * NOT armed and the dialog is left for a human.
+     * platform "may then show that modal" — auto-pressing the UPDATE dialog's default
+     * button would silently perform the very DB update the caller disabled, so the
+     * UPDATE matcher is NOT armed and that dialog is left for a human. The 1003
+     * matcher, which performs no update, stays armed regardless.
      *
      * <p>Package-private (not {@code private}) so the headless unit tests can
      * exercise the synchronous fallback directly.
@@ -753,13 +764,13 @@ public class DebugLaunchTool implements IMcpTool
             // immediately so a 1C startup dialog can never block the HTTP socket.
             // The launch outcome can no longer be returned to the caller, so log it.
             display.asyncExec(() -> {
-                // Auto-confirm EDT's blocking "Application update" modal for the
-                // duration of this single launch only. Manual EDT launches outside
-                // this window still prompt normally.
-                if (autoConfirmUpdateDialog)
-                {
-                    LaunchUpdateDialogAutoConfirmer.arm();
-                }
+                // Auto-confirm EDT's blocking launch modals for the duration of this
+                // single launch only. The "Application update" (D4) modal is pressed
+                // only when the caller did NOT opt out of the DB update; the
+                // code-1003 "debug session already exists" (D5) modal is ALWAYS
+                // auto-confirmed on this debug path (it is independent of the update
+                // opt-out). Manual EDT launches outside this window still prompt.
+                LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
                 try
                 {
                     config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -770,19 +781,13 @@ public class DebugLaunchTool implements IMcpTool
                 }
                 finally
                 {
-                    if (autoConfirmUpdateDialog)
-                    {
-                        LaunchUpdateDialogAutoConfirmer.disarm();
-                    }
+                    LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
                 }
             });
             return null;
         }
         // No UI thread (headless tests): launch synchronously and surface errors.
-        if (autoConfirmUpdateDialog)
-        {
-            LaunchUpdateDialogAutoConfirmer.arm();
-        }
+        LaunchUpdateDialogAutoConfirmer.arm(autoConfirmUpdateDialog, true);
         try
         {
             config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -795,10 +800,7 @@ public class DebugLaunchTool implements IMcpTool
         }
         finally
         {
-            if (autoConfirmUpdateDialog)
-            {
-                LaunchUpdateDialogAutoConfirmer.disarm();
-            }
+            LaunchUpdateDialogAutoConfirmer.disarm(autoConfirmUpdateDialog, true);
         }
     }
 

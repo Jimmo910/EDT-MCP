@@ -277,4 +277,34 @@ public class DebugLaunchToolTest
         assertTrue("guide must document the synthetic-id preflight skip",
             guide.contains("launch:<configName>")); //$NON-NLS-1$
     }
+
+    // ============ D5 follow-up: 1003 confirmer armed independently of updateBeforeLaunch ============
+
+    @Test
+    public void testPerformLaunchHeadlessWithUpdateConfirmExecutesSynchronously() throws Exception
+    {
+        // The debug path now arms with (updateDialog=autoConfirmUpdateDialog,
+        // sessionDialog=true) via the split arm(boolean,boolean). The synchronous
+        // headless path must still launch cleanly with autoConfirmUpdateDialog=true:
+        // the confirmer arm/disarm is a no-op in this no-workbench harness and must
+        // not break the launch or its finally chain.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        String error = new DebugLaunchTool().performLaunch(config, true);
+        assertNull("successful headless launch must return null even with update auto-confirm", error);
+        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
+    }
+
+    @Test
+    public void testGuideDocuments1003ConfirmerIndependentOfUpdateBeforeLaunch()
+    {
+        // D5 follow-up: the code-1003 "debug session already exists" auto-confirmer
+        // is armed on EVERY debug launch, independent of updateBeforeLaunch (it
+        // performs no DB update, so it does not undo the updateBeforeLaunch=false
+        // opt-out). Only the separate 'Application update' modal stays gated on
+        // updateBeforeLaunch (review-fix A). Ratchet the guide so this can't drift.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the 1003 confirmer fires regardless of updateBeforeLaunch",
+            guide.contains("regardless of `updateBeforeLaunch`")); //$NON-NLS-1$
+    }
 }

@@ -200,6 +200,89 @@ public class LaunchUpdateDialogAutoConfirmerTest
                 "Debug session for project \"X\" and application \"Y\" has already been started."));
     }
 
+    // === D5 follow-up: independently-gated matchers (shouldAutoConfirm) ===
+
+    /** English 1003 body, as the live modal renders it (prefix + interpolated names). */
+    private static final String DEBUG_SESSION_BODY =
+        "Debug session for project \"MyProject\" and application \"Main\" "
+            + "has already been started.\nShould it be stopped?";
+
+    @Test
+    public void testUpdateOnlyArmConfirmsUpdateTitle()
+    {
+        // update-only arm (the back-compat arm()/the yaxunit callers): the update
+        // TITLE is auto-confirmed.
+        assertTrue("update-only arm must confirm the update-modal title",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, false, "Application update", null));
+    }
+
+    @Test
+    public void testUpdateOnlyArmIgnoresSessionBody()
+    {
+        // CRITICAL (split contract): an update-only arm must NOT react to the 1003
+        // body — only the session matcher owns that dialog. The 1003 modal's shell
+        // title is the generic "Question", which is not the update title either.
+        assertFalse("update-only arm must ignore the 1003 session body",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, false, "Question", DEBUG_SESSION_BODY));
+    }
+
+    @Test
+    public void testSessionOnlyArmConfirmsSessionBody()
+    {
+        // session-only arm (the debug path with updateBeforeLaunch=false): the 1003
+        // body IS auto-confirmed even though the update matcher is disarmed.
+        assertTrue("session-only arm must confirm the 1003 session body",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(false, true, "Question", DEBUG_SESSION_BODY));
+    }
+
+    @Test
+    public void testSessionOnlyArmIgnoresUpdateTitle()
+    {
+        // CRITICAL (review-fix A opt-out): a session-only arm must NOT auto-press the
+        // "Application update" modal — that would perform the DB update the caller
+        // opted out of (updateBeforeLaunch=false). Only the update matcher owns it.
+        assertFalse("session-only arm must ignore the update-modal title (preserve opt-out)",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(false, true, "Application update", null));
+    }
+
+    @Test
+    public void testBothArmedHandlesUpdateTitleAndSessionBody()
+    {
+        // both-arm (the debug path with updateBeforeLaunch=true): each matcher fires
+        // for its own dialog.
+        assertTrue("both-arm must confirm the update-modal title",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, "Application update", null));
+        assertTrue("both-arm must confirm the 1003 session body",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, "Question", DEBUG_SESSION_BODY));
+    }
+
+    @Test
+    public void testNeitherArmedConfirmsNothing()
+    {
+        // With no matcher armed nothing is auto-pressed, even for the exact modals.
+        assertFalse("a disarmed confirmer must not press the update modal",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(false, false, "Application update", null));
+        assertFalse("a disarmed confirmer must not press the 1003 modal",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(false, false, "Question", DEBUG_SESSION_BODY));
+    }
+
+    @Test
+    public void testBothArmedIgnoresUnrelatedDialog()
+    {
+        // Even with both matchers armed, an unrelated dialog (neither update title
+        // nor 1003 body) is left untouched.
+        assertFalse("an unrelated dialog must not be auto-confirmed by either matcher",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, "Save resources",
+                "Are you sure you want to delete this object?"));
+    }
+
+    @Test
+    public void testUpdateOnlyArmIgnoresNullTitleAndBody()
+    {
+        assertFalse("null title/body must not be confirmed",
+            LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, null, null));
+    }
+
     @Test
     public void testUnbalancedDisarmIsNoOp()
     {
@@ -207,6 +290,24 @@ public class LaunchUpdateDialogAutoConfirmerTest
         // with no filter installed it returns before any UI access.
         LaunchUpdateDialogAutoConfirmer.disarm();
         LaunchUpdateDialogAutoConfirmer.disarm();
+    }
+
+    @Test
+    public void testUnbalancedSplitDisarmIsNoOp()
+    {
+        // The split disarm(boolean, boolean) overload is equally safe to call
+        // unbalanced (e.g. a finally after a headless no-op arm).
+        LaunchUpdateDialogAutoConfirmer.disarm(true, true);
+        LaunchUpdateDialogAutoConfirmer.disarm(false, true);
+        LaunchUpdateDialogAutoConfirmer.disarm(true, false);
+    }
+
+    @Test
+    public void testArmWithBothFlagsFalseIsNoOp()
+    {
+        // arm(false, false) requests nothing — a pure no-op (and its mirror disarm).
+        LaunchUpdateDialogAutoConfirmer.arm(false, false);
+        LaunchUpdateDialogAutoConfirmer.disarm(false, false);
     }
 
     @Test
