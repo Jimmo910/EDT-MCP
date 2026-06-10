@@ -113,10 +113,15 @@ public final class DebugTargetResolver
         /** The resolved debug target (never {@code null} in a returned Resolution). */
         public final IDebugTarget target;
         /**
-         * A canonical, stable id for the resolved session. For a server-target
-         * resolution this is the {@code "ServerApplication.<app>"} id; for a
-         * launch-based resolution it is the id the launch reports (real /
-         * {@code attach:} / {@code launch:}).
+         * The canonical, stable id for the resolved session — the SAME id
+         * regardless of which id form the caller used and which view (launch
+         * manager or 1C debug-server) located the target. It is the key the
+         * {@link DebugSessionRegistry} uses for the session's suspend snapshots:
+         * the id of the owning Eclipse launch when one exists (real
+         * {@code ATTR_APPLICATION_ID} / {@code attach:<name>} / {@code launch:<name>}),
+         * else the minted {@code ServerApplication.<app>} id. Never the caller's
+         * raw input — echoing it produced inconsistent snapshot keys for the same
+         * session (defect C-1). See {@link #canonicalIdFor}.
          */
         public final String canonicalId;
         /** The server-target view, or {@code null} if resolved purely via the launch manager. */
@@ -162,14 +167,21 @@ public final class DebugTargetResolver
                 // view of the SAME object when one exists, so the canonical id stays
                 // consistent across tools.
                 DebugServerTargetSupport.ServerTarget sameObject = serverTargetForTarget(launchTarget);
-                return new Resolution(launchTarget, applicationId, sameObject, false);
+                return new Resolution(launchTarget,
+                    canonicalIdFor(launchTarget, sameObject, applicationId), sameObject, false);
             }
 
             // 2) Server-target view: ServerApplication.<app>, bare app name, URL.
+            //    Do NOT echo the caller's raw id and do NOT blindly use the minted
+            //    ServerApplication.<app> id: when the same session is also owned by an
+            //    Eclipse launch, the registry keys its snapshots by the LAUNCH id, and
+            //    a second key form would split one session across two snapshot keys
+            //    (defect C-1: resume cleared one key while wait_for_break read the
+            //    other, returning a stale pre-resume snapshot as a fresh hit).
             DebugServerTargetSupport.ServerTarget st = DebugServerTargetSupport.resolve(applicationId);
             if (st != null && st.target != null && !st.target.isTerminated())
             {
-                return new Resolution(st.target, st.applicationId, st, false);
+                return new Resolution(st.target, canonicalIdFor(st.target, st, st.applicationId), st, false);
             }
             // Concrete id given but nothing matched — do NOT silently fall back to a
             // lone session; the caller asked for a specific session.
@@ -184,15 +196,73 @@ public final class DebugTargetResolver
             if (launchTarget != null && !launchTarget.isTerminated())
             {
                 DebugServerTargetSupport.ServerTarget sameObject = serverTargetForTarget(launchTarget);
-                return new Resolution(launchTarget, loneLaunchId, sameObject, true);
+                return new Resolution(launchTarget,
+                    canonicalIdFor(launchTarget, sameObject, loneLaunchId), sameObject, true);
             }
         }
         DebugServerTargetSupport.ServerTarget lone = DebugServerTargetSupport.findLoneServerTarget();
         if (lone != null && lone.target != null && !lone.target.isTerminated())
         {
-            return new Resolution(lone.target, lone.applicationId, lone, true);
+            return new Resolution(lone.target, canonicalIdFor(lone.target, lone, lone.applicationId), lone, true);
         }
         return null;
+    }
+
+    /**
+     * Computes the ONE canonical snapshot key for a resolved debug target — the id
+     * the {@link DebugSessionRegistry} uses for that target's suspend snapshots,
+     * regardless of which view located it:
+     * <ol>
+     *   <li>if an owning Eclipse {@code ILaunch} with an EDT/1C configuration exists,
+     *       the id that launch reports (real {@code ATTR_APPLICATION_ID},
+     *       {@code attach:<name>} or {@code launch:<name>}) — exactly what the
+     *       registry's event listener keys real SUSPEND events by;</li>
+     *   <li>else the minted {@code ServerApplication.<app>} id of the server-target
+     *       view (such targets never key into the launch-based listener, so their
+     *       snapshots only ever live under the minted id).</li>
+     * </ol>
+     * Centralizing the policy here guarantees that wait_for_break, resume and step
+     * inject/read/clear snapshots under the SAME key for the same session, whichever
+     * id form each call used (defect C-1/C-2). Null-safe; never throws.
+     *
+     * @param target the resolved debug target (may be {@code null})
+     * @param serverTarget the server-target view of the same object, or {@code null}
+     * @return the canonical id, or {@code null} when neither view yields one
+     */
+    public static String canonicalIdFor(IDebugTarget target, DebugServerTargetSupport.ServerTarget serverTarget)
+    {
+        if (target != null)
+        {
+            try
+            {
+                String launchId = LaunchConfigUtils.getApplicationIdFor(target.getLaunch());
+                if (launchId != null && !launchId.isEmpty())
+                {
+                    return launchId;
+                }
+            }
+            catch (Exception ex)
+            {
+                // best-effort — fall through to the server-target view
+            }
+        }
+        if (serverTarget != null && serverTarget.applicationId != null && !serverTarget.applicationId.isEmpty())
+        {
+            return serverTarget.applicationId;
+        }
+        return null;
+    }
+
+    /**
+     * Same as {@link #canonicalIdFor(IDebugTarget, DebugServerTargetSupport.ServerTarget)}
+     * with a defensive fallback for the (theoretical) case where neither view yields
+     * an id — keeps {@link Resolution#canonicalId} non-null for resolved sessions.
+     */
+    private static String canonicalIdFor(IDebugTarget target,
+        DebugServerTargetSupport.ServerTarget serverTarget, String fallback)
+    {
+        String canonical = canonicalIdFor(target, serverTarget);
+        return canonical != null ? canonical : fallback;
     }
 
     /**

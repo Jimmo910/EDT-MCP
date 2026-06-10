@@ -8,6 +8,7 @@ package com.ditrix.edt.mcp.server.tools.impl;
 
 import java.util.Map;
 
+import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.debug.core.model.IStep;
 import org.eclipse.debug.core.model.IThread;
 
@@ -18,6 +19,7 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugServerTargetSupport;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
+import com.ditrix.edt.mcp.server.utils.DebugTargetResolver;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 
 /**
@@ -107,14 +109,34 @@ public class StepTool implements IMcpTool
         }
         IStep stepper = (IStep) thread;
 
-        // A server thread's owning IDebugTarget is a 1C debug-server target whose
-        // getLaunch() does not carry the runtime-client ATTR_APPLICATION_ID, so
-        // findApplicationIdFor returns null/wrong. Detect the server case from the
-        // thread's debug target and address it by its minted ServerApplication id.
+        // The server-target view is still needed for the poll mechanics below (a 1C
+        // debug-server target's SUSPEND events do not reliably key into the
+        // launch-based registry, so the re-suspend is detected by polling).
         DebugServerTargetSupport.ServerTarget serverTarget = serverTargetOf(thread);
-        String appId = serverTarget != null
-            ? serverTarget.applicationId
-            : DebugSessionRegistry.findApplicationIdFor(thread);
+
+        // CANONICAL SNAPSHOT KEY (defect C-2): the caller's snapshot lives under the
+        // appId recorded when this threadId was registered (by wait_for_break or a
+        // previous step) — the registry's thread→appId mapping is authoritative.
+        // Re-deriving the key from the server view minted ServerApplication.<app>
+        // even when the session is keyed by its owning launch id, so clearSnapshot
+        // cleared the wrong key and the caller's next wait_for_break returned the
+        // surviving PRE-step snapshot.
+        String appId = registry.getThreadApplicationId(threadId);
+        if (appId == null)
+        {
+            // Fallback: the same canonical policy the resolver applies to every
+            // applicationId-based call (owning-launch id first, minted id else).
+            IDebugTarget owner = null;
+            try
+            {
+                owner = thread.getDebugTarget();
+            }
+            catch (Exception ex)
+            {
+                // best-effort
+            }
+            appId = DebugTargetResolver.canonicalIdFor(owner, serverTarget);
+        }
         if (appId == null)
         {
             return ToolResult.error("could not determine applicationId for thread").toJson(); //$NON-NLS-1$
