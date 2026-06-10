@@ -162,6 +162,23 @@ public final class DebugSessionRegistry
 
     private synchronized void onResumeOrTerminate(String appId)
     {
+        forgetApplication(appId);
+    }
+
+    /**
+     * Purges every cached entry the registry holds for the given applicationId —
+     * the suspend snapshot plus all thread/frame references owned by that app —
+     * and wakes any waiters. This is exactly the cleanup a RESUME/TERMINATE debug
+     * event performs, exposed so {@code terminate_launch} can clear the registry
+     * for a launch it removes from {@link ILaunchManager} even when no TERMINATE
+     * event ever fired (the stale/orphaned-launch case, defect FIX-3).
+     *
+     * <p>No-op for a {@code null} appId or an appId with no cached state.
+     *
+     * @param appId the applicationId (real or synthetic) to forget
+     */
+    public synchronized void forgetApplication(String appId)
+    {
         if (appId == null)
         {
             return;

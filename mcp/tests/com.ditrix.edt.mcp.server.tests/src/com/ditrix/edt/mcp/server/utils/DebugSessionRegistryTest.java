@@ -7,12 +7,16 @@
 package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchManager;
+import org.eclipse.debug.core.model.IThread;
+import org.junit.After;
 import org.junit.Test;
 
 /**
@@ -58,5 +62,66 @@ public class DebugSessionRegistryTest
     public void testActiveDebugLaunchIsFalseForNull()
     {
         assertFalse(DebugSessionRegistry.isActiveDebugLaunch(null));
+    }
+
+    // === forgetApplication (defect FIX-3) ===
+
+    /** Keep the shared singleton clean between cases that mutate it. */
+    @After
+    public void clearRegistry()
+    {
+        DebugSessionRegistry.get().clear();
+    }
+
+    @Test
+    public void testForgetApplicationDropsSnapshot()
+    {
+        DebugSessionRegistry registry = DebugSessionRegistry.get();
+        registry.clear();
+        String appId = "ServerApplication.SomeApp"; //$NON-NLS-1$
+        IThread thread = mock(IThread.class);
+        // injectSuspend takes the appId directly, so this needs no EDT runtime.
+        registry.injectSuspend(appId, thread);
+        assertTrue("precondition: snapshot present after injectSuspend", //$NON-NLS-1$
+            registry.hasSnapshot(appId));
+
+        registry.forgetApplication(appId);
+
+        assertFalse("snapshot must be gone after forgetApplication", //$NON-NLS-1$
+            registry.hasSnapshot(appId));
+        assertNull("getSnapshot must return null after forgetApplication", //$NON-NLS-1$
+            registry.getSnapshot(appId));
+    }
+
+    @Test
+    public void testForgetApplicationOnlyTargetsGivenApp()
+    {
+        DebugSessionRegistry registry = DebugSessionRegistry.get();
+        registry.clear();
+        String victim = "launch:Victim"; //$NON-NLS-1$
+        String survivor = "launch:Survivor"; //$NON-NLS-1$
+        IThread victimThread = mock(IThread.class);
+        IThread survivorThread = mock(IThread.class);
+        registry.injectSuspend(victim, victimThread);
+        registry.injectSuspend(survivor, survivorThread);
+
+        registry.forgetApplication(victim);
+
+        assertFalse("targeted app must be forgotten", registry.hasSnapshot(victim)); //$NON-NLS-1$
+        assertTrue("unrelated app must be untouched", registry.hasSnapshot(survivor)); //$NON-NLS-1$
+        // The survivor's thread reference must still resolve via its stable id.
+        long survivorThreadId = registry.getSnapshot(survivor).threadId;
+        assertSame("survivor's live thread reference must remain", //$NON-NLS-1$
+            survivorThread, registry.getThread(survivorThreadId));
+    }
+
+    @Test
+    public void testForgetApplicationNullIsNoOp()
+    {
+        DebugSessionRegistry registry = DebugSessionRegistry.get();
+        registry.clear();
+        // Must not throw and must leave state empty.
+        registry.forgetApplication(null);
+        assertFalse(registry.hasSnapshot("anything")); //$NON-NLS-1$
     }
 }

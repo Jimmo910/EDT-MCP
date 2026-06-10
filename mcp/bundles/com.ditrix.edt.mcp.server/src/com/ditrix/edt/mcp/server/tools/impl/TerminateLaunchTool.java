@@ -25,6 +25,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
+import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
 
@@ -230,7 +231,7 @@ public class TerminateLaunchTool implements IMcpTool
             List<TerminationResult> results = new ArrayList<>();
             for (ILaunch launch : targets)
             {
-                results.add(terminateOne(launch, timeoutSeconds, force));
+                results.add(terminateOne(launchManager, launch, timeoutSeconds, force));
             }
 
             return renderResults(results, configName, projectName, applicationId, all,
@@ -345,12 +346,21 @@ public class TerminateLaunchTool implements IMcpTool
      * {@link ILaunch#terminate()} with optional {@link IProcess#terminate()}
      * escalation on timeout.
      */
-    private static TerminationResult terminateOne(ILaunch launch, int timeoutSeconds, boolean force)
+    private static TerminationResult terminateOne(ILaunchManager launchManager, ILaunch launch,
+            int timeoutSeconds, boolean force)
     {
         TerminationResult result = new TerminationResult(launch);
         if (launch.isTerminated())
         {
             result.code = R_ALREADY_TERMINATED;
+            // Stale/orphaned case (defect FIX-3): a launch that is already
+            // terminated but still lingers in ILaunchManager would block a later
+            // run (e.g. run_yaxunit_tests sees it as a stale session). A plain
+            // terminate() is a no-op here, so removing it from the manager is the
+            // only way to clear it. We do this unconditionally for an
+            // already-terminated launch (no live process is at risk), and also
+            // clear any registry entry the missed TERMINATE event left behind.
+            removeFromManager(launchManager, launch, result);
             return result;
         }
 
@@ -410,8 +420,54 @@ public class TerminateLaunchTool implements IMcpTool
             result.code = R_ERROR;
             result.note = e.getMessage();
         }
+        // Once the launch is finished (terminated, force-terminated, or — for an
+        // Attach — detached), evict it from ILaunchManager so no stale entry
+        // lingers for a later run to trip over (defect FIX-3). On R_TIMEOUT /
+        // R_ERROR the launch may still be live, so we leave it in place. Removal
+        // also clears this app's DebugSessionRegistry entry.
+        if (R_TERMINATED.equals(result.code) || R_FORCE_TERMINATED.equals(result.code)
+            || R_DETACHED.equals(result.code))
+        {
+            removeFromManager(launchManager, launch, result);
+        }
         result.durationMs = System.currentTimeMillis() - start;
         return result;
+    }
+
+    /**
+     * Evicts the given launch from {@link ILaunchManager} (so a terminated-but-not-
+     * removed launch cannot linger and block a later run) and clears any cached
+     * {@link DebugSessionRegistry} state for its applicationId. Strictly targeted:
+     * it removes only the one resolved launch, never an unrelated one. Best-effort —
+     * a failure to remove is logged and recorded as a note, not thrown.
+     */
+    private static void removeFromManager(ILaunchManager launchManager, ILaunch launch,
+            TerminationResult result)
+    {
+        // Clear registry state first — even if removeLaunch were to fail, a missed
+        // TERMINATE event should not leave a stale suspend snapshot behind.
+        if (result.applicationId != null && !result.applicationId.isEmpty())
+        {
+            DebugSessionRegistry.get().forgetApplication(result.applicationId);
+        }
+        if (launchManager == null)
+        {
+            return;
+        }
+        try
+        {
+            launchManager.removeLaunch(launch);
+            result.removed = true;
+        }
+        catch (RuntimeException e)
+        {
+            Activator.logError("Error removing launch " + result.configName //$NON-NLS-1$
+                + " from the launch manager", e); //$NON-NLS-1$
+            String detail = "Launch ended but could not be removed from the registry: " //$NON-NLS-1$
+                + e.getMessage();
+            result.note = result.note == null || result.note.isEmpty()
+                ? detail : result.note + " " + detail; //$NON-NLS-1$
+        }
     }
 
     private static void disconnectAll(ILaunch launch) throws DebugException
@@ -551,8 +607,13 @@ public class TerminateLaunchTool implements IMcpTool
         int timedOut = 0;
         int errors = 0;
         int alreadyTerminated = 0;
+        int removed = 0;
         for (TerminationResult r : results)
         {
+            if (r.removed)
+            {
+                removed++;
+            }
             switch (r.code)
             {
                 case R_TERMINATED:
@@ -596,6 +657,7 @@ public class TerminateLaunchTool implements IMcpTool
                 .append(", timeout: ").append(timedOut) //$NON-NLS-1$
                 .append(", already_terminated: ").append(alreadyTerminated) //$NON-NLS-1$
                 .append(", errors: ").append(errors).append(")\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            sb.append("**Removed from registry:** ").append(removed).append('\n'); //$NON-NLS-1$
             sb.append("**Scope:** ").append(formatScope(configName, projectName, applicationId, all)) //$NON-NLS-1$
                 .append('\n');
             if (!includeAttach)
@@ -663,6 +725,7 @@ public class TerminateLaunchTool implements IMcpTool
             sb.append("**Mode:** ").append(r.mode).append('\n'); //$NON-NLS-1$
         }
         sb.append("**Attach:** ").append(r.attach ? "Yes" : "No").append('\n'); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        sb.append("**Removed from registry:** ").append(r.removed ? "Yes" : "No").append('\n'); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         sb.append("**Duration:** ").append(r.durationMs).append(" ms\n"); //$NON-NLS-1$ //$NON-NLS-2$
         if (r.note != null && !r.note.isEmpty())
         {
@@ -800,6 +863,8 @@ public class TerminateLaunchTool implements IMcpTool
         String code;
         String note;
         long durationMs;
+        /** True once the launch has been evicted from {@link ILaunchManager}. */
+        boolean removed;
 
         TerminationResult(ILaunch launch)
         {

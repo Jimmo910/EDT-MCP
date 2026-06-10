@@ -31,6 +31,10 @@ Attach launches (RemoteRuntime / LocalRuntime) are **disconnected**, not killed:
 
 By default the tool waits up to `timeout` for a polite `ILaunch.terminate()`. With `force=true`, an unfinished termination escalates to an OS-level `IProcess.terminate()` on the launch's processes (plus a short grace window). This can lose unsaved 1C state. `force` is ignored for Attach launches.
 
+## Registry cleanup
+
+Once a launch has actually ended (`terminated`, `force_terminated`, or an Attach `detached`), this tool also removes it from EDT's launch registry (`ILaunchManager.removeLaunch`) and clears any cached debug-session state for its applicationId. This prevents a terminated-but-not-removed launch from lingering and blocking a later run (e.g. `run_yaxunit_tests` seeing it as a stale session). An `already_terminated` launch — the "stuck" entry that needs a stand restart to clear — is likewise evicted, so the call cleans it up without restarting EDT. The response reports `Removed from registry: Yes/No` (single) or a `Removed from registry: N` count (batch). `timeout`/`error` launches are left in place because they may still be live.
+
 ## Result codes
 
 `terminated`, `force_terminated`, `detached`, `timeout`, `already_terminated`, `error`. A `timeout` on a runtime launch suggests re-running with `force=true`.
