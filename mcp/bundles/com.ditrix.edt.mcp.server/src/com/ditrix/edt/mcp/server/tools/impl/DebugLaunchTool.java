@@ -27,6 +27,7 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.DebugSessionRegistry;
 import com.ditrix.edt.mcp.server.utils.LaunchConfigUtils;
 import com.ditrix.edt.mcp.server.utils.LaunchLifecycleUtils;
+import com.ditrix.edt.mcp.server.utils.LaunchUpdateDialogAutoConfirmer;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.ProjectStateChecker;
 import com.e1c.g5.dt.applications.ApplicationException;
@@ -81,7 +82,10 @@ public class DebugLaunchTool implements IMcpTool
             .stringProperty("launchConfigurationName", //$NON-NLS-1$
                 "Exact name of an EDT debug launch config (runtime client or Attach); skips projectName/applicationId.") //$NON-NLS-1$
             .booleanProperty("updateBeforeLaunch", //$NON-NLS-1$
-                "Update the database before launching. Default true; ignored for Attach.") //$NON-NLS-1$
+                "Default true: silently apply the configuration->DB update before launching so no " //$NON-NLS-1$
+                    + "'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog " //$NON-NLS-1$
+                    + "is auto-confirmed); false skips the update and the platform may then show that " //$NON-NLS-1$
+                    + "modal. Ignored for Attach.") //$NON-NLS-1$
             .build();
     }
 
@@ -471,6 +475,19 @@ public class DebugLaunchTool implements IMcpTool
      * async lambda instead. Only the synchronous (headless, no UI thread) path can
      * still return an error message.
      *
+     * <p>The {@code config.launch(...)} call is wrapped in
+     * {@link LaunchUpdateDialogAutoConfirmer#arm()}/{@link LaunchUpdateDialogAutoConfirmer#disarm()}
+     * as a belt-and-suspenders safeguard: even though the pre-launch update
+     * ({@code updateApplicationIfNeeded}) normally leaves the IB {@code UPDATED} so
+     * the EDT launch delegate skips its modal, an IB whose DB config is genuinely
+     * behind (e.g. a restructure that the launch delegate re-detects) can still pop
+     * the application-modal "Update then run / Run without update" dialog. While
+     * armed, a {@link Display} filter auto-presses its default ("Update then run")
+     * button so the launch proceeds without a human — see Bitrix 20074. The
+     * arm/disarm runs INSIDE the {@code asyncExec} lambda, on the same UI thread the
+     * modal blocks, so the auto-press is dispatched by the modal's nested event loop;
+     * the MCP worker has already returned, so the server is never hung on the modal.
+     *
      * @return {@code null} when the launch was scheduled (or, in a headless test
      *         with no UI thread, completed) successfully; otherwise an error message.
      */
@@ -483,6 +500,10 @@ public class DebugLaunchTool implements IMcpTool
             // immediately so a 1C startup dialog can never block the HTTP socket.
             // The launch outcome can no longer be returned to the caller, so log it.
             display.asyncExec(() -> {
+                // Auto-confirm EDT's blocking "Application update" modal for the
+                // duration of this single launch only. Manual EDT launches outside
+                // this window still prompt normally.
+                LaunchUpdateDialogAutoConfirmer.arm();
                 try
                 {
                     config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -491,10 +512,15 @@ public class DebugLaunchTool implements IMcpTool
                 {
                     Activator.logError("Error launching debug session (async)", e); //$NON-NLS-1$
                 }
+                finally
+                {
+                    LaunchUpdateDialogAutoConfirmer.disarm();
+                }
             });
             return null;
         }
         // No UI thread (headless tests): launch synchronously and surface errors.
+        LaunchUpdateDialogAutoConfirmer.arm();
         try
         {
             config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -504,6 +530,10 @@ public class DebugLaunchTool implements IMcpTool
         {
             Activator.logError("Error launching debug session", e); //$NON-NLS-1$
             return e.getMessage();
+        }
+        finally
+        {
+            LaunchUpdateDialogAutoConfirmer.disarm();
         }
     }
 

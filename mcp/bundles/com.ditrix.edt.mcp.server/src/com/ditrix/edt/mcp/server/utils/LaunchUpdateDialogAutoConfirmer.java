@@ -6,6 +6,11 @@
 
 package com.ditrix.edt.mcp.server.utils;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Button;
@@ -59,21 +64,50 @@ import com.ditrix.edt.mcp.server.Activator;
  *   <li>{@link #arm()}/{@link #disarm()} are reentrant via a counter; concurrent
  *       YAXUnit launches share one filter and the last {@code disarm()} removes
  *       it.</li>
- *   <li>Only the exact "Application update" title is matched, so unrelated
- *       dialogs that happen to appear during the window are left untouched.</li>
+ *   <li>Only the exact "Application update" title — in either of EDT's two
+ *       shipped locales (English / Russian) — is matched, so unrelated dialogs
+ *       that happen to appear during the window are left untouched.</li>
  *   <li>Headless (no SWT {@link Display}) is a no-op — no dialog can appear
  *       there anyway.</li>
  * </ul>
+ *
+ * <h2>Locale</h2>
+ * The modal title is the localized {@code ApplicationUiSupport_Application_update}
+ * string. EDT ships exactly two NL variants of the {@code com.e1c.g5.dt.applications.ui}
+ * bundle — English ("Application update") and Russian ("Обновление приложения") —
+ * so the filter matches BOTH. An English-only match (the previous behaviour)
+ * silently fails on a Russian-locale stand: the unattended launch then hangs on
+ * the un-dismissed modal (Bitrix 20074). The default button is the same choice in
+ * both locales ("Update then run" / "Обновить и запустить", button index 0), so
+ * {@link #pressDefaultButton(Shell)} stays locale-agnostic.
  */
 public final class LaunchUpdateDialogAutoConfirmer
 {
     /**
-     * Exact title of EDT's launch-delegate "update infobase before launch?"
-     * modal ({@code ApplicationUiSupport_Application_update}). The EDT-MCP
-     * surface is English-only and so is the target EDT build, so an exact-title
-     * match is sufficient and keeps the filter from touching other dialogs.
+     * English title of EDT's launch-delegate "update infobase before launch?"
+     * modal ({@code ApplicationUiSupport_Application_update}).
      */
     static final String APPLICATION_UPDATE_TITLE = "Application update"; //$NON-NLS-1$
+
+    /**
+     * Russian title of the same modal ({@code messages_ru.properties}:
+     * "Обновление приложения"). The target stand that hit Bitrix 20074 runs a
+     * Russian EDT, where the English-only match never fired. Kept as a
+     * {@code \\uXXXX}-escaped literal (copied verbatim from EDT's own
+     * {@code messages_ru.properties}) so it compiles identically regardless of the
+     * source-file encoding the Tycho compiler picks up.
+     */
+    static final String APPLICATION_UPDATE_TITLE_RU =
+        "\u041E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u044F"; //$NON-NLS-1$
+
+    /**
+     * Every shipped localized title of the "Application update" modal. EDT ships
+     * only the English and Russian NL variants of
+     * {@code com.e1c.g5.dt.applications.ui}, so this set is exhaustive; matching is
+     * still an exact, whole-title compare so no unrelated dialog is touched.
+     */
+    static final Set<String> APPLICATION_UPDATE_TITLES = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList(APPLICATION_UPDATE_TITLE, APPLICATION_UPDATE_TITLE_RU)));
 
     private static final Object LOCK = new Object();
 
@@ -88,11 +122,12 @@ public final class LaunchUpdateDialogAutoConfirmer
 
     /**
      * Pure decision used by the {@link Display} filter (and by tests): is the
-     * given shell title the "Application update" modal we auto-confirm?
+     * given shell title the "Application update" modal we auto-confirm, in any of
+     * EDT's shipped locales (English / Russian)?
      */
     static boolean isTargetTitle(String shellTitle)
     {
-        return APPLICATION_UPDATE_TITLE.equals(shellTitle);
+        return shellTitle != null && APPLICATION_UPDATE_TITLES.contains(shellTitle);
     }
 
     /**
@@ -198,7 +233,7 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 return;
             }
-            Activator.logInfo("Auto-confirming launch dialog '" + APPLICATION_UPDATE_TITLE //$NON-NLS-1$
+            Activator.logInfo("Auto-confirming launch dialog '" + safeShellText(shell) //$NON-NLS-1$
                 + "' via button '" + safeText(button) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
             Event event = new Event();
             event.widget = button;
@@ -217,6 +252,18 @@ public final class LaunchUpdateDialogAutoConfirmer
         try
         {
             return button.getText();
+        }
+        catch (RuntimeException e)
+        {
+            return "<unknown>"; //$NON-NLS-1$
+        }
+    }
+
+    private static String safeShellText(Shell shell)
+    {
+        try
+        {
+            return shell.getText();
         }
         catch (RuntimeException e)
         {
