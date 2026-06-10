@@ -52,7 +52,9 @@ public class GetFormScreenshotTool implements IMcpTool
             .stringProperty("formPath", //$NON-NLS-1$
                 "Form FQN (e.g. 'Catalog.Products.Forms.ItemForm' or 'CommonForm.MyForm'); " + //$NON-NLS-1$
                 "if omitted, captures the active form editor.") //$NON-NLS-1$
-            .booleanProperty("refresh", "Force WYSIWYG refresh before capture (default: false)") //$NON-NLS-1$ //$NON-NLS-2$
+            .booleanProperty("refresh", //$NON-NLS-1$
+                "Force a real WYSIWYG re-render before capture; fails with an explicit error instead " + //$NON-NLS-1$
+                "of returning a stale image when the re-render cannot be completed (default: false)") //$NON-NLS-1$
             .build();
     }
 
@@ -223,7 +225,25 @@ public class GetFormScreenshotTool implements IMcpTool
             // ensureRenderedFormImage best-effort triggers a synchronous render to populate the buffer,
             // but falls through to the already-present (identity-verified) image when it exists. Only fail
             // if no image is produced.
-            boolean rendered = EditorScreenshotHelper.ensureRenderedFormImage(representation);
+            //
+            // refresh=true changes that contract (E1, stale-screenshot fix): the caller explicitly asked
+            // for a re-render (e.g. the form was just edited), so the pre-existing buffer must NOT be
+            // accepted — refreshViewer above only fires the ASYNC rebuild, which is dropped in this
+            // detached/MCP-driven EDT, and falling through to the old buffer returned the PRE-edit PNG as
+            // "refreshed". In force mode ensureRenderedFormImage drives a real re-render (the synchronous
+            // render path, with the async rebuild as fallback) and succeeds only on evidence that a
+            // render ran during this call; otherwise we fail explicitly below — consistent with the
+            // identity-guard philosophy: never a stale/wrong image silently.
+            boolean rendered = EditorScreenshotHelper.ensureRenderedFormImage(representation, refresh);
+            if (refresh && !rendered)
+            {
+                return CaptureResult.error(ToolResult.error(
+                    "refresh=true was requested but the form could not be re-rendered in time, so no " //$NON-NLS-1$
+                    + "screenshot was taken: returning the previously rendered image would silently " //$NON-NLS-1$
+                    + "show stale (pre-edit) content. Ensure EDT runs with buffered native render " //$NON-NLS-1$
+                    + "(VM option -DnativeFormBufferedLayoutRender=true) and try again, or call with " //$NON-NLS-1$
+                    + "refresh=false to accept the last rendered image.").toJson()); //$NON-NLS-1$
+            }
             if (formRequested && !rendered)
             {
                 return CaptureResult.error(ToolResult.error(

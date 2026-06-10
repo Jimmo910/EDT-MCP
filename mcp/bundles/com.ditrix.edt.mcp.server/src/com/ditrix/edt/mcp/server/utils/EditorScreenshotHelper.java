@@ -913,29 +913,83 @@ public final class EditorScreenshotHelper
      */
     public static boolean ensureRenderedFormImage(Object representation)
     {
-        return ensureRenderedFormImage(representation, FRESH_RENDER_WAIT_TIMEOUT_MS);
+        return ensureRenderedFormImage(representation, FRESH_RENDER_WAIT_TIMEOUT_MS, false);
     }
 
     /**
-     * Same as {@link #ensureRenderedFormImage(Object)} but with an explicit timeout. Package-visible so
-     * unit tests can use a short budget instead of the production wait.
+     * Same as {@link #ensureRenderedFormImage(Object)} but with an explicit force-refresh mode for
+     * {@code refresh=true} captures (the stale-screenshot defect, E1).
+     * <p>
+     * With {@code forceRefresh=false} the behavior is identical to {@link #ensureRenderedFormImage(Object)}:
+     * a pre-existing non-empty image is accepted as-is. With {@code forceRefresh=true} the pre-existing
+     * buffer is deliberately <b>not</b> trusted — the caller asked for a refresh because the form may have
+     * just been edited, so returning the previously rendered (pre-edit) image as "refreshed" is exactly
+     * the defect. Instead a real re-render is forced and this method succeeds only when there is evidence
+     * that a render actually ran during this call:
+     * <ul>
+     * <li>the pre-existing {@code formImageData} buffer is cleared first, so any non-empty image observed
+     * afterwards is provably the product of a new render — this stays sound even though the native render
+     * may reuse the same {@link ImageData} instance (which is why instance identity alone was abandoned as
+     * a freshness signal, see {@link #ensureRenderedFormImage(Object)});</li>
+     * <li>a completed synchronous render pass ({@code RenderOutcome.RENDERED} from
+     * {@link #renderRequestedFormSynchronously(Object)}) is accepted as direct evidence, since it
+     * reassigns {@code formImageData} inline;</li>
+     * <li>if the buffer could not be cleared, a fresh image must at least be a <i>different</i> instance
+     * than the pre-existing one (weaker; a false negative here surfaces as an explicit error, never as a
+     * stale image).</li>
+     * </ul>
+     * When no fresh render can be established within the timeout, this returns {@code false} so the caller
+     * can fail with an explicit error instead of silently returning a stale image. Must be called on the
+     * UI thread.
      *
      * @param representation the {@code FormWysiwygRepresentation} instance
-     * @param timeoutMs maximum time to wait for a non-empty image, in milliseconds
-     * @return {@code true} if the representation's {@code formImageData} is non-empty within the timeout
+     * @param forceRefresh {@code true} to require evidence of a re-render performed during this call,
+     *            {@code false} to accept a pre-existing non-empty image
+     * @return {@code true} if a (fresh, when forced) non-empty image is available within the timeout
      */
-    static boolean ensureRenderedFormImage(Object representation, int timeoutMs)
+    public static boolean ensureRenderedFormImage(Object representation, boolean forceRefresh)
+    {
+        return ensureRenderedFormImage(representation, FRESH_RENDER_WAIT_TIMEOUT_MS, forceRefresh);
+    }
+
+    /**
+     * Same as {@link #ensureRenderedFormImage(Object, boolean)} but with an explicit timeout.
+     * Package-visible so unit tests can use a short budget instead of the production wait.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @param timeoutMs maximum time to wait for a (fresh, when forced) non-empty image, in milliseconds
+     * @param forceRefresh {@code true} to require evidence of a re-render performed during this call
+     * @return {@code true} if a (fresh, when forced) non-empty image is available within the timeout
+     */
+    static boolean ensureRenderedFormImage(Object representation, int timeoutMs, boolean forceRefresh)
     {
         if (representation == null)
         {
             return false;
         }
+
+        ImageData baseline = getFormImageDataField(representation);
+        boolean hadPreexistingImage = isNonEmpty(baseline);
+
         // If an image is already present for this (identity-verified) representation, use it directly:
         // the layout snapshot proves formImageData is populated for the requested form, and a brand-new
-        // instance is NOT required. No need to wait for or force another render.
-        if (hasNonEmptyImage(representation))
+        // instance is NOT required. No need to wait for or force another render. NOT acceptable in
+        // force-refresh mode: that pre-existing image is exactly the potentially stale buffer the
+        // caller asked to re-render (E1).
+        if (!forceRefresh && hadPreexistingImage)
         {
             return true;
+        }
+
+        // Force-refresh with a pre-existing image: drop the stale buffer so any non-empty image seen
+        // afterwards is provably produced by a render that ran during this call, even when the native
+        // render reuses the same ImageData instance. If the field cannot be cleared, fall back to
+        // requiring a different instance than the baseline — that can false-negative on instance reuse,
+        // which then surfaces as an explicit "could not re-render" error rather than a stale image.
+        boolean requireNewInstance = false;
+        if (forceRefresh && hadPreexistingImage)
+        {
+            requireNewInstance = !clearFormImageData(representation);
         }
 
         Display display = Display.getCurrent();
@@ -945,13 +999,20 @@ public final class EditorScreenshotHelper
         // requested form is painted into the shared offscreen buffer and read back into formImageData,
         // bypassing the asynchronous rebuild scheduling that is dropped in a detached/headless EDT.
         // Retry within the budget because the mapping root can be transiently unavailable right after
-        // the editor opens; pump the event loop between attempts so the model finishes loading. This is
-        // NOT a gate: as soon as the image is non-empty we return, regardless of why it became non-empty.
+        // the editor opens; pump the event loop between attempts so the model finishes loading. Outside
+        // force mode this is NOT a gate: as soon as the image is non-empty we return, regardless of why
+        // it became non-empty. In force mode the image must additionally be fresh (see above).
         boolean syncPathReachable = false;
         while (System.currentTimeMillis() < deadline)
         {
             RenderOutcome outcome = renderRequestedFormSynchronously(representation);
-            if (hasNonEmptyImage(representation))
+            if (outcome == RenderOutcome.RENDERED && hasNonEmptyImage(representation))
+            {
+                // A full synchronous render ran during this call and reassigned formImageData, so the
+                // (non-empty) image is fresh by construction — sufficient in both modes.
+                return true;
+            }
+            if (hasFreshImage(representation, baseline, requireNewInstance))
             {
                 return true;
             }
@@ -966,31 +1027,70 @@ public final class EditorScreenshotHelper
         }
         if (syncPathReachable)
         {
-            // The synchronous hooks are present but did not populate the image within the budget; one
-            // last check (the render task may have settled while pumping events).
-            return hasNonEmptyImage(representation);
+            // The synchronous hooks are present but did not produce a (fresh) image within the budget;
+            // one last check (the render task may have settled while pumping events).
+            return hasFreshImage(representation, baseline, requireNewInstance);
         }
 
         // Fallback (older/different EDT where rebuildInternal is not reachable): re-trigger the async
-        // rebuild and poll until the image is non-empty. The async mapping-root callback skips
-        // re-entrant rebuilds while the representation's rebuild lock is held, so a single request can
-        // be dropped; re-requesting until the image is present makes the wait robust.
+        // rebuild and poll until the image is non-empty (and fresh, in force mode). The async
+        // mapping-root callback skips re-entrant rebuilds while the representation's rebuild lock is
+        // held, so a single request can be dropped; re-requesting until the image is present makes the
+        // wait robust.
         deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline)
         {
             rebuildRepresentation(representation);
-            if (hasNonEmptyImage(representation))
+            if (hasFreshImage(representation, baseline, requireNewInstance))
             {
                 return true;
             }
             processEvents(display);
             sleep(RENDER_WAIT_POLL_INTERVAL_MS);
-            if (hasNonEmptyImage(representation))
+            if (hasFreshImage(representation, baseline, requireNewInstance))
             {
                 return true;
             }
         }
-        return hasNonEmptyImage(representation);
+        return hasFreshImage(representation, baseline, requireNewInstance);
+    }
+
+    /**
+     * Clears the representation's {@code formImageData} field so that a subsequently observed non-empty
+     * image is provably the product of a render performed afterwards (the force-refresh freshness
+     * detector, E1). Dropping the buffer is safe: it is only a cache of the last render, the caller has
+     * explicitly requested a re-render, and every read path treats an absent image as "not rendered yet"
+     * rather than an error.
+     *
+     * @param representation the {@code FormWysiwygRepresentation} instance
+     * @return {@code true} when the field was found and cleared
+     */
+    private static boolean clearFormImageData(Object representation)
+    {
+        try
+        {
+            Class<?> type = representation.getClass();
+            while (type != null)
+            {
+                try
+                {
+                    Field field = type.getDeclaredField(FORM_IMAGE_DATA_FIELD);
+                    field.setAccessible(true);
+                    field.set(representation, null);
+                    return true;
+                }
+                catch (NoSuchFieldException e)
+                {
+                    type = type.getSuperclass();
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logWarning("Could not clear the previous form image before a forced re-render: " //$NON-NLS-1$
+                + e.getMessage());
+        }
+        return false;
     }
 
     /**
@@ -1137,8 +1237,41 @@ public final class EditorScreenshotHelper
      */
     private static boolean hasNonEmptyImage(Object representation)
     {
+        return isNonEmpty(getFormImageDataField(representation));
+    }
+
+    /**
+     * Reports whether an {@link ImageData} holds an actual image (non-null with positive dimensions).
+     *
+     * @param imageData the image data, may be {@code null}
+     * @return {@code true} when the image is non-empty
+     */
+    private static boolean isNonEmpty(ImageData imageData)
+    {
+        return imageData != null && imageData.width > 0 && imageData.height > 0;
+    }
+
+    /**
+     * Reports whether the representation currently holds a non-empty image that satisfies the
+     * force-refresh freshness requirement: when {@code requireNewInstance} is set (the pre-existing
+     * stale buffer could not be cleared), the image must be a different {@link ImageData} instance than
+     * the {@code baseline} captured before the re-render was driven; otherwise any non-empty image is
+     * accepted (the buffer was cleared first — or there was no pre-existing image — so only a render
+     * performed during this call can have populated it).
+     *
+     * @param representation the representation
+     * @param baseline the {@code formImageData} reference captured on entry (may be {@code null})
+     * @param requireNewInstance {@code true} to require a different instance than the baseline
+     * @return {@code true} when a non-empty (and fresh, when required) image is present
+     */
+    private static boolean hasFreshImage(Object representation, ImageData baseline, boolean requireNewInstance)
+    {
         ImageData current = getFormImageDataField(representation);
-        return current != null && current.width > 0 && current.height > 0;
+        if (!isNonEmpty(current))
+        {
+            return false;
+        }
+        return !requireNewInstance || current != baseline;
     }
 
     /**
