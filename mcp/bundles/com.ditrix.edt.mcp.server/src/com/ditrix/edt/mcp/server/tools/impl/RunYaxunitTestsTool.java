@@ -74,6 +74,39 @@ public class RunYaxunitTestsTool implements IMcpTool
     /** Active launches keyed by stable run id (projectName:applicationId:filterHash). */
     private static final Map<String, ILaunch> ACTIVE_LAUNCHES = new ConcurrentHashMap<>();
 
+    /** Max number of finished-but-unfetched runs retained for the retry handoff. */
+    static final int FINISHED_MAX_ENTRIES = 32;
+
+    /** TTL for finished-but-unfetched results — same freshness window as the read cache. */
+    static final long FINISHED_TTL_MS = CACHE_TTL_MS;
+
+    /**
+     * Finished-but-unfetched launches keyed by run id. When one of OUR launches
+     * terminates before the caller fetches the result (the launch listener or the
+     * entry purge evicts it from {@link #ACTIVE_LAUNCHES}), the completed report
+     * directory is parked here so a retry "with the same arguments" — exactly
+     * what the Pending message instructs — returns the finished junit.xml instead
+     * of re-running the whole suite. The handoff applies regardless of
+     * {@code updateBeforeLaunch}: the parked result IS from a fresh run we
+     * launched, so the cache bypass (which exists to force a fresh run after a
+     * source edit) does not apply to it. Entries are consumed exactly once and
+     * bounded by {@link #FINISHED_MAX_ENTRIES} / {@link #FINISHED_TTL_MS}.
+     */
+    private static final Map<String, FinishedRun> FINISHED_LAUNCHES = new ConcurrentHashMap<>();
+
+    /** Value record for {@link #FINISHED_LAUNCHES}: where the report lives + when the run finished. */
+    static final class FinishedRun
+    {
+        final Path reportDir;
+        final long completedAtMs;
+
+        FinishedRun(Path reportDir, long completedAtMs)
+        {
+            this.reportDir = reportDir;
+            this.completedAtMs = completedAtMs;
+        }
+    }
+
     /** Lazily registered listener that evicts terminated launches from {@link #ACTIVE_LAUNCHES}. */
     private static final AtomicBoolean LISTENER_REGISTERED = new AtomicBoolean(false);
 
@@ -131,6 +164,7 @@ public class RunYaxunitTestsTool implements IMcpTool
             + "extensions, default), 'configuration', or 'extension:<ProjectName>' " //$NON-NLS-1$
             + "(comma-separate several). Forces a derived-data recompute so a freshly edited " //$NON-NLS-1$
             + "extension's .cfe is regenerated and loaded into the infobase before the run. " //$NON-NLS-1$
+            + "Unknown extension names fail the call (the error lists the available names). " //$NON-NLS-1$
             + "Only applies when updateBeforeLaunch=true."; //$NON-NLS-1$
 
     @Override
@@ -190,7 +224,11 @@ public class RunYaxunitTestsTool implements IMcpTool
      * <ol>
      *   <li>Compute stable runKey from projectName + applicationId + filter.</li>
      *   <li>If a launch is already running for this key — poll up to {@code timeout}s, return result or "Pending".</li>
-     *   <li>If no active launch but a fresh junit.xml exists — return cached result.</li>
+     *   <li>If one of OUR launches for this key finished before the caller fetched —
+     *       return the parked result exactly once, regardless of {@code updateBeforeLaunch}
+     *       (see {@link #FINISHED_LAUNCHES}).</li>
+     *   <li>If no active launch but a fresh junit.xml exists — return cached result
+     *       (only when {@code updateBeforeLaunch=false}).</li>
      *   <li>Otherwise — start a new launch, poll, return result or "Pending".</li>
      * </ol>
      *
@@ -318,6 +356,10 @@ public class RunYaxunitTestsTool implements IMcpTool
                 if (existing.isTerminated())
                 {
                     ACTIVE_LAUNCHES.remove(runKey);
+                    // We are fetching the result right here — consume any entry the
+                    // launch listener parked for this key so a later call with the
+                    // same arguments starts a genuinely new run.
+                    takeFinishedRun(runKey, System.currentTimeMillis());
                     File junitXml = findJunitXml(reportDir);
                     if (junitXml != null)
                     {
@@ -332,6 +374,28 @@ public class RunYaxunitTestsTool implements IMcpTool
                     return pollResult;
                 }
                 return buildPendingMessage(reportDir);
+            }
+
+            // Finished-but-unfetched handoff. One of OUR launches for this exact run
+            // key terminated before the caller could fetch the result: the launch
+            // listener (or the entry purge) evicted it from ACTIVE_LAUNCHES, so the
+            // isTerminated() recovery branch above is unreachable for it. The parked
+            // junit.xml IS the result of a fresh run we launched, so return it exactly
+            // once — regardless of updateBeforeLaunch (the cache bypass exists to force
+            // a fresh run after a source edit, and this result already came from such a
+            // fresh run). The NEXT call with the same arguments starts a new run.
+            Path finishedDir = takeFinishedRun(runKey, System.currentTimeMillis());
+            if (finishedDir != null)
+            {
+                File finishedJunit = findJunitXml(finishedDir);
+                if (finishedJunit != null)
+                {
+                    Activator.logInfo("Returning finished-but-unfetched YAXUnit results for runKey=" //$NON-NLS-1$
+                        + runKey);
+                    return readResults(finishedJunit);
+                }
+                return ToolResult.error("Previous launch finished but no JUnit XML found in " //$NON-NLS-1$
+                        + finishedDir + ". Make sure YAXUnit extension is installed.").toJson(); //$NON-NLS-1$
             }
 
             // No active launch — return a fresh cached result if available, BUT never
@@ -410,6 +474,11 @@ public class RunYaxunitTestsTool implements IMcpTool
                         }
                         else
                         {
+                            // This spawn supersedes any parked finished-but-unfetched
+                            // result for the key: the old report dir is deleted below,
+                            // so the parked entry must not dangle (a later retry would
+                            // otherwise find its junit.xml missing).
+                            takeFinishedRun(runKey, System.currentTimeMillis());
                             cleanupTempDir(reportDir);
                             Files.createDirectories(reportDir);
                             Path paramsFile = reportDir.resolve("xUnitParams.json"); //$NON-NLS-1$
@@ -600,6 +669,10 @@ public class RunYaxunitTestsTool implements IMcpTool
         }
 
         ACTIVE_LAUNCHES.remove(runKey);
+        // The launch listener may have parked this run in the finished-handoff map
+        // the moment it terminated; the result is being fetched right here, so
+        // consume the parked entry to keep the "returned exactly once" contract.
+        takeFinishedRun(runKey, System.currentTimeMillis());
         Activator.logInfo("YAXUnit tests completed for " + runKey); //$NON-NLS-1$
 
         File junitXml = findJunitXml(reportDir);
@@ -699,24 +772,139 @@ public class RunYaxunitTestsTool implements IMcpTool
         }
     }
 
-    /** Removes the given launch from {@link #ACTIVE_LAUNCHES} regardless of which key it lives under. */
+    /**
+     * Removes the given launch from {@link #ACTIVE_LAUNCHES} regardless of which
+     * key it lives under. A terminated launch of OURS may hold a
+     * finished-but-unfetched result — its report directory is parked in
+     * {@link #FINISHED_LAUNCHES} for the retry handoff instead of being silently
+     * dropped (the Pending contract promises a retry "with the same arguments"
+     * fetches the result, never re-runs the suite).
+     */
     private static void evict(ILaunch launch)
     {
         if (launch == null)
         {
             return;
         }
-        ACTIVE_LAUNCHES.entrySet().removeIf(e -> e.getValue() == launch);
+        long now = System.currentTimeMillis();
+        ACTIVE_LAUNCHES.entrySet().removeIf(e -> {
+            if (e.getValue() != launch)
+            {
+                return false;
+            }
+            recordFinishedRunIfReportExists(e.getKey(), now);
+            return true;
+        });
         LaunchLifecycleUtils.unregisterOwnedLaunch(launch);
     }
 
-    /** Defensive sweep that drops any terminated launches still lingering in the map. */
+    /**
+     * Defensive sweep that drops any terminated launches still lingering in the
+     * map, parking each finished run for the retry handoff (see {@link #evict}).
+     */
     private static void purgeTerminatedLaunches()
     {
+        long now = System.currentTimeMillis();
         ACTIVE_LAUNCHES.entrySet().removeIf(e -> {
             ILaunch l = e.getValue();
-            return l == null || l.isTerminated();
+            if (l == null)
+            {
+                return true;
+            }
+            if (!l.isTerminated())
+            {
+                return false;
+            }
+            recordFinishedRunIfReportExists(e.getKey(), now);
+            return true;
         });
+    }
+
+    /**
+     * Parks the run for the retry handoff ONLY when its report directory actually
+     * holds a JUnit XML: a launch killed mid-run (e.g. via {@code terminate_launch})
+     * produced no result, and parking it would make the next retry return a
+     * spurious "no JUnit XML" error instead of starting a fresh run.
+     */
+    private static void recordFinishedRunIfReportExists(String runKey, long nowMs)
+    {
+        Path reportDir = stableReportDir(runKey);
+        if (findJunitXml(reportDir) != null)
+        {
+            recordFinishedRun(runKey, reportDir, nowMs);
+        }
+    }
+
+    /**
+     * Parks a finished-but-unfetched run for the retry handoff. Prunes expired
+     * entries and evicts the oldest beyond {@link #FINISHED_MAX_ENTRIES} so the
+     * map cannot grow without bound.
+     */
+    static void recordFinishedRun(String runKey, Path reportDir, long nowMs)
+    {
+        if (runKey == null || reportDir == null)
+        {
+            return;
+        }
+        FINISHED_LAUNCHES.put(runKey, new FinishedRun(reportDir, nowMs));
+        pruneFinishedRuns(nowMs);
+    }
+
+    /**
+     * Consumes (returns at most ONCE) the parked report directory for the given
+     * run key, or {@code null} when none exists or the entry exceeded
+     * {@link #FINISHED_TTL_MS}. After a hit, the next call with the same key
+     * starts a genuinely new run — the handoff never turns into a stale cache.
+     */
+    static Path takeFinishedRun(String runKey, long nowMs)
+    {
+        if (runKey == null)
+        {
+            return null;
+        }
+        FinishedRun finished = FINISHED_LAUNCHES.remove(runKey);
+        if (finished == null || nowMs - finished.completedAtMs > FINISHED_TTL_MS)
+        {
+            return null;
+        }
+        return finished.reportDir;
+    }
+
+    /** Drops expired entries, then evicts the oldest entries beyond the size bound. */
+    static void pruneFinishedRuns(long nowMs)
+    {
+        FINISHED_LAUNCHES.entrySet()
+            .removeIf(e -> nowMs - e.getValue().completedAtMs > FINISHED_TTL_MS);
+        while (FINISHED_LAUNCHES.size() > FINISHED_MAX_ENTRIES)
+        {
+            String oldestKey = null;
+            long oldestTs = Long.MAX_VALUE;
+            for (Map.Entry<String, FinishedRun> e : FINISHED_LAUNCHES.entrySet())
+            {
+                if (e.getValue().completedAtMs < oldestTs)
+                {
+                    oldestTs = e.getValue().completedAtMs;
+                    oldestKey = e.getKey();
+                }
+            }
+            if (oldestKey == null)
+            {
+                return;
+            }
+            FINISHED_LAUNCHES.remove(oldestKey);
+        }
+    }
+
+    /** Test hook: clears the finished-run handoff map (static-state isolation). */
+    static void clearFinishedRunsForTest()
+    {
+        FINISHED_LAUNCHES.clear();
+    }
+
+    /** Test hook: current number of parked finished runs. */
+    static int finishedRunCountForTest()
+    {
+        return FINISHED_LAUNCHES.size();
     }
 
     /**
@@ -747,8 +935,10 @@ public class RunYaxunitTestsTool implements IMcpTool
 
     /**
      * Returns a stable directory under the system temp folder for the given run key.
+     * Static so the launch-listener eviction path can derive the report directory
+     * of a finished run from its run key alone.
      */
-    private Path stableReportDir(String runKey)
+    private static Path stableReportDir(String runKey)
     {
         String safeKey = runKey.replaceAll("[^a-zA-Z0-9_.-]", "_"); //$NON-NLS-1$ //$NON-NLS-2$
         // Always preserve a unique hash suffix so different runs can never collide into the same dir.
@@ -765,7 +955,7 @@ public class RunYaxunitTestsTool implements IMcpTool
     /**
      * Computes a full hex SHA-1 hash for values that must remain unique after truncation.
      */
-    private String sha1Full(String input)
+    private static String sha1Full(String input)
     {
         try
         {
@@ -912,7 +1102,7 @@ public class RunYaxunitTestsTool implements IMcpTool
     /**
      * Finds the JUnit XML report file in the temp directory.
      */
-    private File findJunitXml(Path tempDir)
+    private static File findJunitXml(Path tempDir)
     {
         if (tempDir == null || !Files.exists(tempDir))
         {

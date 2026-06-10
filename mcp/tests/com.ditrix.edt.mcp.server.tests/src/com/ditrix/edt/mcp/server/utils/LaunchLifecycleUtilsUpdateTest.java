@@ -303,6 +303,41 @@ public class LaunchLifecycleUtilsUpdateTest
     }
 
     @Test
+    public void testUpdateReturningTerminalRequiredStateFailsFast() throws ApplicationException
+    {
+        // Review fix B2: update() itself returns FULL_UPDATE_REQUIRED — a terminal
+        // state that cannot transition to UPDATED without user action (e.g. an
+        // interactive restructure). The method must return the out-of-sync error
+        // IMMEDIATELY instead of stalling on the SYNCED await for the full apply
+        // timeout only to fail with the same error.
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
+        when(mgr.update(eq(app), any(), any(), any()))
+            .thenReturn(ApplicationUpdateState.FULL_UPDATE_REQUIRED);
+
+        // Generous apply timeout so a fast return proves the early exit, not a
+        // shrunken timeout.
+        LaunchLifecycleUtils.setSyncTimingsForTest(40L, 5000L, 5L);
+        long start = System.currentTimeMillis();
+        Optional<String> result = LaunchLifecycleUtils.updateApplicationIfNeeded(
+            mockOpenProject(), APP_ID, mgr);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertTrue("a terminal post-update state must yield an error", result.isPresent());
+        assertTrue("error must surface the final state",
+            result.get().contains("FULL_UPDATE_REQUIRED"));
+        assertTrue("error must say the IB is out of sync",
+            result.get().contains("out of sync"));
+        assertTrue("error must mention update_database fallback",
+            result.get().contains("update_database"));
+        assertTrue("must fail fast instead of awaiting the 5s apply timeout, took "
+            + elapsed + "ms", elapsed < 2000L);
+    }
+
+    @Test
     public void testUpdateReturnsBeingUpdatedThenSettles() throws ApplicationException
     {
         IApplication app = mock(IApplication.class);

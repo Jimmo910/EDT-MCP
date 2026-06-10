@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -228,6 +229,57 @@ public class LaunchLifecycleUtilsPrepareTest
         assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
         assertEquals(1, result.getTerminatedCount());
         verify(runtimeLaunch, atLeastOnce()).terminate();
+    }
+
+    @Test
+    public void testUnknownUpdateScopeFailsFastBeforeTerminating() throws Exception
+    {
+        // Review fix B4: a typo'd extension name in updateScope must be a HARD
+        // ERROR raised BEFORE any live launch is terminated — a stale-green guard
+        // must not cost the user a running client. Headless, no extension
+        // projects are discoverable, so the requested name is guaranteed unknown.
+        ILaunchConfiguration runtimeCfg = mockRuntimeConfig(
+            "MyApp.RuntimeClient", PROJECT_NAME, RUNTIME_APP_ID);
+        ILaunch runtimeLaunch = mock(ILaunch.class);
+        when(runtimeLaunch.getLaunchConfiguration()).thenReturn(runtimeCfg);
+        wireSelfTerminating(runtimeLaunch);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[] { runtimeLaunch });
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mockUpToDateAppManager(), 2,
+            "extension:NoSuchExtension");
+
+        assertFalse("an unknown extension name must fail the chain", result.isOk());
+        assertTrue("error must name the unknown extension",
+            result.getError() != null && result.getError().contains("NoSuchExtension"));
+        verify(runtimeLaunch, never()).terminate();
+    }
+
+    @Test
+    public void testSettleWindowAlwaysKeptAfterRecompute() throws Exception
+    {
+        // The post-recompute settle window is UNCONDITIONAL (#19925): the lagging
+        // UPDATE_STATE_CHANGED push it exists for is emitted by the
+        // applications-layer infobase-sync checker AFTER the recompute drain, so
+        // no during-drain observation can prove it will not come. Even with no
+        // update event delivered at all, the state must be re-polled beyond the
+        // single cheap entry read before "no update needed" is trusted.
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq(RUNTIME_APP_ID)))
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.UPDATED);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), RUNTIME_APP_ID, mgr, 2);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        verify(mgr, atLeast(2)).getUpdateState(app);
     }
 
     @Test

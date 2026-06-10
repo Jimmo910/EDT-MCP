@@ -7,6 +7,7 @@
 package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -207,6 +208,102 @@ public class LaunchLifecycleUtilsAwaitTest
 
         assertEquals("only the matching UPDATE_STATE_CHANGED for our app must satisfy done",
             ApplicationUpdateState.UPDATED, result);
+    }
+
+    @Test
+    public void testWakesOnEventFromRematerializedApplicationInstance()
+        throws ApplicationException, InterruptedException
+    {
+        // Review fix B3: the event may carry a DIFFERENT IApplication instance that
+        // represents the SAME application (EDT re-materializes instances; concrete
+        // implementations carry value semantics). A reference-identity filter would
+        // silently drop ALL such events and the wait would stall on the lagging
+        // BEING_UPDATED cache until the timeout — so a prompt UPDATED return proves
+        // the value-based (id) match.
+        IApplication app = mock(IApplication.class);
+        when(app.getId()).thenReturn("app-42");
+        IApplication rematerialized = mock(IApplication.class);
+        when(rematerialized.getId()).thenReturn("app-42");
+
+        AtomicReference<IApplicationListener> captured = new AtomicReference<>();
+        int[] addCount = {0};
+        int[] removeCount = {0};
+        IApplicationManager mgr = mockManagerCapturingListener(app,
+            ApplicationUpdateState.BEING_UPDATED, captured, addCount, removeCount);
+
+        Thread firer = new Thread(() -> {
+            IApplicationListener l;
+            while ((l = captured.get()) == null)
+            {
+                Thread.yield();
+            }
+            l.applicationChanged(event(rematerialized,
+                ApplicationEventType.UPDATE_STATE_CHANGED, ApplicationUpdateState.UPDATED));
+        });
+        firer.setDaemon(true);
+
+        // Long poll interval so the safety-net re-read (which keeps reading
+        // BEING_UPDATED) cannot mask a dropped event: only the event itself can
+        // deliver UPDATED before the timeout.
+        LaunchLifecycleUtils.setSyncTimingsForTest(40L, 5000L, 1000L);
+        firer.start();
+        long start = System.currentTimeMillis();
+        ApplicationUpdateState result = LaunchLifecycleUtils.awaitUpdateState(mgr, app,
+            s -> s == ApplicationUpdateState.UPDATED, 5000L);
+        long elapsed = System.currentTimeMillis() - start;
+        firer.join(2000L);
+
+        assertEquals("an event from a re-materialized instance of the same application "
+            + "must satisfy the wait", ApplicationUpdateState.UPDATED, result);
+        assertTrue("must wake on the event, not the timeout, took " + elapsed + "ms",
+            elapsed < 4000L);
+    }
+
+    @Test
+    public void testIsSameApplicationMatchesByIdAcrossInstances()
+    {
+        IApplication a = mock(IApplication.class);
+        IApplication b = mock(IApplication.class);
+        IApplication c = mock(IApplication.class);
+        when(a.getId()).thenReturn("app-42");
+        when(b.getId()).thenReturn("app-42");
+        when(c.getId()).thenReturn("other");
+
+        assertTrue("same id on different instances must match",
+            LaunchLifecycleUtils.isSameApplication(a, b));
+        assertFalse("different ids must not match",
+            LaunchLifecycleUtils.isSameApplication(a, c));
+    }
+
+    @Test
+    public void testIsSameApplicationIdentityAndNullSafety()
+    {
+        IApplication a = mock(IApplication.class);
+        assertTrue("identity must match without consulting getId",
+            LaunchLifecycleUtils.isSameApplication(a, a));
+        assertFalse(LaunchLifecycleUtils.isSameApplication(a, null));
+        assertFalse(LaunchLifecycleUtils.isSameApplication(null, a));
+    }
+
+    @Test
+    public void testIsSameApplicationFallsBackToEqualsWhenIdUnavailable()
+    {
+        // getId() returns null on both (Mockito default) → falls back to equals();
+        // mock equals is identity, so two distinct instances must not match.
+        IApplication a = mock(IApplication.class);
+        IApplication b = mock(IApplication.class);
+        assertFalse(LaunchLifecycleUtils.isSameApplication(a, b));
+    }
+
+    @Test
+    public void testIsSameApplicationSurvivesThrowingGetId()
+    {
+        IApplication a = mock(IApplication.class);
+        IApplication b = mock(IApplication.class);
+        when(a.getId()).thenThrow(new RuntimeException("boom"));
+        when(b.getId()).thenThrow(new RuntimeException("boom"));
+        assertFalse("a throwing getId must fall back to equals, not propagate",
+            LaunchLifecycleUtils.isSameApplication(a, b));
     }
 
     @Test

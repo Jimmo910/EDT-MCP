@@ -8,12 +8,16 @@ package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 
 import org.eclipse.core.resources.IProject;
 import org.junit.Test;
@@ -175,13 +179,84 @@ public class LaunchLifecycleUtilsBuildWaitTest
     @Test
     public void testResolveUpdateScopeUnknownNameStillRecomputesConfig()
     {
-        // Unknown extension names are ignored, but the configuration is always
-        // recomputed — never an empty scope.
+        // At the RESOLVER level unknown extension names are ignored and the
+        // configuration is always recomputed — never an empty scope. The HARD
+        // ERROR for typo'd names is raised separately by validateUpdateScope,
+        // which prepareForFreshLaunch runs first (review fix B4).
         IProject launch = mockOpenProject("MyConfig");
         List<IProject> projects =
             LaunchLifecycleUtils.resolveUpdateScope(launch, "extension:doesNotExist");
         assertEquals(1, projects.size());
         assertSame(launch, projects.get(0));
+    }
+
+    // --- validateUpdateScope (review fix B4) --------------------------------
+    //
+    // Unknown extension names must be a HARD ERROR surfaced to the caller — a
+    // typo silently narrowing the recompute scope is exactly the stale-green
+    // run updateScope was built to prevent. Headless, no extension projects are
+    // discoverable, which is precisely the "every requested name is unknown"
+    // case these tests need.
+
+    @Test
+    public void testValidateUpdateScopeStandardValuesAreValid()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, null));
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, "   "));
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, "all"));
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, "ALL"));
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, "configuration"));
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(launch, "Configuration"));
+        // A null project is reported separately by prepareForFreshLaunch.
+        assertNull(LaunchLifecycleUtils.validateUpdateScope(null, "extension:whatever"));
+    }
+
+    @Test
+    public void testValidateUpdateScopeUnknownNameIsHardError()
+    {
+        IProject launch = mockOpenProject("MyConfig");
+        String error = LaunchLifecycleUtils.validateUpdateScope(launch, "extension:doesNotExist");
+        assertNotNull("an unknown extension name must be a hard error", error);
+        assertTrue("error must name the unknown extension", error.contains("doesNotExist"));
+        assertTrue("error must state that no extension projects are available",
+            error.contains("<none>"));
+    }
+
+    @Test
+    public void testValidateUpdateScopeUnparseableScopeIsHardError()
+    {
+        // "extension:" carries no name — previously this silently degraded to a
+        // configuration-only recompute; now the caller is told.
+        IProject launch = mockOpenProject("MyConfig");
+        String error = LaunchLifecycleUtils.validateUpdateScope(launch, "extension:");
+        assertNotNull("a scope with no usable extension name must be a hard error", error);
+        assertTrue("error must list the valid values", error.contains("'all'"));
+    }
+
+    @Test
+    public void testUnknownExtensionNamesErrorListsUnknownAndAvailable()
+    {
+        String error = LaunchLifecycleUtils.unknownExtensionNamesError(
+            Arrays.asList("Typo1", "Typo2"), Arrays.asList("RealExt", "OtherExt"));
+        assertTrue("error must list every unknown name",
+            error.contains("Typo1") && error.contains("Typo2"));
+        assertTrue("error must list the available extension names",
+            error.contains("RealExt") && error.contains("OtherExt"));
+    }
+
+    @Test
+    public void testParseRequestedExtensionNamesGrammar()
+    {
+        Set<String> names = LaunchLifecycleUtils.parseRequestedExtensionNames(
+            "extension:Ext1, BareName, foo:Bar, extension: , ,Extension:Ext2");
+        assertTrue(names.contains("Ext1"));
+        assertTrue("a bare name is tolerated as an extension name", names.contains("BareName"));
+        assertTrue("an unrecognised '<prefix>:' token is kept whole for the validator",
+            names.contains("foo:Bar"));
+        assertTrue("the 'extension' prefix is case-insensitive", names.contains("Ext2"));
+        assertEquals("blank tokens and an empty 'extension:' name are skipped",
+            4, names.size());
     }
 
     @Test

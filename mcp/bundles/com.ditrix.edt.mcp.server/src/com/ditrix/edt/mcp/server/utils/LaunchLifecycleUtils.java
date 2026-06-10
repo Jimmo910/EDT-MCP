@@ -541,9 +541,15 @@ public final class LaunchLifecycleUtils
      *       {@link IExtensionProject#getProject()} name equals a requested
      *       {@code <Name>}. The launch (configuration) project is ALWAYS included,
      *       because an extension cannot reach the infobase without its parent
-     *       configuration present. Unknown names are ignored (the configuration is
-     *       still recomputed); callers may note them.</li>
+     *       configuration present.</li>
      * </ul>
+     *
+     * <p>This resolver itself stays lenient about unknown names (the configuration
+     * is still returned) so it never empties the recompute scope; the HARD-ERROR
+     * contract for typo'd extension names lives in {@link #validateUpdateScope},
+     * which {@link #prepareForFreshLaunch} runs FIRST — a silently narrowed scope
+     * would skip the recompute of the intended extension and produce the exact
+     * stale-green run the {@code updateScope} parameter was built to prevent.
      *
      * <p>Null-safe: a {@code null} {@code launchProject} yields an empty list.
      * The launch (configuration) project is always first in the returned list.
@@ -571,34 +577,7 @@ public final class LaunchLifecycleUtils
             return only;
         }
 
-        // "extension:<Name>" tokens (comma-separated). Collect the requested
-        // extension names case-sensitively (project names are case-sensitive on
-        // Linux), then keep only the dependent extensions whose project name
-        // matches. The configuration project is always included first.
-        Set<String> requested = new LinkedHashSet<>();
-        for (String token : scope.split(",")) //$NON-NLS-1$
-        {
-            String trimmed = token.trim();
-            if (trimmed.isEmpty())
-            {
-                continue;
-            }
-            // Accept "extension:<Name>"; tolerate a bare name as the same intent.
-            int colon = trimmed.indexOf(':');
-            if (colon >= 0)
-            {
-                String prefix = trimmed.substring(0, colon).trim();
-                String name = trimmed.substring(colon + 1).trim();
-                if ("extension".equalsIgnoreCase(prefix) && !name.isEmpty()) //$NON-NLS-1$
-                {
-                    requested.add(name);
-                }
-            }
-            else
-            {
-                requested.add(trimmed);
-            }
-        }
+        Set<String> requested = parseRequestedExtensionNames(scope);
 
         Set<IProject> projects = new LinkedHashSet<>();
         projects.add(launchProject);
@@ -606,6 +585,8 @@ public final class LaunchLifecycleUtils
         {
             // Scope referenced no parseable extension name — degrade to just the
             // configuration (which is always rebuilt) rather than the full scope.
+            // validateUpdateScope reports this as a hard error to callers that
+            // go through prepareForFreshLaunch.
             return new ArrayList<>(projects);
         }
         for (IProject project : collectLaunchAndExtensionProjects(launchProject))
@@ -620,6 +601,125 @@ public final class LaunchLifecycleUtils
             }
         }
         return new ArrayList<>(projects);
+    }
+
+    /**
+     * Parses the token list of an {@code updateScope} value (anything other than
+     * {@code all}/{@code configuration}) into the set of requested extension
+     * project names. Shared grammar for {@link #resolveUpdateScope} and
+     * {@link #validateUpdateScope}: tokens are comma-separated; each is either
+     * {@code extension:<Name>} (case-insensitive prefix) or a bare {@code <Name>}
+     * (tolerated as the same intent). A token with an unrecognised
+     * {@code <prefix>:} is kept WHOLE so the validator surfaces it as unknown
+     * instead of a typo being silently dropped. Blank tokens and an
+     * {@code extension:} with an empty name are skipped. Names are collected
+     * case-sensitively (project names are case-sensitive on Linux).
+     */
+    static Set<String> parseRequestedExtensionNames(String scope)
+    {
+        Set<String> requested = new LinkedHashSet<>();
+        if (scope == null)
+        {
+            return requested;
+        }
+        for (String token : scope.split(",")) //$NON-NLS-1$
+        {
+            String trimmed = token.trim();
+            if (trimmed.isEmpty())
+            {
+                continue;
+            }
+            int colon = trimmed.indexOf(':');
+            if (colon >= 0)
+            {
+                String prefix = trimmed.substring(0, colon).trim();
+                String name = trimmed.substring(colon + 1).trim();
+                if ("extension".equalsIgnoreCase(prefix)) //$NON-NLS-1$
+                {
+                    if (!name.isEmpty())
+                    {
+                        requested.add(name);
+                    }
+                    continue;
+                }
+                // Unrecognised "<prefix>:" — keep the whole token so the
+                // validator reports it instead of silently dropping a typo.
+                requested.add(trimmed);
+            }
+            else
+            {
+                requested.add(trimmed);
+            }
+        }
+        return requested;
+    }
+
+    /**
+     * Validates an {@code updateScope} value against the launch project's actual
+     * dependent extension projects. Unknown extension names are a HARD ERROR:
+     * silently skipping a typo'd name would narrow the pre-launch recompute and
+     * produce the exact stale-green run {@code updateScope} was built to prevent.
+     *
+     * @param launchProject the configuration project the launch targets
+     * @param updateScope the raw {@code updateScope} parameter value (may be {@code null})
+     * @return {@code null} when the scope is valid ({@code null}/empty/{@code all}/
+     *         {@code configuration} are always valid); otherwise a human-readable
+     *         error listing the requested-but-unknown names and the available
+     *         extension project names
+     */
+    public static String validateUpdateScope(IProject launchProject, String updateScope)
+    {
+        String scope = updateScope != null ? updateScope.trim() : ""; //$NON-NLS-1$
+        if (launchProject == null || scope.isEmpty()
+            || "all".equalsIgnoreCase(scope) || "configuration".equalsIgnoreCase(scope)) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            return null;
+        }
+        Set<String> requested = parseRequestedExtensionNames(scope);
+        if (requested.isEmpty())
+        {
+            return "updateScope '" + updateScope + "' contains no usable extension name. " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Valid values: 'all', 'configuration', or 'extension:<ProjectName>' " //$NON-NLS-1$
+                + "(comma-separate several)."; //$NON-NLS-1$
+        }
+        Set<String> available = new LinkedHashSet<>();
+        for (IProject candidate : collectLaunchAndExtensionProjects(launchProject))
+        {
+            if (candidate != null && !launchProject.equals(candidate))
+            {
+                available.add(candidate.getName());
+            }
+        }
+        List<String> unknown = new ArrayList<>();
+        for (String name : requested)
+        {
+            if (!available.contains(name))
+            {
+                unknown.add(name);
+            }
+        }
+        if (unknown.isEmpty())
+        {
+            return null;
+        }
+        return unknownExtensionNamesError(unknown, available);
+    }
+
+    /**
+     * Builds the hard-error message for {@link #validateUpdateScope}: lists the
+     * requested-but-unknown extension names AND the available extension project
+     * names so the caller can fix the typo without another discovery round-trip.
+     */
+    static String unknownExtensionNamesError(Collection<String> unknownNames,
+            Collection<String> availableNames)
+    {
+        return "updateScope requests unknown extension project name" //$NON-NLS-1$
+            + (unknownNames.size() == 1 ? "" : "s") + ": " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + String.join(", ", unknownNames) //$NON-NLS-1$
+            + ". Available extension projects for this configuration: " //$NON-NLS-1$
+            + (availableNames.isEmpty() ? "<none>" : String.join(", ", availableNames)) //$NON-NLS-1$ //$NON-NLS-2$
+            + ". Names are case-sensitive; fix the 'extension:<Name>' value, or use " //$NON-NLS-1$
+            + "'all' / 'configuration'."; //$NON-NLS-1$
     }
 
     /**
@@ -892,9 +992,18 @@ public final class LaunchLifecycleUtils
 
             // Post-condition gate: the auto-chain promises the IB is actually in
             // UPDATED state (the .cfe applied) before workingCopy.launch() runs.
-            // appManager.update() may return UPDATED, BEING_UPDATED, or even a
-            // still-required state on the async path, so we always await the
-            // UPDATE_STATE_CHANGED→UPDATED event rather than trusting the return value.
+            // appManager.update() may return UPDATED (done) or a transitional
+            // BEING_UPDATED/UNKNOWN on the async path — those are awaited below.
+            // A …UPDATE_REQUIRED return, however, is TERMINAL: the update itself
+            // decided it cannot proceed without user action (e.g. an interactive
+            // restructure), so no further UPDATE_STATE_CHANGED transition can ever
+            // arrive. Awaiting SYNCED would stall the MCP call for the full apply
+            // timeout and then fail with the very same out-of-sync error — fail
+            // fast instead, restoring the old prompt-error behaviour.
+            if (needsUpdate(after))
+            {
+                return Optional.of(terminalOutOfSyncError(after));
+            }
             if (!isSynced(after))
             {
                 after = awaitUpdateState(appManager, application,
@@ -930,6 +1039,25 @@ public final class LaunchLifecycleUtils
             + "so the run was refused. Retry the run; if it persists, call " //$NON-NLS-1$
             + "`update_database` (optionally with `fullUpdate=true` / " //$NON-NLS-1$
             + "`autoRestructure=true`) and inspect the EDT problems view."; //$NON-NLS-1$
+    }
+
+    /**
+     * Builds the "infobase is out of sync and the programmatic update cannot fix
+     * it" message returned when {@link IApplicationManager#update} itself comes
+     * back with a terminal {@code …UPDATE_REQUIRED} state (e.g. a restructure
+     * that needs interactive confirmation). Unlike {@link #staleInfobaseError}
+     * there is nothing to wait for — no further state transition can happen
+     * without user action — so the caller is told immediately instead of after
+     * the full apply timeout.
+     */
+    private static String terminalOutOfSyncError(ApplicationUpdateState finalState)
+    {
+        return "Infobase is still out of sync after the programmatic update " //$NON-NLS-1$
+            + "(final update state: " + finalState + ") — the update requires user " //$NON-NLS-1$ //$NON-NLS-2$
+            + "action (e.g. an interactive restructure), so the run was refused " //$NON-NLS-1$
+            + "immediately rather than executed stale. Call `update_database` " //$NON-NLS-1$
+            + "(optionally with `fullUpdate=true` / `autoRestructure=true`) and " //$NON-NLS-1$
+            + "inspect the EDT problems view, then retry."; //$NON-NLS-1$
     }
 
     /**
@@ -1006,8 +1134,8 @@ public final class LaunchLifecycleUtils
         AtomicReference<CountDownLatch> signal = new AtomicReference<>(new CountDownLatch(1));
 
         IApplicationListener listener = event -> {
-            if (event == null || event.getApplication() != application
-                || event.getEventType() != ApplicationEventType.UPDATE_STATE_CHANGED)
+            if (event == null || event.getEventType() != ApplicationEventType.UPDATE_STATE_CHANGED
+                || !isSameApplication(event.getApplication(), application))
             {
                 return;
             }
@@ -1079,6 +1207,44 @@ public final class LaunchLifecycleUtils
         {
             appManager.removeAppllicationListener(listener);
         }
+    }
+
+    /**
+     * Value-based application match used to filter {@link IApplicationListener}
+     * events. EDT may re-materialize {@link IApplication} instances for the same
+     * application (implementations such as {@code InfobaseApplication} carry value
+     * semantics with their own {@code equals}/{@code hashCode}), so a
+     * reference-identity comparison would silently drop ALL push events for a
+     * re-materialized instance and degrade the event-driven wait to polling the
+     * lagging cached state — the exact distrust bug #19925 was about. Prefers
+     * {@link IApplication#getId()} equality; falls back to {@code equals(...)}.
+     * Null-safe and never throws into the listener.
+     */
+    static boolean isSameApplication(IApplication left, IApplication right)
+    {
+        if (left == right)
+        {
+            return true;
+        }
+        if (left == null || right == null)
+        {
+            return false;
+        }
+        try
+        {
+            String leftId = left.getId();
+            String rightId = right.getId();
+            if (leftId != null && rightId != null)
+            {
+                return leftId.equals(rightId);
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // Defensive: a flaky getId() implementation must not kill the event
+            // listener — fall through to equals().
+        }
+        return left.equals(right);
     }
 
     /**
@@ -1158,7 +1324,9 @@ public final class LaunchLifecycleUtils
      * @param updateScope             which projects to force-recompute+update before
      *            the launch (see {@link #resolveUpdateScope(IProject, String)}); pass
      *            {@code null} or {@code "all"} for the configuration plus its
-     *            dependent extensions
+     *            dependent extensions. Unknown extension names fail fast with
+     *            {@code ok=false} BEFORE any live launch is terminated (see
+     *            {@link #validateUpdateScope(IProject, String)})
      */
     public static PreLaunchResult prepareForFreshLaunch(ILaunchManager launchManager,
             IProject project, String applicationId, IApplicationManager appManager,
@@ -1171,6 +1339,17 @@ public final class LaunchLifecycleUtils
         if (project == null)
         {
             return new PreLaunchResult(false, 0, "Project is null"); //$NON-NLS-1$
+        }
+
+        // A typo'd or unknown extension name in updateScope is a HARD ERROR and
+        // must fail BEFORE anything destructive happens (terminating live
+        // launches, recompute, DB update): a silently narrowed scope would skip
+        // the recompute of the intended extension and produce the exact
+        // stale-green run updateScope was built to prevent.
+        String scopeError = validateUpdateScope(project, updateScope);
+        if (scopeError != null)
+        {
+            return new PreLaunchResult(false, 0, scopeError);
         }
 
         // Per-key lock prevents concurrent run_yaxunit_tests / debug_yaxunit_tests
@@ -1283,8 +1462,13 @@ public final class LaunchLifecycleUtils
 
             // settleAfterPossibleRecompute=true: we JUST forced a recompute, so a cached
             // UPDATED may lag the freshly regenerated .cfe — wait out the settle window
-            // before trusting "no update needed" (bug #19925). The plain debug_launch
-            // path passes false (immediate return on UPDATED) to avoid that ~5s cost.
+            // before trusting "no update needed" (bug #19925). The settle is kept
+            // UNCONDITIONALLY: the lagging UPDATE_STATE_CHANGED push this window
+            // exists for arrives AFTER the recompute drain (it is emitted by the
+            // applications-layer infobase-sync checker, which the drained build /
+            // derived-data job families do NOT cover), so no during-drain probe can
+            // prove it will not come. The plain debug_launch path passes false
+            // (immediate return on UPDATED) to avoid that ~5s cost.
             Optional<String> updateErr = updateApplicationIfNeeded(project, applicationId,
                 appManager, true);
             if (updateErr.isPresent())
