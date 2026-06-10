@@ -110,6 +110,39 @@ public class DebugLaunchToolTest
     }
 
     @Test
+    public void testUpdateBeforeLaunchFalseContractIsCoherent()
+    {
+        // rv1 review: with updateBeforeLaunch=false the DB update is skipped AND
+        // the launch delegate's modal is NOT auto-confirmed (auto-pressing "Update
+        // then run" would perform the very update the caller disabled). Both
+        // metadata halves must keep documenting that the platform may then show
+        // the modal, so the contract can't silently drift in one place only.
+        DebugLaunchTool tool = new DebugLaunchTool();
+        String schema = tool.getInputSchema();
+        String guide = tool.getGuide();
+        assertNotNull(schema);
+        assertNotNull(guide);
+        assertTrue("schema must document that updateBeforeLaunch=false may show the modal",
+            schema.contains("may then show that modal")); //$NON-NLS-1$
+        assertTrue("guide must document the updateBeforeLaunch=false contract",
+            guide.contains("updateBeforeLaunch=false")); //$NON-NLS-1$
+        assertTrue("guide must document that updateBeforeLaunch=false may show the modal",
+            guide.contains("may then show that modal")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsRunModeAlreadyRunningGuard()
+    {
+        // rv1 review: the already-running guard covers RUN-mode launches (no debug
+        // target) in BOTH selection modes (by-name and project+application); the
+        // guide documents that promise — keep it ratcheted.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the RUN-mode already-running guard",
+            guide.contains("RUN mode")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testGuideHasMigratedDetail()
     {
         // The exhaustive detail (Attach mode, the alreadyRunning short-circuit and

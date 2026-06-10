@@ -13,6 +13,7 @@ import java.util.Set;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTError;
+import org.eclipse.swt.SWTException;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -135,7 +136,15 @@ public final class LaunchUpdateDialogAutoConfirmer
      * {@code finally} block around the {@code workingCopy.launch()} call.
      * Reentrant: nested/concurrent launches share a single filter.
      *
-     * <p>No-op in a headless environment (no SWT display).
+     * <p>No-op in a headless environment (no SWT display). Never throws — a
+     * display disposed mid-call (workbench shutdown) is swallowed, so a launch
+     * {@code finally} chain is never broken by the confirmer itself.
+     *
+     * <p>Threading: only the arm counter is touched under {@code LOCK}; the
+     * filter (un)install is marshalled to the UI thread OUTSIDE the monitor.
+     * Blocking on {@link Display#syncExec} while holding {@code LOCK} would
+     * deadlock: an MCP worker would wait for the UI thread while the UI thread
+     * (running another tool's launch lambda) waits for {@code LOCK}.
      */
     public static void arm()
     {
@@ -147,50 +156,20 @@ public final class LaunchUpdateDialogAutoConfirmer
         synchronized (LOCK)
         {
             armCount++;
-            if (filter != null)
-            {
-                return;
-            }
-            Listener listener = event -> {
-                if (!(event.widget instanceof Shell))
-                {
-                    return;
-                }
-                Shell shell = (Shell)event.widget;
-                String title;
-                try
-                {
-                    title = shell.getText();
-                }
-                catch (RuntimeException e)
-                {
-                    return;
-                }
-                if (!isTargetTitle(title))
-                {
-                    return;
-                }
-                // Defer so the modal finishes building its button bar and enters
-                // its event loop; the press then runs inside that loop.
-                shell.getDisplay().asyncExec(() -> pressDefaultButton(shell));
-            };
-            // Display filters must be (un)installed on the UI thread.
-            display.syncExec(() -> {
-                display.addFilter(SWT.Activate, listener);
-                display.addFilter(SWT.Show, listener);
-            });
-            filter = listener;
-            filterDisplay = display;
         }
+        reconcileOnUiThread(display);
     }
 
     /**
      * Disarms the auto-confirmer. The underlying {@link Display} filter is
      * removed only once the last paired {@link #arm()} has been released.
+     *
+     * <p>Never throws (see {@link #arm()}): callers invoke this from
+     * {@code finally} blocks, where an exception would mask the original
+     * launch failure.
      */
     public static void disarm()
     {
-        Listener toRemove;
         Display display;
         synchronized (LOCK)
         {
@@ -198,22 +177,117 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 armCount--;
             }
-            if (armCount > 0 || filter == null)
+            display = filterDisplay;
+        }
+        if (display == null)
+        {
+            // No filter was ever installed (headless no-op arm, or a concurrent
+            // arm() whose UI-thread install has not run yet — that install then
+            // sees the decremented counter and is skipped).
+            return;
+        }
+        reconcileOnUiThread(display);
+    }
+
+    /**
+     * Marshals {@link #reconcileFilter(Display)} to the UI thread. Called
+     * WITHOUT holding {@code LOCK} (the blocking {@code syncExec} under the
+     * monitor was a deadlock, R1). Never throws: a display disposed between
+     * the check and the {@code syncExec} (workbench shutdown race) is benign —
+     * the filter dies with the display and the counter stays consistent.
+     */
+    private static void reconcileOnUiThread(Display display)
+    {
+        if (display.isDisposed())
+        {
+            return;
+        }
+        try
+        {
+            display.syncExec(() -> reconcileFilter(display));
+        }
+        catch (SWTException e)
+        {
+            // ERROR_DEVICE_DISPOSED race on shutdown — nothing to (un)install.
+        }
+    }
+
+    /**
+     * Brings the installed {@link Display} filter in line with the current arm
+     * count. Runs on the UI thread only; takes {@code LOCK} just for the state
+     * decision (never blocks inside the monitor), then performs the actual
+     * {@code addFilter}/{@code removeFilter} outside it. Because every install
+     * and removal funnels through here on the UI thread against the live
+     * counter, a concurrent arm/disarm pair can never leave a filter installed
+     * with no armed owner (or vice versa).
+     */
+    private static void reconcileFilter(Display display)
+    {
+        Listener toInstall = null;
+        Listener toRemove = null;
+        synchronized (LOCK)
+        {
+            // A filter whose display died with the workbench is already gone —
+            // drop the stale reference so a future arm() can reinstall.
+            if (filter != null && (filterDisplay == null || filterDisplay.isDisposed()))
+            {
+                filter = null;
+                filterDisplay = null;
+            }
+            if (armCount > 0 && filter == null)
+            {
+                toInstall = createFilterListener();
+                filter = toInstall;
+                filterDisplay = display;
+            }
+            else if (armCount == 0 && filter != null)
+            {
+                toRemove = filter;
+                filter = null;
+                filterDisplay = null;
+            }
+        }
+        if (toInstall != null)
+        {
+            display.addFilter(SWT.Activate, toInstall);
+            display.addFilter(SWT.Show, toInstall);
+        }
+        if (toRemove != null)
+        {
+            display.removeFilter(SWT.Activate, toRemove);
+            display.removeFilter(SWT.Show, toRemove);
+        }
+    }
+
+    /**
+     * Creates the {@link Display} filter that watches for the "Application
+     * update" modal and schedules the default-button auto-press.
+     */
+    private static Listener createFilterListener()
+    {
+        return event -> {
+            if (!(event.widget instanceof Shell))
             {
                 return;
             }
-            toRemove = filter;
-            display = filterDisplay;
-            filter = null;
-            filterDisplay = null;
-        }
-        if (display != null && !display.isDisposed())
-        {
-            display.syncExec(() -> {
-                display.removeFilter(SWT.Activate, toRemove);
-                display.removeFilter(SWT.Show, toRemove);
-            });
-        }
+            Shell shell = (Shell)event.widget;
+            String title;
+            try
+            {
+                title = shell.getText();
+            }
+            catch (RuntimeException e)
+            {
+                return;
+            }
+            if (!isTargetTitle(title))
+            {
+                return;
+            }
+            // Defer so the modal finishes building its button bar and enters
+            // its event loop; the press then runs inside that loop.
+            shell.getDisplay().asyncExec(() -> pressDefaultButton(shell));
+        };
     }
 
     /**
