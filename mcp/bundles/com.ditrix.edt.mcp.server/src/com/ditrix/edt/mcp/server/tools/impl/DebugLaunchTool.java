@@ -198,6 +198,33 @@ public class DebugLaunchTool implements IMcpTool
                 return already.toJson();
             }
 
+            // A non-terminated launch may exist for this config WITHOUT a debug
+            // target — e.g. it was started in RUN mode. findActiveTarget() (debug
+            // targets only) misses it, so without this guard the by-name path
+            // would start a SECOND client over the running one — the same A12
+            // guard the projectName+applicationId path applies.
+            ILaunch activeLaunch = effectiveAppId != null
+                ? DebugSessionRegistry.findActiveLaunch(effectiveAppId) : null;
+            if (activeLaunch != null)
+            {
+                String runningMode = activeLaunch.getLaunchMode();
+                ToolResult already = ToolResult.success()
+                    .put("launchConfiguration", config.getName()) //$NON-NLS-1$
+                    .put("configurationType", typeId) //$NON-NLS-1$
+                    .put("attach", isAttach) //$NON-NLS-1$
+                    .put("applicationId", effectiveAppId) //$NON-NLS-1$
+                    .put("alreadyRunning", true) //$NON-NLS-1$
+                    .put("mode", runningMode) //$NON-NLS-1$
+                    .put("message", "Application is already running (mode: " + runningMode //$NON-NLS-1$ //$NON-NLS-2$
+                        + ") - skipped launch to avoid a second client over the running session. " //$NON-NLS-1$
+                        + "Call terminate_launch first to force a fresh session."); //$NON-NLS-1$
+                if (configProject != null && !configProject.isEmpty())
+                {
+                    already.put("project", configProject); //$NON-NLS-1$
+                }
+                return already.toJson();
+            }
+
             // For runtime-client configs, run the usual DB-update preflight.
             if (!isAttach && updateBeforeLaunch && configProject != null && !configProject.isEmpty())
             {
@@ -213,7 +240,7 @@ public class DebugLaunchTool implements IMcpTool
                 }
             }
 
-            String launchError = performLaunch(config);
+            String launchError = performLaunch(config, updateBeforeLaunch);
             if (launchError != null)
             {
                 return ToolResult.error("Failed to launch debug session: " + launchError).toJson(); //$NON-NLS-1$
@@ -398,7 +425,7 @@ public class DebugLaunchTool implements IMcpTool
                 + ", project=" + projectName //$NON-NLS-1$
                 + ", application=" + applicationId); //$NON-NLS-1$
 
-            String launchError = performLaunch(matchingConfig);
+            String launchError = performLaunch(matchingConfig, updateBeforeLaunch);
             if (launchError != null)
             {
                 return ToolResult.error("Failed to launch debug session: " + launchError).toJson(); //$NON-NLS-1$
@@ -427,11 +454,26 @@ public class DebugLaunchTool implements IMcpTool
     /**
      * Runs the EDT "update database before launch" step for a runtime-client launch.
      * Returns {@code null} on success, or an error message describing the failure.
+     *
+     * <p>Synthetic application ids — {@code attach:<configName>} and
+     * {@code launch:<configName>}, see
+     * {@link LaunchConfigUtils#isSyntheticApplicationId} — skip the preflight.
+     * They are minted by
+     * {@link LaunchConfigUtils#getApplicationIdFor(ILaunchConfiguration)} for
+     * configurations WITHOUT a persisted {@code ATTR_APPLICATION_ID} and cannot be
+     * resolved through {@link IApplicationManager}: feeding one into
+     * {@code updateApplicationIfNeeded} fails with "Application not found:
+     * launch:&lt;name&gt;" and would refuse a perfectly launchable configuration.
+     * (The original guard knew only the {@code attach:} prefix, so introducing the
+     * {@code launch:} fallback for UI-started-session tracking silently turned
+     * such by-name launches into errors — rv1 review FIND-1.) Skipping is safe:
+     * if the launch delegate still detects an out-of-date IB it shows its update
+     * modal, which the armed {@link LaunchUpdateDialogAutoConfirmer} presses.
      */
     private String updateDatabaseIfNeeded(String projectName, String applicationId)
     {
         if (applicationId == null || applicationId.isEmpty()
-            || applicationId.startsWith(LaunchConfigUtils.ATTACH_APP_ID_PREFIX))
+            || LaunchConfigUtils.isSyntheticApplicationId(applicationId))
         {
             return null;
         }
@@ -475,7 +517,8 @@ public class DebugLaunchTool implements IMcpTool
      * async lambda instead. Only the synchronous (headless, no UI thread) path can
      * still return an error message.
      *
-     * <p>The {@code config.launch(...)} call is wrapped in
+     * <p>When {@code autoConfirmUpdateDialog} is {@code true}, the
+     * {@code config.launch(...)} call is wrapped in
      * {@link LaunchUpdateDialogAutoConfirmer#arm()}/{@link LaunchUpdateDialogAutoConfirmer#disarm()}
      * as a belt-and-suspenders safeguard: even though the pre-launch update
      * ({@code updateApplicationIfNeeded}) normally leaves the IB {@code UPDATED} so
@@ -488,12 +531,24 @@ public class DebugLaunchTool implements IMcpTool
      * modal blocks, so the auto-press is dispatched by the modal's nested event loop;
      * the MCP worker has already returned, so the server is never hung on the modal.
      *
+     * <p>Callers pass {@code updateBeforeLaunch} for {@code autoConfirmUpdateDialog}:
+     * with {@code updateBeforeLaunch=false} the documented contract is that the
+     * platform "may then show that modal" — auto-pressing its default button would
+     * silently perform the very DB update the caller disabled, so the confirmer is
+     * NOT armed and the dialog is left for a human.
+     *
+     * <p>Package-private (not {@code private}) so the headless unit tests can
+     * exercise the synchronous fallback directly.
+     *
      * @return {@code null} when the launch was scheduled (or, in a headless test
      *         with no UI thread, completed) successfully; otherwise an error message.
      */
-    private String performLaunch(ILaunchConfiguration config)
+    String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog)
     {
-        Display display = Display.getDefault();
+        // Workbench-aware probe (rv1 review FIND-2): never creates a display, so
+        // a truly headless runtime takes the synchronous fallback below instead
+        // of queueing onto an event loop no thread ever pumps.
+        Display display = LaunchLifecycleUtils.workbenchDisplayOrNull();
         if (display != null && !display.isDisposed())
         {
             // Fire-and-forget on the UI thread: returns control to the MCP worker
@@ -503,7 +558,10 @@ public class DebugLaunchTool implements IMcpTool
                 // Auto-confirm EDT's blocking "Application update" modal for the
                 // duration of this single launch only. Manual EDT launches outside
                 // this window still prompt normally.
-                LaunchUpdateDialogAutoConfirmer.arm();
+                if (autoConfirmUpdateDialog)
+                {
+                    LaunchUpdateDialogAutoConfirmer.arm();
+                }
                 try
                 {
                     config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -514,13 +572,19 @@ public class DebugLaunchTool implements IMcpTool
                 }
                 finally
                 {
-                    LaunchUpdateDialogAutoConfirmer.disarm();
+                    if (autoConfirmUpdateDialog)
+                    {
+                        LaunchUpdateDialogAutoConfirmer.disarm();
+                    }
                 }
             });
             return null;
         }
         // No UI thread (headless tests): launch synchronously and surface errors.
-        LaunchUpdateDialogAutoConfirmer.arm();
+        if (autoConfirmUpdateDialog)
+        {
+            LaunchUpdateDialogAutoConfirmer.arm();
+        }
         try
         {
             config.launch(ILaunchManager.DEBUG_MODE, null);
@@ -533,7 +597,10 @@ public class DebugLaunchTool implements IMcpTool
         }
         finally
         {
-            LaunchUpdateDialogAutoConfirmer.disarm();
+            if (autoConfirmUpdateDialog)
+            {
+                LaunchUpdateDialogAutoConfirmer.disarm();
+            }
         }
     }
 

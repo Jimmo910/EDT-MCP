@@ -8,12 +8,19 @@ package com.ditrix.edt.mcp.server.tools.impl;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.debug.core.ILaunchConfiguration;
+import org.eclipse.debug.core.ILaunchManager;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 
@@ -110,6 +117,39 @@ public class DebugLaunchToolTest
     }
 
     @Test
+    public void testUpdateBeforeLaunchFalseContractIsCoherent()
+    {
+        // rv1 review: with updateBeforeLaunch=false the DB update is skipped AND
+        // the launch delegate's modal is NOT auto-confirmed (auto-pressing "Update
+        // then run" would perform the very update the caller disabled). Both
+        // metadata halves must keep documenting that the platform may then show
+        // the modal, so the contract can't silently drift in one place only.
+        DebugLaunchTool tool = new DebugLaunchTool();
+        String schema = tool.getInputSchema();
+        String guide = tool.getGuide();
+        assertNotNull(schema);
+        assertNotNull(guide);
+        assertTrue("schema must document that updateBeforeLaunch=false may show the modal",
+            schema.contains("may then show that modal")); //$NON-NLS-1$
+        assertTrue("guide must document the updateBeforeLaunch=false contract",
+            guide.contains("updateBeforeLaunch=false")); //$NON-NLS-1$
+        assertTrue("guide must document that updateBeforeLaunch=false may show the modal",
+            guide.contains("may then show that modal")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsRunModeAlreadyRunningGuard()
+    {
+        // rv1 review: the already-running guard covers RUN-mode launches (no debug
+        // target) in BOTH selection modes (by-name and project+application); the
+        // guide documents that promise — keep it ratcheted.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the RUN-mode already-running guard",
+            guide.contains("RUN mode")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testGuideHasMigratedDetail()
     {
         // The exhaustive detail (Attach mode, the alreadyRunning short-circuit and
@@ -142,5 +182,54 @@ public class DebugLaunchToolTest
         params.put("projectName", "MyProject"); //$NON-NLS-1$ //$NON-NLS-2$
         String result = new DebugLaunchTool().execute(params);
         assertTrue(result.contains("applicationId is required")); //$NON-NLS-1$
+    }
+
+    // ==================== performLaunch headless routing (rv1 review FIND-2) ====================
+
+    @Test
+    public void testPerformLaunchHeadlessExecutesSynchronously() throws Exception
+    {
+        // rv1 review FIND-2: the display probe must NOT create a display.
+        // Display.getDefault() never returns null (per the SWT contract it creates
+        // a display, making the calling thread the UI thread), so the documented
+        // headless fallback was dead code and asyncExec queued the launch onto an
+        // event loop no thread pumps — the launch silently never ran while the
+        // tool had already reported status:"launching". With the workbench-aware
+        // probe, this headless test JVM takes the SYNCHRONOUS path: the launch
+        // really executes on the calling thread.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        String error = new DebugLaunchTool().performLaunch(config, false);
+        assertNull("successful headless launch must return null", error);
+        Mockito.verify(config).launch(ILaunchManager.DEBUG_MODE, null);
+    }
+
+    @Test
+    public void testPerformLaunchHeadlessSurfacesLaunchError() throws Exception
+    {
+        // The synchronous (headless) path is the only one that can still report a
+        // launch failure to the caller — keep that contract real, not dead code.
+        ILaunchConfiguration config = Mockito.mock(ILaunchConfiguration.class);
+        Mockito.when(config.launch(ILaunchManager.DEBUG_MODE, null)).thenThrow(
+            new CoreException(new Status(IStatus.ERROR, "test", "launch refused"))); //$NON-NLS-1$ //$NON-NLS-2$
+        String error = new DebugLaunchTool().performLaunch(config, false);
+        assertNotNull("headless launch failure must be surfaced synchronously", error);
+        assertTrue(error.contains("launch refused")); //$NON-NLS-1$
+    }
+
+    // ==================== updateBeforeLaunch synthetic-id contract (rv1 review FIND-1) ====================
+
+    @Test
+    public void testGuideDocumentsSyntheticIdPreflightSkip()
+    {
+        // rv1 review FIND-1: a config without a persisted ATTR_APPLICATION_ID is
+        // tracked under a synthetic 'launch:<configName>' id, which cannot be
+        // resolved through IApplicationManager. The DB-update preflight must SKIP
+        // such ids (isSyntheticApplicationId) instead of failing the launch with
+        // 'Application not found: launch:<name>'. Ratchet the guide half of that
+        // contract so the documented behavior can't silently drift.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document the synthetic-id preflight skip",
+            guide.contains("launch:<configName>")); //$NON-NLS-1$
     }
 }
