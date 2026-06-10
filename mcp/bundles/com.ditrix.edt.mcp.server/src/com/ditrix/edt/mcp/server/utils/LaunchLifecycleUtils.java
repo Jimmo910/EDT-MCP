@@ -27,6 +27,7 @@ import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.swt.SWTError;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
@@ -1303,6 +1304,41 @@ public final class LaunchLifecycleUtils
     {
         return ToolParameterSettings.getInstance()
             .getParameterValue("terminate_launch", "timeoutSeconds", 10); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Returns the workbench {@link Display} WITHOUT creating one, or {@code null}
+     * in a headless runtime (no workbench).
+     *
+     * <p>{@code Display.getDefault()} is the wrong probe for "is there a UI?":
+     * per the SWT contract it CREATES a display owned by the calling thread when
+     * none exists, so it never returns {@code null}. On a headless MCP worker
+     * that stray display is never pumped — an {@code asyncExec} queued on it
+     * silently never runs (rv1 review FIND-2, {@code DebugLaunchTool.performLaunch}),
+     * and a later {@code syncExec} against it from a different thread blocks
+     * forever (rv1 follow-up, {@link LaunchUpdateDialogAutoConfirmer}). The
+     * workbench probe hands out only a display that a real UI thread is already
+     * dispatching.
+     *
+     * <p>Shared by {@code DebugLaunchTool} and
+     * {@link LaunchUpdateDialogAutoConfirmer} so the probe idiom lives in
+     * exactly one place.
+     */
+    public static Display workbenchDisplayOrNull()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+        {
+            return null;
+        }
+        try
+        {
+            return PlatformUI.getWorkbench().getDisplay();
+        }
+        catch (IllegalStateException e)
+        {
+            // Workbench shut down between the check and the call (shutdown race).
+            return null;
+        }
     }
 
     /**

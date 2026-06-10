@@ -18,7 +18,6 @@ import org.eclipse.debug.core.ILaunchConfigurationType;
 import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.PlatformUI;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -546,7 +545,10 @@ public class DebugLaunchTool implements IMcpTool
      */
     String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog)
     {
-        Display display = workbenchDisplayOrNull();
+        // Workbench-aware probe (rv1 review FIND-2): never creates a display, so
+        // a truly headless runtime takes the synchronous fallback below instead
+        // of queueing onto an event loop no thread ever pumps.
+        Display display = LaunchLifecycleUtils.workbenchDisplayOrNull();
         if (display != null && !display.isDisposed())
         {
             // Fire-and-forget on the UI thread: returns control to the MCP worker
@@ -599,36 +601,6 @@ public class DebugLaunchTool implements IMcpTool
             {
                 LaunchUpdateDialogAutoConfirmer.disarm();
             }
-        }
-    }
-
-    /**
-     * Returns the workbench {@link Display} WITHOUT creating one, or {@code null}
-     * in a headless runtime.
-     *
-     * <p>{@code Display.getDefault()} (the previous probe) is wrong here: per the
-     * SWT contract it CREATES a display on the calling thread when none exists, so
-     * it never returns {@code null}. That made the synchronous headless fallback in
-     * {@link #performLaunch} dead code, and in a truly headless runtime
-     * {@code asyncExec} queued the launch onto an event loop no thread ever pumps —
-     * the launch silently never executed while the tool had already returned
-     * {@code status: "launching"} (rv1 review FIND-2). The workbench-aware probe
-     * routes to {@code asyncExec} only when a real UI thread exists to dispatch it.
-     */
-    private static Display workbenchDisplayOrNull()
-    {
-        if (!PlatformUI.isWorkbenchRunning())
-        {
-            return null;
-        }
-        try
-        {
-            return PlatformUI.getWorkbench().getDisplay();
-        }
-        catch (IllegalStateException e)
-        {
-            // Workbench shut down between the check and the call (shutdown race).
-            return null;
         }
     }
 

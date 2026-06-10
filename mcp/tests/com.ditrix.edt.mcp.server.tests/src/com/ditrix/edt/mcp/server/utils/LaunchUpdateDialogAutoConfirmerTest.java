@@ -8,8 +8,12 @@ package com.ditrix.edt.mcp.server.utils;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.eclipse.swt.widgets.Display;
 import org.junit.Test;
 
 /**
@@ -19,7 +23,8 @@ import org.junit.Test;
  * <p>The SWT plumbing ({@code arm}/{@code disarm} + the {@code Display} filter)
  * is exercised only live (it needs a real workbench); here we lock down the
  * exact-match contract so the filter never fires on an unrelated dialog, plus
- * the no-op safety of an unbalanced {@code disarm}.
+ * the no-op safety of an unbalanced {@code disarm} and of {@code arm} in a
+ * headless (no-workbench) runtime.
  *
  * <p>EDT ships the modal title in two locales (English / Russian); both MUST
  * match, because the English-only match silently failed on a Russian-locale
@@ -111,5 +116,49 @@ public class LaunchUpdateDialogAutoConfirmerTest
         // with no filter installed it returns before any UI access.
         LaunchUpdateDialogAutoConfirmer.disarm();
         LaunchUpdateDialogAutoConfirmer.disarm();
+    }
+
+    @Test
+    public void testArmWithoutWorkbenchIsNoOpAndCreatesNoDisplay() throws Exception
+    {
+        // rv1 review follow-up: the display probe must NEVER create a display.
+        // The previous Display.getDefault() probe either CREATED a display owned
+        // by the calling (non-UI) thread on the first arm() of the headless
+        // sync-launch path, or — when another thread already owned the default
+        // display — blocked forever in syncExec against an event loop nobody
+        // pumps. No workbench runs in this harness, so arm() must be a complete
+        // no-op, and the paired disarm() must stay a no-op too.
+        //
+        // The check runs on a FRESH thread to stay order-independent: other
+        // tests in this suite exercise production code that calls
+        // Display.getDefault() on the shared surefire thread, so that thread
+        // may legitimately own a display by the time this test runs. On a new
+        // thread both old failure modes are observable: a created display shows
+        // up via Display.getCurrent(), and a blocking syncExec trips the join
+        // timeout.
+        AtomicReference<Display> created = new AtomicReference<>();
+        Thread worker = new Thread(() -> {
+            LaunchUpdateDialogAutoConfirmer.arm();
+            try
+            {
+                created.set(Display.getCurrent());
+            }
+            catch (LinkageError e)
+            {
+                // SWT natives are not loadable in this environment — then no
+                // display can exist at all and the contract trivially holds.
+            }
+            finally
+            {
+                LaunchUpdateDialogAutoConfirmer.disarm();
+            }
+        }, "confirmer-headless-arm-probe"); //$NON-NLS-1$
+        // A regression that blocks inside arm() must fail the test, not wedge the JVM.
+        worker.setDaemon(true);
+        worker.start();
+        worker.join(10_000);
+        assertFalse("arm() must return promptly, not syncExec onto a never-pumped display",
+            worker.isAlive());
+        assertNull("arm() must not create a display on the calling thread", created.get());
     }
 }

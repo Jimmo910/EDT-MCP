@@ -12,7 +12,6 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.SWTError;
 import org.eclipse.swt.SWTException;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Display;
@@ -68,8 +67,9 @@ import com.ditrix.edt.mcp.server.Activator;
  *   <li>Only the exact "Application update" title — in either of EDT's two
  *       shipped locales (English / Russian) — is matched, so unrelated dialogs
  *       that happen to appear during the window are left untouched.</li>
- *   <li>Headless (no SWT {@link Display}) is a no-op — no dialog can appear
- *       there anyway.</li>
+ *   <li>Headless (no running workbench, hence no pumped {@link Display}) is a
+ *       no-op — no dialog can appear there anyway, and the probe never CREATES
+ *       a display (see {@link #safeDisplay()}).</li>
  * </ul>
  *
  * <h2>Locale</h2>
@@ -346,20 +346,20 @@ public final class LaunchUpdateDialogAutoConfirmer
     }
 
     /**
-     * Returns the default {@link Display} or {@code null} when SWT cannot be
-     * initialised (headless CI / no UI), mirroring
-     * {@code LaunchLifecycleUtils.grabActiveShell}.
+     * Returns the workbench {@link Display} or {@code null} when no workbench is
+     * running (headless CI / EDT CLI), via
+     * {@link LaunchLifecycleUtils#workbenchDisplayOrNull()} — the probe NEVER
+     * creates a display.
+     *
+     * <p>The previous {@code Display.getDefault()} probe did exactly that on the
+     * headless synchronous launch path: the first {@link #arm()} created a stray
+     * display owned by its MCP worker thread, and a later {@code arm()} /
+     * {@code disarm()} from a different worker would then {@code syncExec} onto
+     * that never-pumped display and hang forever (rv1 review follow-up).
      */
     private static Display safeDisplay()
     {
-        try
-        {
-            Display display = Display.getDefault();
-            return display != null && !display.isDisposed() ? display : null;
-        }
-        catch (SWTError | UnsatisfiedLinkError e)
-        {
-            return null;
-        }
+        Display display = LaunchLifecycleUtils.workbenchDisplayOrNull();
+        return display != null && !display.isDisposed() ? display : null;
     }
 }
