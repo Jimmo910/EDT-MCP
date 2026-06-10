@@ -10,8 +10,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import org.eclipse.debug.core.model.IDebugTarget;
+import org.eclipse.debug.core.model.IThread;
 import org.junit.Test;
 
 /**
@@ -109,5 +114,113 @@ public class DebugServerTargetSupportTest
         // Headless: no IRuntimeDebugClientTargetManager OSGi service is registered, so
         // listDebugTargets() yields nothing and the guard resolves to null (never throws).
         assertNull(DebugServerTargetSupport.findRuntimeClientDebugTarget("Proj", "app")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // === findFirstLiveThread — the live-thread discriminator (D5b/20074) ===
+    //
+    // findRuntimeClientDebugTarget itself can't be exercised with a mock target headless
+    // (it enumerates the IRuntimeDebugClientTargetManager OSGi service, absent here), but
+    // findFirstLiveThread IS the discriminator it now requires: a thin-CLIENT debug
+    // session has ≥1 non-terminated thread; a standalone-SERVER / profiling target has 0.
+    // These mock-target tests pin exactly that "server target no longer matches, client
+    // target still matches" behavior the regression fix hinges on.
+
+    @Test
+    public void testFindFirstLiveThreadNullTargetReturnsNull()
+    {
+        assertNull(DebugServerTargetSupport.findFirstLiveThread(null));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadTerminatedTargetReturnsNull()
+    {
+        // A terminated target is never a duplicate, even if it still reports threads.
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(true);
+        assertNull(DebugServerTargetSupport.findFirstLiveThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadServerTargetWithNoThreadsReturnsNull() throws Exception
+    {
+        // THE SERVER CASE (Bitrix 20074): a standalone-server / profiling target shares
+        // the client's app id + project but has ZERO threads. It must NOT be treated as a
+        // live client session — so findRuntimeClientDebugTarget will return null for it and
+        // the client launch proceeds instead of being wrongly short-circuited.
+        IDebugTarget server = mock(IDebugTarget.class);
+        when(server.isTerminated()).thenReturn(false);
+        when(server.getThreads()).thenReturn(new IThread[0]);
+        assertNull(DebugServerTargetSupport.findFirstLiveThread(server));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadServerTargetWithOnlyTerminatedThreadsReturnsNull() throws Exception
+    {
+        // A target whose every thread is terminated is equally NOT a live session —
+        // mirrors the delegate's filter(!isTerminated) over the thread list.
+        IThread dead = mock(IThread.class);
+        when(dead.isTerminated()).thenReturn(true);
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenReturn(new IThread[] {dead});
+        assertNull(DebugServerTargetSupport.findFirstLiveThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadClientTargetReturnsLiveThread() throws Exception
+    {
+        // THE CLIENT CASE: a thin-client debug session has ≥1 non-terminated thread; that
+        // thread IS returned, so findRuntimeClientDebugTarget would match it (a real
+        // already-running client correctly short-circuits / is restarted).
+        IThread live = mock(IThread.class);
+        when(live.isTerminated()).thenReturn(false);
+        IDebugTarget client = mock(IDebugTarget.class);
+        when(client.isTerminated()).thenReturn(false);
+        when(client.getThreads()).thenReturn(new IThread[] {live});
+        assertSame(live, DebugServerTargetSupport.findFirstLiveThread(client));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadSkipsTerminatedAndReturnsFirstLive() throws Exception
+    {
+        // A live thread among terminated ones (e.g. a worker that already exited) still
+        // makes the target a live session — the first non-terminated thread is returned.
+        IThread dead = mock(IThread.class);
+        when(dead.isTerminated()).thenReturn(true);
+        IThread live = mock(IThread.class);
+        when(live.isTerminated()).thenReturn(false);
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenReturn(new IThread[] {dead, live});
+        assertSame(live, DebugServerTargetSupport.findFirstLiveThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadDoesNotRequireSuspension() throws Exception
+    {
+        // Unlike findSuspendedThread, liveness — NOT suspension — is the discriminator:
+        // a running (not suspended) client thread still counts as a live session.
+        IThread running = mock(IThread.class);
+        when(running.isTerminated()).thenReturn(false);
+        when(running.isSuspended()).thenReturn(false);
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenReturn(new IThread[] {running});
+        assertSame(running, DebugServerTargetSupport.findFirstLiveThread(target));
+        // ...and the suspension-requiring finder returns null for the same target.
+        assertNull(DebugServerTargetSupport.findSuspendedThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveThreadGetThreadsThrowsReturnsNull() throws Exception
+    {
+        // Best-effort: a target whose getThreads() throws (model mid-teardown) yields
+        // null, never an exception onto the caller.
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenThrow(new org.eclipse.debug.core.DebugException(
+            new org.eclipse.core.runtime.Status(org.eclipse.core.runtime.IStatus.ERROR,
+                "test", "threads unavailable"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(DebugServerTargetSupport.findFirstLiveThread(target));
     }
 }

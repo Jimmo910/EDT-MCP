@@ -283,6 +283,105 @@ public class LaunchUpdateDialogAutoConfirmerTest
             LaunchUpdateDialogAutoConfirmer.shouldAutoConfirm(true, true, null, null));
     }
 
+    // === D5b: 1003 modal presses "Keep existing and start new" (LAUNCH_ANYWAY), not default ===
+
+    /**
+     * Russian label of the 1003 "keep existing and start new" button
+     * ("Сохранить старую и запустить новую"), {@code \\uXXXX}-escaped exactly like the
+     * production constant so this test compiles identically whatever encoding the Tycho
+     * compiler picks for the test bundle.
+     */
+    private static final String RUSSIAN_KEEP_BUTTON =
+        "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0441\u0442\u0430\u0440\u0443\u044e "
+            + "\u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u0443\u044e";
+
+    @Test
+    public void testKeepButtonEnglishLabelMatches()
+    {
+        // The 1003 modal's LAUNCH_ANYWAY button must be recognized by its English label
+        // so it is pressed instead of the default "stop existing" button (Bitrix 20074).
+        assertTrue("the English 'keep existing and start new' label must match",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel("Keep existing and start new"));
+    }
+
+    @Test
+    public void testKeepButtonRussianLabelMatches()
+    {
+        // The stand that hit Bitrix 20074 runs a Russian EDT — its localized
+        // LAUNCH_ANYWAY button label must match, or the 1003 safety net would press the
+        // default "stop existing" button and kill the server/other client.
+        assertTrue("the Russian 'keep existing and start new' label must match",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel(RUSSIAN_KEEP_BUTTON));
+    }
+
+    @Test
+    public void testKeepButtonRussianConstantDecodesCorrectly()
+    {
+        // Guard against a typo in the escaped production constant: it must equal the
+        // exact label EDT renders, and we pin the decoded length so a wrong escape can't
+        // silently still pass.
+        assertEquals("the Russian keep-button constant must equal the expected string",
+            RUSSIAN_KEEP_BUTTON, LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_KEEP_BUTTON_RU);
+        assertEquals("the Russian keep-button label is 'Сохранить старую и запустить новую' (34 chars)",
+            34, LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_KEEP_BUTTON_RU.length());
+    }
+
+    @Test
+    public void testKeepButtonStripsMnemonicMarker()
+    {
+        // JFace may render a '&' mnemonic in the button label; the matcher strips it
+        // before the exact compare so the button is still recognized.
+        assertTrue("a mnemonic '&' in the label must not defeat the match",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel("&Keep existing and start new"));
+    }
+
+    @Test
+    public void testKeepButtonDefaultStopLabelDoesNotMatch()
+    {
+        // CRITICAL: the DEFAULT (index 0) button "Stop existing and start new" /
+        // "Завершить старую и запустить новую" (RESTART_APPLICATION) must NOT be
+        // recognized as the keep-button — pressing it would terminate the existing
+        // session, the exact 20074 regression.
+        assertFalse("the default 'stop existing' button must NOT match the keep-button",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel("Stop existing and start new"));
+        assertFalse("the Russian 'stop existing' button must NOT match the keep-button",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel(
+                "\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u0441\u0442\u0430\u0440\u0443\u044e "
+                    + "\u0438 \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u043d\u043e\u0432\u0443\u044e"));
+    }
+
+    @Test
+    public void testKeepButtonNullAndUnrelatedLabelsDoNotMatch()
+    {
+        assertFalse("a null label must not match", LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel(null));
+        assertFalse("an empty label must not match", LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel(""));
+        assertFalse("an unrelated button label must not match",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel("Cancel"));
+        assertFalse("the update modal's button must not match the keep-button",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel("Update then run"));
+    }
+
+    @Test
+    public void testKeepButtonSetHasBothLocales()
+    {
+        assertTrue("the keep-button set must contain the English label",
+            LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_KEEP_BUTTONS
+                .contains("Keep existing and start new"));
+        assertTrue("the keep-button set must contain the Russian label",
+            LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_KEEP_BUTTONS.contains(RUSSIAN_KEEP_BUTTON));
+    }
+
+    @Test
+    public void testKeepButtonAndBodyMatchersDisjoint()
+    {
+        // The keep-button LABEL matcher and the 1003 BODY matcher are distinct concerns:
+        // a button label is not a message body, and vice versa.
+        assertFalse("a keep-button label must not be matched as a 1003 body",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody("Keep existing and start new"));
+        assertFalse("a 1003 body must not be matched as a keep-button label",
+            LaunchUpdateDialogAutoConfirmer.isKeepExistingLabel(DEBUG_SESSION_BODY));
+    }
+
     @Test
     public void testUnbalancedDisarmIsNoOp()
     {
