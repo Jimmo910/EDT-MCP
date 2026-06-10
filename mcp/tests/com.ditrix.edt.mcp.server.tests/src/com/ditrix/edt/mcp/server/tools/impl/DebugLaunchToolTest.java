@@ -12,6 +12,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -20,7 +23,9 @@ import static org.mockito.Mockito.when;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
@@ -35,6 +40,11 @@ import org.mockito.Mockito;
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool.AlreadyRunningContext;
 import com.ditrix.edt.mcp.server.tools.impl.DebugLaunchTool.ExistingClientSession;
+import com.e1c.g5.dt.applications.ApplicationUpdateState;
+import com.e1c.g5.dt.applications.ApplicationUpdateType;
+import com.e1c.g5.dt.applications.ExecutionContext;
+import com.e1c.g5.dt.applications.IApplication;
+import com.e1c.g5.dt.applications.IApplicationManager;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -722,5 +732,98 @@ public class DebugLaunchToolTest
         assertNotNull(guide);
         assertTrue("guide must document restartIfRunning terminate+relaunch",
             guide.contains("terminate the existing CLIENT session")); //$NON-NLS-1$
+    }
+
+    // ============ D6: server-application pre-update deferred to the launch delegate (Bitrix 20091) ============
+    //
+    // IApplicationManager.update on a ServerApplication starts the standalone server in
+    // RUN mode and caches a live designer-agent connection (DesignerSessionPool); the
+    // launch delegate then needs the server in DEBUG mode, and the restart's teardown of
+    // that connection wedges the launch. The gate (runPreLaunchUpdateStep) therefore
+    // defers the update for ServerApplication.* ids to the delegate's coordinated path
+    // (auto-confirmed by the armed update confirmer), while non-server (file /
+    // client-server infobase) applications keep the programmatic pre-update exactly as
+    // before, and updateBeforeLaunch=false keeps skipping it for everyone.
+
+    private static IProject mockOpenProject()
+    {
+        IProject project = mock(IProject.class);
+        when(project.exists()).thenReturn(true);
+        when(project.isOpen()).thenReturn(true);
+        when(project.getName()).thenReturn("MyProject"); //$NON-NLS-1$
+        return project;
+    }
+
+    @Test
+    public void testPreLaunchUpdateStepServerApplicationSkipsProgrammaticUpdate() throws Exception
+    {
+        // THE D6 GATE: a ServerApplication.* id with updateBeforeLaunch=true must NOT be
+        // updated out-of-band — the step returns null (proceed to performLaunch, where
+        // the armed confirmer covers the delegate's coordinated update dialog) WITHOUT
+        // touching the application manager at all.
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        String error = DebugLaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
+            "ServerApplication.MyServer", mgr, true); //$NON-NLS-1$
+        assertNull("server application must proceed without a programmatic update", error);
+        verify(mgr, never()).update(any(), any(), any(), any());
+        verify(mgr, never()).getUpdateState(any());
+        verify(mgr, never()).getApplication(any(IProject.class), anyString());
+    }
+
+    @Test
+    public void testPreLaunchUpdateStepNonServerApplicationStillUpdates() throws Exception
+    {
+        // Non-server (file / client-server infobase) application: the programmatic
+        // pre-update KEEPS running exactly as before — the hang is server-app-specific,
+        // ordinary infobase apps don't start a standalone server. A stale IB is updated
+        // and the step proceeds on success.
+        IProject project = mockOpenProject();
+        IApplication app = mock(IApplication.class);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        when(mgr.getApplication(any(IProject.class), eq("infobase-app-uuid"))) //$NON-NLS-1$
+            .thenReturn(Optional.of(app));
+        when(mgr.getUpdateState(app)).thenReturn(ApplicationUpdateState.INCREMENTAL_UPDATE_REQUIRED);
+        when(mgr.update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
+            any(ExecutionContext.class), any())).thenReturn(ApplicationUpdateState.UPDATED);
+
+        String error = DebugLaunchTool.runPreLaunchUpdateStep(project,
+            "infobase-app-uuid", mgr, true); //$NON-NLS-1$
+        assertNull("a successful non-server update must proceed", error);
+        verify(mgr, times(1)).update(eq(app), eq(ApplicationUpdateType.INCREMENTAL),
+            any(ExecutionContext.class), any());
+    }
+
+    @Test
+    public void testPreLaunchUpdateStepOptOutSkipsUpdateForServerAndNonServer() throws Exception
+    {
+        // updateBeforeLaunch=false semantics unchanged (the D4 opt-out): no programmatic
+        // update for ANY application kind — server or not — and the step never touches
+        // the application manager (performLaunch then leaves the update confirmer
+        // unarmed, so the platform's modal — if any — is a human's).
+        IApplicationManager mgr = mock(IApplicationManager.class);
+        assertNull(DebugLaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
+            "ServerApplication.MyServer", mgr, false)); //$NON-NLS-1$
+        assertNull(DebugLaunchTool.runPreLaunchUpdateStep(mockOpenProject(),
+            "infobase-app-uuid", mgr, false)); //$NON-NLS-1$
+        verify(mgr, never()).update(any(), any(), any(), any());
+        verify(mgr, never()).getUpdateState(any());
+        verify(mgr, never()).getApplication(any(IProject.class), anyString());
+    }
+
+    @Test
+    public void testGuideDocumentsServerApplicationDeferredUpdate()
+    {
+        // D6 ratchet: the guide must document that on standalone-server applications the
+        // DB update is performed by EDT's coordinated launch flow (auto-confirmed), not
+        // by an out-of-band pre-update (which started the server in RUN mode and wedged
+        // the debug restart — Bitrix 20091).
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must name the ServerApplication. id prefix gate",
+            guide.contains("ServerApplication.")); //$NON-NLS-1$
+        assertTrue("guide must say server apps are not pre-updated out-of-band",
+            guide.contains("does NOT pre-update such applications out-of-band")); //$NON-NLS-1$
+        assertTrue("guide must document the coordinated launch flow performing the update",
+            guide.contains("coordinated launch flow")); //$NON-NLS-1$
     }
 }

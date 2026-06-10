@@ -365,11 +365,13 @@ public class DebugLaunchTool implements IMcpTool
             // shared LaunchLifecycleUtils.updateApplicationIfNeeded so debug_launch
             // analyses "does the IB need updating?" the same way the YAXUnit tools
             // do: skip on UPDATED, wait on BEING_UPDATED, incremental-update otherwise.
-            if (updateBeforeLaunch && appManager != null && application != null)
+            // For a STANDALONE-SERVER application the programmatic update is SKIPPED
+            // and deferred to the launch delegate's coordinated path instead (D6,
+            // Bitrix 20091) — see runPreLaunchUpdateStep.
+            if (appManager != null && application != null)
             {
-                String updateError = LaunchLifecycleUtils
-                    .updateApplicationIfNeeded(project, applicationId, appManager)
-                    .orElse(null);
+                String updateError = runPreLaunchUpdateStep(project, applicationId,
+                    appManager, updateBeforeLaunch);
                 if (updateError != null)
                 {
                     return ToolResult.error(updateError).toJson();
@@ -469,6 +471,18 @@ public class DebugLaunchTool implements IMcpTool
      * such by-name launches into errors — rv1 review FIND-1.) Skipping is safe:
      * if the launch delegate still detects an out-of-date IB it shows its update
      * modal, which the armed {@link LaunchUpdateDialogAutoConfirmer} presses.
+     *
+     * <p>For the {@code ServerApplication.*} form the skip is not merely an
+     * "unresolvable id" technicality — it is the INTENDED behavior (D6, Bitrix
+     * 20091): a standalone-server application must never be DB-updated out-of-band,
+     * because {@code IApplicationManager.update} on it starts the standalone server
+     * in RUN mode and holds a cached designer-agent connection that wedges the
+     * subsequent debug restart. The update is deferred to the launch delegate's
+     * coordinated path (server prepared in debug mode FIRST, then updated), whose
+     * dialog the armed confirmer auto-presses — see
+     * {@link DebugServerTargetSupport#isServerApplicationId} and
+     * {@link #runPreLaunchUpdateStep}, the same gate on the
+     * project+applicationId path.
      */
     private String updateDatabaseIfNeeded(String projectName, String applicationId)
     {
@@ -490,6 +504,57 @@ public class DebugLaunchTool implements IMcpTool
         }
         // Shared update analysis: skip on UPDATED, wait on BEING_UPDATED, otherwise
         // incremental-update — same path as the YAXUnit auto-chain.
+        return LaunchLifecycleUtils.updateApplicationIfNeeded(project, applicationId, appManager)
+            .orElse(null);
+    }
+
+    /**
+     * The pre-launch DB-update step of the project+applicationId path, with the D6
+     * server-application gate (Bitrix 20091). Returns {@code null} to proceed with
+     * the launch, or an error message that aborts the call.
+     *
+     * <ul>
+     *   <li>{@code updateBeforeLaunch=false} — documented opt-out: no programmatic
+     *       update is run (and {@link #performLaunch} leaves the update confirmer
+     *       unarmed, so the platform's update modal — if any — is a human's).</li>
+     *   <li>{@code ServerApplication.*} id ({@link
+     *       DebugServerTargetSupport#isServerApplicationId}) — the programmatic
+     *       update is SKIPPED and deferred to the launch delegate's coordinated
+     *       path. Updating a standalone-server application out-of-band starts the
+     *       server in RUN mode and caches a live designer-agent connection
+     *       (DesignerSessionPool); the launch delegate then restarts the server in
+     *       DEBUG mode and the connection teardown wedges the launch. EDT's native
+     *       order (prepare the server in debug mode FIRST, then update) has no such
+     *       restart; its "Application update" dialog — shown only when the IB is
+     *       stale — is auto-pressed by the confirmer {@link #performLaunch} arms
+     *       exactly when {@code updateBeforeLaunch=true}. Trade-off: the synchronous
+     *       "stale IB" refusal disappears for server apps (the update happens
+     *       asynchronously inside the launch); failures surface via
+     *       {@code debug_status} / the EDT log — matching EDT-native UX.</li>
+     *   <li>Any other (file / client-server infobase) application — the programmatic
+     *       pre-update runs exactly as before through
+     *       {@link LaunchLifecycleUtils#updateApplicationIfNeeded}: skip on UPDATED,
+     *       wait on BEING_UPDATED, incremental-update otherwise; a stale IB still
+     *       refuses synchronously.</li>
+     * </ul>
+     *
+     * <p>Package-private (static, mock-friendly) so the headless unit tests can
+     * assert the gate decision without a live workbench.
+     */
+    static String runPreLaunchUpdateStep(IProject project, String applicationId,
+        IApplicationManager appManager, boolean updateBeforeLaunch)
+    {
+        if (!updateBeforeLaunch)
+        {
+            return null;
+        }
+        if (DebugServerTargetSupport.isServerApplicationId(applicationId))
+        {
+            Activator.logInfo("debug_launch: server application: deferring DB update to the " //$NON-NLS-1$
+                + "launch delegate's coordinated path (auto-confirmed): applicationId=" //$NON-NLS-1$
+                + applicationId);
+            return null;
+        }
         return LaunchLifecycleUtils.updateApplicationIfNeeded(project, applicationId, appManager)
             .orElse(null);
     }
