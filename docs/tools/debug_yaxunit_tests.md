@@ -12,21 +12,22 @@ Deprecated alias for run_yaxunit_tests with debug=true. Launches YAXUnit tests i
 | modules | — | string | Comma-separated module names to filter tests. |
 | tests | — | string | Comma-separated test names as Module.Method (recommended: pin to one test for a predictable cycle). |
 | updateBeforeLaunch | — | boolean | Default true: terminate any live client and run a silent DB update first so no modal 'Update database?' dialog blocks the call; false keeps legacy delegate behaviour. |
+| updateScope | — | string | Which projects to rebuild+update before the run: 'all' (configuration + dependent extensions, default), 'configuration', or 'extension:<ProjectName>' (comma-separate several). Forces a derived-data recompute so a freshly edited extension's .cfe is regenerated and loaded into the infobase before the run. Unknown extension names fail the call (the error lists the available names). Only applies when updateBeforeLaunch=true. |
 
 ## Guide
-# debug_yaxunit_tests (deprecated)
-
-**Deprecated alias.** Use `run_yaxunit_tests` with `debug=true` — identical behaviour. This tool simply forwards its arguments to `run_yaxunit_tests(debug=true)`.
-
-Launches YAXUnit tests in **DEBUG mode** so that breakpoints set via `set_breakpoint` trip when the test executes the code under inspection. It does NOT poll for `junit.xml`: after the launch is queued it returns a Markdown launch handle and you call `wait_for_break` next.
-
-## The full debug cycle
-```
-set_breakpoint -> run_yaxunit_tests(debug=true) -> wait_for_break
-  -> get_variables / evaluate_expression / step -> resume
-```
-
-## Parameter details
+# debug_yaxunit_tests (deprecated)
+
+**Deprecated alias.** Use `run_yaxunit_tests` with `debug=true` — identical behaviour. This tool simply forwards its arguments to `run_yaxunit_tests(debug=true)`.
+
+Launches YAXUnit tests in **DEBUG mode** so that breakpoints set via `set_breakpoint` trip when the test executes the code under inspection. It does NOT poll for `junit.xml`: after the launch is queued it returns a Markdown launch handle and you call `wait_for_break` next.
+
+## The full debug cycle
+```
+set_breakpoint -> run_yaxunit_tests(debug=true) -> wait_for_break
+  -> get_variables / evaluate_expression / step -> resume
+```
+
+## Parameter details
 Same as `run_yaxunit_tests` (minus `timeout`, which DEBUG mode ignores): identify the launch by `launchConfigurationName`, or by `projectName` + `applicationId`; filter with `extensions` / `modules` / `tests` (pin to ONE test for a predictable cycle); `updateBeforeLaunch` (default true) silences the modal update dialog. See `get_tool_guide('run_yaxunit_tests')` for the full reference.
 
 ---

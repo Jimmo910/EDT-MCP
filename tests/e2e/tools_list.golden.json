@@ -270,7 +270,7 @@
           "type": "string"
         },
         "updateBeforeLaunch": {
-          "description": "Update the database before launching. Default true; ignored for Attach.",
+          "description": "Default true: silently apply the configuration->DB update before launching so no 'Update database?' modal blocks the call (even on a Russian-locale EDT the dialog is auto-confirmed); false skips the update and the platform may then show that modal. Ignored for Attach.",
           "type": "boolean"
         }
       },
@@ -312,6 +312,10 @@
           "description": "EDT project name associated with the launch",
           "type": "string"
         },
+        "status": {
+          "description": "\"launching\" when the launch was dispatched asynchronously and is still starting; absent on the alreadyRunning short-circuit. Poll debug_status for readiness.",
+          "type": "string"
+        },
         "success": {
           "description": "Whether the operation succeeded",
           "type": "boolean"
@@ -329,7 +333,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Report active debug launches: applicationId (real or synthetic 'attach:<name>'), launch configuration name/type, mode (debug/run), whether the target is currently suspended, thread count, and the line of the top suspended frame. Optionally filter by applicationId.",
+    "description": "Report active debug sessions: applicationId (real or synthetic 'attach:<name>' / 'launch:<name>'), launch configuration name/type, mode (debug/run), whether the target is currently suspended, thread count, and the line of the top suspended frame. Also reports debugServerTargets: 1C debug-server sessions (server-side suspends, EDT-UI-started 'Debug As') addressable as 'ServerApplication.<app>'. Optionally filter by applicationId.",
     "inputSchema": {
       "properties": {
         "applicationId": {
@@ -346,6 +350,17 @@
         "count": {
           "description": "Number of active debug launches returned",
           "type": "integer"
+        },
+        "debugServerTargetCount": {
+          "description": "Number of debug-server targets returned",
+          "type": "integer"
+        },
+        "debugServerTargets": {
+          "description": "1C debug-server targets (server-side / EDT-UI sessions) with real suspend state",
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
         },
         "launches": {
           "description": "Active debug launches with state and frame info",
@@ -405,6 +420,10 @@
         "updateBeforeLaunch": {
           "description": "Default true: terminate any live client and run a silent DB update first so no modal 'Update database?' dialog blocks the call; false keeps legacy delegate behaviour.",
           "type": "boolean"
+        },
+        "updateScope": {
+          "description": "Which projects to rebuild+update before the run: 'all' (configuration + dependent extensions, default), 'configuration', or 'extension:<ProjectName>' (comma-separate several). Forces a derived-data recompute so a freshly edited extension's .cfe is regenerated and loaded into the infobase before the run. Unknown extension names fail the call (the error lists the available names). Only applies when updateBeforeLaunch=true.",
+          "type": "string"
         }
       },
       "required": [],
@@ -419,7 +438,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Delete a metadata node (object or member, including a FORM member - item / attribute / command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all references in BSL code, forms and other metadata. Two-phase: call without confirm to preview what would be removed, then confirm=true to apply (deletion is hard to reverse). If the node is still referenced by metadata the refactoring cannot auto-clean, a confirm=true delete is BLOCKED and the referencing objects are listed; pass force=true to delete anyway (those references are left dangling). Full parameters and examples: call get_tool_guide('delete_metadata').",
+    "description": "Delete a metadata node (object or member, including a FORM object 'Type.Object.Form.Name' or a FORM member - item / attribute / command / handler) addressed by a 1C full-name FQN, cascading the cleanup of all references in BSL code, forms and other metadata. Two-phase: call without confirm to preview what would be removed, then confirm=true to apply (deletion is hard to reverse). If the node is still referenced by metadata the refactoring cannot auto-clean, a confirm=true delete is BLOCKED and the referencing objects are listed; pass force=true to delete anyway (those references are left dangling). Full parameters and examples: call get_tool_guide('delete_metadata').",
     "inputSchema": {
       "properties": {
         "confirm": {
@@ -467,13 +486,13 @@
           "description": "Count of blocking references",
           "type": "integer"
         },
-        "fqn": {
-          "description": "FQN of the node targeted for deletion",
-          "type": "string"
-        },
         "forced": {
           "description": "Whether the delete was forced past blocking references",
           "type": "boolean"
+        },
+        "fqn": {
+          "description": "FQN of the node targeted for deletion",
+          "type": "string"
         },
         "items": {
           "description": "Metadata items the deletion would remove (preview)",
@@ -1081,7 +1100,7 @@
           "type": "string"
         },
         "refresh": {
-          "description": "Force WYSIWYG refresh before capture (default: false)",
+          "description": "Force a real WYSIWYG re-render before capture; fails with an explicit error instead of returning a stale image when the re-render cannot be completed (default: false)",
           "type": "boolean"
         }
       },
@@ -2382,11 +2401,11 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Resume a suspended debug thread or all threads of a debug target. Pass threadId (from wait_for_break) or applicationId. With no arguments, resumes the single active debug launch if exactly one exists.",
+    "description": "Resume a suspended debug thread or all threads of a debug target. Pass threadId (from wait_for_break) or applicationId. applicationId accepts ANY id form for the session: the real id, 'attach:<name>', 'launch:<name>', or 'ServerApplication.<app>'. For a server-side suspend, resume targets the suspended thread directly. With no arguments, resumes the single active debug session (launch or server target) if exactly one exists. NOTE: if resume of a server-side suspend does not take effect, the breakpoint can also be released from the EDT UI.",
     "inputSchema": {
       "properties": {
         "applicationId": {
-          "description": "Application id (real or 'attach:<configName>' — resumes all threads of this target)",
+          "description": "Application id (real, 'attach:<configName>', 'launch:<configName>', or 'ServerApplication.<app>'). Resumes this session's target/suspended thread. Optional if exactly one debug session is active.",
           "type": "string"
         },
         "threadId": {
@@ -2405,7 +2424,7 @@
           "type": "string"
         },
         "autoResolved": {
-          "description": "Whether the lone active launch was auto-resolved",
+          "description": "Whether the lone active session was auto-resolved",
           "type": "boolean"
         },
         "resumed": {
@@ -2415,6 +2434,10 @@
         "scope": {
           "description": "Resume scope: 'thread' or 'target'",
           "type": "string"
+        },
+        "serverTarget": {
+          "description": "True if resolved via the 1C debug-server target bridge",
+          "type": "boolean"
         },
         "success": {
           "description": "Whether the operation succeeded",
@@ -2620,8 +2643,12 @@
           "type": "integer"
         },
         "updateBeforeLaunch": {
-          "description": "Auto-chain (default: true): terminate a live client and run a silent DB update first.",
+          "description": "Auto-chain (default: true): force-recompute the project + its extensions, terminate a live client and run a silent DB update first, so a freshly edited extension runs fresh (not stale). true also BYPASSES the cached junit.xml so the run is always fresh.",
           "type": "boolean"
+        },
+        "updateScope": {
+          "description": "Which projects to rebuild+update before the run: 'all' (configuration + dependent extensions, default), 'configuration', or 'extension:<ProjectName>' (comma-separate several). Forces a derived-data recompute so a freshly edited extension's .cfe is regenerated and loaded into the infobase before the run. Unknown extension names fail the call (the error lists the available names). Only applies when updateBeforeLaunch=true.",
+          "type": "string"
         }
       },
       "required": [],
@@ -2870,6 +2897,10 @@
         "reason": {
           "description": "Reason when not hit (e.g. timeout)",
           "type": "string"
+        },
+        "serverTarget": {
+          "description": "True if stepping a 1C debug-server target",
+          "type": "boolean"
         },
         "success": {
           "description": "Whether the operation succeeded",
@@ -3187,11 +3218,11 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Wait for a debug suspend event (e.g. breakpoint hit) on the given application. Returns the suspended thread/frame snapshot, or {hit:false} on timeout. applicationId may be real or synthetic 'attach:<configName>'. If omitted and exactly one EDT debug launch is active, that launch is used. Does NOT terminate the launch on timeout — call again to keep waiting.",
+    "description": "Wait for a debug suspend event (e.g. breakpoint hit) on the given application. Returns the suspended thread/frame snapshot, or {hit:false} on timeout. applicationId accepts ANY id form for the session: the real id, 'attach:<name>', 'launch:<name>' (EDT-UI-started session), or 'ServerApplication.<app>' (server-side suspend from debug_yaxunit_tests). If omitted and exactly one EDT debug session is active, that session is used. Does NOT terminate the launch on timeout — call again to keep waiting.",
     "inputSchema": {
       "properties": {
         "applicationId": {
-          "description": "Application id of the running debug session (real or 'attach:<configName>'). Optional if exactly one debug launch is active.",
+          "description": "Application id of the running debug session (real, 'attach:<configName>', 'launch:<configName>', or 'ServerApplication.<app>'). Optional if exactly one debug session is active.",
           "type": "string"
         },
         "timeout": {
@@ -3227,6 +3258,10 @@
         "reason": {
           "description": "Reason when no suspend occurred (e.g. 'timeout')",
           "type": "string"
+        },
+        "serverTarget": {
+          "description": "True if resolved via the 1C debug-server target bridge",
+          "type": "boolean"
         },
         "success": {
           "description": "Whether the operation succeeded",
