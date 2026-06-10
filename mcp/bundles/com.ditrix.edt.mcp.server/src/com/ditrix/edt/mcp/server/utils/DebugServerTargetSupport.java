@@ -16,6 +16,9 @@ import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.debug.core.model.IStackFrame;
 import org.eclipse.debug.core.model.IThread;
 
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugTargetThread;
+import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetType;
+import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetTypeUtil;
 import com.ditrix.edt.mcp.server.Activator;
 
 /**
@@ -209,21 +212,23 @@ public final class DebugServerTargetSupport
      * id is NOT the delegate's key; passing one here never matches (that mismatch is
      * exactly the bug 20074 missed).
      *
-     * <p><strong>A live thread is required (Bitrix 20074).</strong> The application
-     * id alone does NOT discriminate a thin-CLIENT debug session from a 1C
-     * standalone-SERVER (or profiling) target: both a "Автономный сервер …" server
+     * <p><strong>A live CLIENT-typed thread is required (Bitrix 20074).</strong> The
+     * application id alone does NOT discriminate a thin-CLIENT debug session from a
+     * 1C standalone-SERVER (or profiling) target: both a "Автономный сервер …" server
      * target and a thin client of the same project resolve to the SAME
-     * {@code ServerApplication.<proj>} app id. EDT's own delegate keys the duplicate
-     * on a LIVE THREAD, not the app id:
-     * {@code RuntimeClientLaunchDelegate.findDebugTargetThreadsForSameApplication}
-     * collects the non-terminated {@code IThread}s of every same-app-id target and
-     * {@code checkExistingDebugSessions} raises no modal when that list is empty.
-     * A server/profiling target carries zero live threads, so we mirror that test
-     * exactly: a same-app-id+project target matches ONLY when it also has at least
-     * one non-terminated thread ({@link #findFirstLiveThread}). Without this a
-     * thread-less server target wrongly short-circuited every client launch as
-     * {@code alreadyRunning} and {@code restartIfRunning=true} then killed the server
-     * and hung on its relaunch.
+     * {@code ServerApplication.<proj>} app id. And mere thread <em>liveness</em> is
+     * not enough either: a standalone server launched in DEBUG mode (ibsrv with
+     * debugging on) carries a LIVE thread typed {@code SERVER} (presented as
+     * «Сервер»), so the earlier "a server target carries zero live threads"
+     * assumption mis-classified it as a client session — and
+     * {@code restartIfRunning=true} then terminated the SERVER session and hung on
+     * its restart. The thread's {@code IRuntimeDebugTargetThread.getType()} is the
+     * only reliable kind signal (one impl class serves ALL targets, and the thread
+     * name is just the localized presentation of the type): a same-app-id+project
+     * target matches ONLY when it has at least one non-terminated thread that
+     * classifies as CLIENT-side ({@link #findFirstLiveClientThread} — a thread whose
+     * type {@code DebugTargetTypeUtil.isServer} positively marks as server-side
+     * never counts; unknown/non-1C threads conservatively do).
      *
      * <p>Best-effort and fully guarded — returns {@code null} (never throws) when the
      * target manager is unavailable (headless), the API shape differs, or nothing
@@ -261,10 +266,12 @@ public final class DebugServerTargetSupport
             {
                 continue;
             }
-            // A server/profiling target shares the client's app id+project but carries
-            // NO live thread — it is NOT the delegate's duplicate. Require a live
-            // thread, mirroring findDebugTargetThreadsForSameApplication(...).isEmpty().
-            if (findFirstLiveThread(target) != null)
+            // A server/profiling target shares the client's app id+project — and a
+            // DEBUG-mode standalone server even carries a LIVE thread (typed SERVER,
+            // named «Сервер») — so neither the app id nor bare thread liveness makes
+            // it the client's duplicate. Require a live CLIENT-typed thread: only a
+            // session with one is a client worth short-circuiting/restarting.
+            if (findFirstLiveClientThread(target) != null)
             {
                 return target;
             }
@@ -422,12 +429,12 @@ public final class DebugServerTargetSupport
     /**
      * Finds the first non-terminated {@link IThread} of a target, or {@code null}
      * if it has none. Unlike {@link #findSuspendedThread}, this does NOT require the
-     * thread to be suspended — mere liveness is the discriminator EDT's launch
-     * delegate uses to tell a thin-CLIENT debug session (≥1 live thread) from a 1C
-     * standalone-SERVER / profiling target (0 threads). Used by
-     * {@link #findRuntimeClientDebugTarget} so a thread-less server target no longer
-     * blocks a client launch (Bitrix 20074). Best-effort and fully guarded — never
-     * throws.
+     * thread to be suspended — it tests bare liveness only and does NOT look at the
+     * 1C thread type. NOTE (Bitrix 20074): bare liveness is NOT a client/server
+     * discriminator — a standalone server launched in DEBUG mode carries a live
+     * thread typed {@code SERVER} — so existing-CLIENT-session detection must use
+     * {@link #findFirstLiveClientThread} instead. Best-effort and fully guarded —
+     * never throws.
      *
      * @param target the target viewed as an Eclipse debug target
      * @return a non-terminated thread, or {@code null}
@@ -453,6 +460,88 @@ public final class DebugServerTargetSupport
             // best-effort
         }
         return null;
+    }
+
+    /**
+     * Finds the first non-terminated {@link IThread} of a target that classifies as
+     * CLIENT-side ({@link #isClientThread}), or {@code null} if the target has none.
+     * This is THE existing-client-session discriminator (Bitrix 20074): one EDT impl
+     * class serves ALL 1C debug targets, so the target itself cannot be told apart —
+     * the {@code IRuntimeDebugTargetThread.getType()} of its live threads is the only
+     * kind signal. A debug-mode standalone server (ibsrv) target carries a LIVE
+     * thread typed {@code SERVER} (presented as «Сервер»), which bare-liveness
+     * checks mis-read as a client session; this finder skips such threads, so a
+     * server session never short-circuits a client launch and is never terminated
+     * by {@code restartIfRunning} / a fresh YAXUnit debug run. Best-effort and fully
+     * guarded — never throws.
+     *
+     * @param target the target viewed as an Eclipse debug target
+     * @return a non-terminated CLIENT-side thread, or {@code null}
+     */
+    public static IThread findFirstLiveClientThread(IDebugTarget target)
+    {
+        if (target == null || target.isTerminated())
+        {
+            return null;
+        }
+        try
+        {
+            for (IThread thread : target.getThreads())
+            {
+                if (thread != null && !thread.isTerminated() && isClientThread(thread))
+                {
+                    return thread;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // best-effort
+        }
+        return null;
+    }
+
+    /**
+     * Classifies a debug thread as CLIENT-side or server-side using the canonical
+     * 1C type classifier. A thread counts as a CLIENT thread UNLESS its
+     * {@link IRuntimeDebugTargetThread#getType()} positively classifies as
+     * server-side ({@link DebugTargetTypeUtil#isServer}: {@code SERVER},
+     * {@code SERVER_EMULATION}, {@code MOBILE_SERVER}, {@code MOBILE_MANAGED_SERVER}).
+     * Deliberately conservative: a non-1C thread, a {@code null}/UNKNOWN type, the
+     * non-client-non-server types ({@code JOB}, web services, …) and any reflection/
+     * model failure all count as CLIENT — behavior changes ONLY where the type
+     * positively says server-side, so the pre-existing client detection cannot be
+     * weakened by an unreadable type. Matching is on {@code getType()} exclusively,
+     * NEVER on the thread name («Сервер» is just the localized presentation of the
+     * type). Never throws.
+     *
+     * @param thread the thread to classify (may be {@code null})
+     * @return {@code true} when the thread counts as CLIENT-side; {@code false} only
+     *     for a positively server-typed 1C thread (or {@code null})
+     */
+    public static boolean isClientThread(IThread thread)
+    {
+        if (thread == null)
+        {
+            return false;
+        }
+        try
+        {
+            if (thread instanceof IRuntimeDebugTargetThread)
+            {
+                DebugTargetType type = ((IRuntimeDebugTargetThread)thread).getType();
+                if (type != null && DebugTargetTypeUtil.isServer(type))
+                {
+                    return false;
+                }
+            }
+        }
+        catch (Throwable e)
+        {
+            // Best-effort: an unreadable type must never reclassify a thread as
+            // server-side — fall through to the conservative CLIENT default.
+        }
+        return true;
     }
 
     /**

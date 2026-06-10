@@ -297,4 +297,45 @@ public class RunYaxunitTestsToolTest
         assertTrue("guide must document the coordinated launch flow performing the update",
             guide.contains("coordinated launch flow")); //$NON-NLS-1$
     }
+
+    @Test
+    public void testGuideDocumentsDebugFreshRunTerminatesExistingClientSession()
+    {
+        // D7b ratchet (Bitrix 20092): the debug variant is fresh-run — it detects and
+        // non-interactively terminates an existing client debug session of the app
+        // BEFORE launching (incl. a UI-started 'Debug As' session only the debug
+        // target manager tracks), so the launch delegate's blocking 'Debug session
+        // already exists' (code 1003) modal can never hang an unattended call.
+        String guide = new RunYaxunitTestsTool().getGuide();
+        assertTrue("guide must document the fresh-run terminate of an existing client session",
+            guide.contains("terminates an existing client debug session")); //$NON-NLS-1$
+        assertTrue("guide must say it is always a FRESH run",
+            guide.contains("FRESH run")); //$NON-NLS-1$
+        assertTrue("guide must reference the 1003 modal the sweep prevents",
+            guide.contains("Debug session already exists")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsDebugFreshRunNeverTouchesStandaloneServer()
+    {
+        // D7b ratchet (Bitrix 20074): the fresh-run sweep is thread-TYPE-aware — it
+        // only ever terminates a live CLIENT session; a debug-mode standalone server
+        // (live thread typed SERVER) is never matched and never terminated.
+        String guide = new RunYaxunitTestsTool().getGuide();
+        assertTrue("guide must say only a live CLIENT session is terminated, never the server",
+            guide.contains("never the standalone server")); //$NON-NLS-1$
+        assertTrue("guide must document the SERVER-typed thread discriminator",
+            guide.contains("typed SERVER")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsDebug1003RaceNetConfirmer()
+    {
+        // D7b ratchet (Bitrix 20092): the debug launch site arms the session matcher
+        // (arm(true, true)) as the race net behind the sweep — the guide documents the
+        // 'Keep existing and start new' auto-press so the contract can't drift.
+        String guide = new RunYaxunitTestsTool().getGuide();
+        assertTrue("guide must document the 1003 'Keep existing and start new' race net",
+            guide.contains("Keep existing and start new")); //$NON-NLS-1$
+    }
 }

@@ -596,6 +596,25 @@ public class RunYaxunitTestsTool implements IMcpTool
                 }
             }
 
+            // Fresh-run guarantee (D7b, Bitrix 20092): a YAXUnit debug run is ALWAYS a
+            // new session — detect and non-interactively terminate any existing live
+            // CLIENT session of this application BEFORE workingCopy.launch, so EDT's
+            // launch delegate never raises its blocking code-1003 "Debug session
+            // already exists" modal. This covers BOTH the ILaunchManager view and
+            // EDT's debug target manager (a UI-started "Debug As" session lives ONLY
+            // there: prepareForFreshLaunch's sweep keys on getApplicationIdFor and
+            // never matches it). The detect is CLIENT-typed-thread-discriminated, so
+            // a debug-mode standalone server session is never matched and never
+            // terminated (Bitrix 20074). applicationId here is already the
+            // delegate-resolved id (ATTR_APPLICATION_ID else project default — see
+            // resolveDefaultApplicationId above) and is stamped onto the working copy
+            // below, so it is exactly the key the delegate's 1003 check uses.
+            if (LaunchLifecycleUtils.ensureNoExistingClientSession(project, applicationId))
+            {
+                Activator.logInfo("YAXUnit debug: terminated an existing client session before " //$NON-NLS-1$
+                    + "the fresh debug launch: applicationId=" + applicationId); //$NON-NLS-1$
+            }
+
             ILaunchConfigurationWorkingCopy workingCopy = matchingConfig.getWorkingCopy();
             String startupOption = "RunUnitTests=" + paramsFile.toString(); //$NON-NLS-1$
             workingCopy.setAttribute(LaunchConfigUtils.ATTR_STARTUP_OPTION, startupOption);
@@ -608,8 +627,14 @@ public class RunYaxunitTestsTool implements IMcpTool
             }
             Activator.logInfo("Launching YAXUnit tests in DEBUG mode: config=" + matchingConfig.getName() //$NON-NLS-1$
                 + ", startup=" + startupOption); //$NON-NLS-1$
-            // Auto-confirm EDT's blocking "Application update" modal for the launch window only.
-            LaunchUpdateDialogAutoConfirmer.arm();
+            // Auto-confirm EDT's blocking launch modals for the launch window only:
+            // the "Application update" matcher (as before, unconditional on this
+            // path), PLUS the code-1003 "Debug session already exists" matcher as the
+            // race net behind ensureNoExistingClientSession — if a session slips in
+            // (or a terminate times out) between the sweep above and the delegate's
+            // check, the armed confirmer presses "Keep existing and start new" so an
+            // unattended call never hangs on the modal (Bitrix 20092).
+            LaunchUpdateDialogAutoConfirmer.arm(true, true);
             try
             {
                 ILaunch spawned = workingCopy.launch(ILaunchManager.DEBUG_MODE, new NullProgressMonitor());
@@ -622,7 +647,7 @@ public class RunYaxunitTestsTool implements IMcpTool
             }
             finally
             {
-                LaunchUpdateDialogAutoConfirmer.disarm();
+                LaunchUpdateDialogAutoConfirmer.disarm(true, true);
             }
         }
         return buildDebugLaunchMarkdown(matchingConfig.getName(), projectName, applicationId,

@@ -19,6 +19,9 @@ import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.debug.core.model.IThread;
 import org.junit.Test;
 
+import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugTargetThread;
+import com._1c.g5.v8.dt.debug.model.base.data.DebugTargetType;
+
 /**
  * Headless tests for {@link DebugServerTargetSupport} — the bridge that surfaces
  * 1C debug-server targets (server-side breakpoint suspends from
@@ -248,5 +251,196 @@ public class DebugServerTargetSupportTest
             new org.eclipse.core.runtime.Status(org.eclipse.core.runtime.IStatus.ERROR,
                 "test", "threads unavailable"))); //$NON-NLS-1$ //$NON-NLS-2$
         assertNull(DebugServerTargetSupport.findFirstLiveThread(target));
+    }
+
+    // === isClientThread / findFirstLiveClientThread — the TYPE-aware discriminator (D7b/20074) ===
+    //
+    // Bare thread liveness is NOT a client/server discriminator: a standalone server
+    // launched in DEBUG mode carries a LIVE IRuntimeDebugTargetThread typed SERVER
+    // (presented as «Сервер»), which the previous liveness-only test mis-read as a
+    // client session — restartIfRunning then terminated the SERVER session and hung
+    // on its restart. These tests pin the type matrix: a live thread counts as a
+    // CLIENT thread unless its 1C type POSITIVELY classifies as server-side
+    // (DebugTargetTypeUtil.isServer); unknown / non-1C / unreadable types stay
+    // conservatively client so the detection is never weakened by a model hiccup.
+
+    private static IRuntimeDebugTargetThread liveTypedThread(DebugTargetType type)
+    {
+        IRuntimeDebugTargetThread t = mock(IRuntimeDebugTargetThread.class);
+        when(t.isTerminated()).thenReturn(false);
+        when(t.getType()).thenReturn(type);
+        return t;
+    }
+
+    private static IDebugTarget liveTargetWithThreads(IThread... threads) throws Exception
+    {
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenReturn(threads);
+        return target;
+    }
+
+    @Test
+    public void testIsClientThreadServerTypedThreadIsNotClient()
+    {
+        // THE 20074 CASE: a live thread typed SERVER (debug-mode standalone server,
+        // «Сервер») positively classifies as server-side — NOT a client thread.
+        assertFalse(DebugServerTargetSupport.isClientThread(liveTypedThread(DebugTargetType.SERVER)));
+    }
+
+    @Test
+    public void testIsClientThreadAllServerSideTypesAreNotClient()
+    {
+        // Every type DebugTargetTypeUtil.isServer covers is server-side.
+        assertFalse(DebugServerTargetSupport.isClientThread(
+            liveTypedThread(DebugTargetType.SERVER_EMULATION)));
+        assertFalse(DebugServerTargetSupport.isClientThread(
+            liveTypedThread(DebugTargetType.MOBILE_SERVER)));
+        assertFalse(DebugServerTargetSupport.isClientThread(
+            liveTypedThread(DebugTargetType.MOBILE_MANAGED_SERVER)));
+    }
+
+    @Test
+    public void testIsClientThreadClientTypedThreadsAreClient()
+    {
+        // CLIENT (thick) and MANAGED_CLIENT (thin) are the canonical client types.
+        assertTrue(DebugServerTargetSupport.isClientThread(liveTypedThread(DebugTargetType.CLIENT)));
+        assertTrue(DebugServerTargetSupport.isClientThread(
+            liveTypedThread(DebugTargetType.MANAGED_CLIENT)));
+        assertTrue(DebugServerTargetSupport.isClientThread(
+            liveTypedThread(DebugTargetType.WEB_CLIENT)));
+    }
+
+    @Test
+    public void testIsClientThreadUnknownTypeIsConservativelyClient()
+    {
+        // UNKNOWN type → counts as client (behavior changes ONLY where the type
+        // positively says server-side).
+        assertTrue(DebugServerTargetSupport.isClientThread(liveTypedThread(DebugTargetType.UNKNOWN)));
+    }
+
+    @Test
+    public void testIsClientThreadNullTypeIsConservativelyClient()
+    {
+        // A null getType() must not be fed into DebugTargetTypeUtil (it throws NPE on
+        // null) and must stay conservatively client.
+        assertTrue(DebugServerTargetSupport.isClientThread(liveTypedThread(null)));
+    }
+
+    @Test
+    public void testIsClientThreadNonRuntimeThreadIsConservativelyClient()
+    {
+        // A plain (non-1C) IThread carries no type — conservatively client.
+        assertTrue(DebugServerTargetSupport.isClientThread(mock(IThread.class)));
+    }
+
+    @Test
+    public void testIsClientThreadGetTypeThrowsIsConservativelyClient()
+    {
+        // Best-effort: a getType() failure (model mid-teardown) must not reclassify
+        // the thread as server-side, and must never throw.
+        IRuntimeDebugTargetThread t = mock(IRuntimeDebugTargetThread.class);
+        when(t.getType()).thenThrow(new IllegalStateException("model gone")); //$NON-NLS-1$
+        assertTrue(DebugServerTargetSupport.isClientThread(t));
+    }
+
+    @Test
+    public void testIsClientThreadNullThreadIsNotClient()
+    {
+        assertFalse(DebugServerTargetSupport.isClientThread(null));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadServerTypedLiveThreadReturnsNull() throws Exception
+    {
+        // THE 20074 TARGET CASE: a debug-mode standalone server target with a LIVE
+        // SERVER-typed thread is NOT a client session — no client thread is found, so
+        // findRuntimeClientDebugTarget never matches it (no short-circuit, no
+        // terminate), while the liveness-only finder still sees the thread.
+        IRuntimeDebugTargetThread serverThread = liveTypedThread(DebugTargetType.SERVER);
+        IDebugTarget serverTarget = liveTargetWithThreads(serverThread);
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(serverTarget));
+        assertSame(serverThread, DebugServerTargetSupport.findFirstLiveThread(serverTarget));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadClientTypedLiveThreadReturnsIt() throws Exception
+    {
+        // A live MANAGED_CLIENT (thin client) thread IS the client discriminator.
+        IRuntimeDebugTargetThread clientThread = liveTypedThread(DebugTargetType.MANAGED_CLIENT);
+        IDebugTarget clientTarget = liveTargetWithThreads(clientThread);
+        assertSame(clientThread, DebugServerTargetSupport.findFirstLiveClientThread(clientTarget));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadMixedThreadsReturnsTheClientOne() throws Exception
+    {
+        // MIXED (server + client threads on one target): the client thread is present,
+        // so the session IS a client session — the server-typed thread is skipped.
+        IRuntimeDebugTargetThread serverThread = liveTypedThread(DebugTargetType.SERVER);
+        IRuntimeDebugTargetThread clientThread = liveTypedThread(DebugTargetType.CLIENT);
+        IDebugTarget target = liveTargetWithThreads(serverThread, clientThread);
+        assertSame(clientThread, DebugServerTargetSupport.findFirstLiveClientThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadUnknownTypedLiveThreadCounts() throws Exception
+    {
+        // Conservative: an UNKNOWN-typed live thread keeps counting as a client
+        // session (exactly the pre-D7b behavior for everything not positively server).
+        IRuntimeDebugTargetThread unknownThread = liveTypedThread(DebugTargetType.UNKNOWN);
+        IDebugTarget target = liveTargetWithThreads(unknownThread);
+        assertSame(unknownThread, DebugServerTargetSupport.findFirstLiveClientThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadPlainEclipseThreadCounts() throws Exception
+    {
+        // A non-1C live IThread (no getType at all) conservatively counts as client.
+        IThread plain = mock(IThread.class);
+        when(plain.isTerminated()).thenReturn(false);
+        IDebugTarget target = liveTargetWithThreads(plain);
+        assertSame(plain, DebugServerTargetSupport.findFirstLiveClientThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadDeadClientLiveServerReturnsNull() throws Exception
+    {
+        // A terminated client thread plus a live SERVER-typed thread: no LIVE client
+        // thread exists — not a client session.
+        IRuntimeDebugTargetThread deadClient = mock(IRuntimeDebugTargetThread.class);
+        when(deadClient.isTerminated()).thenReturn(true);
+        when(deadClient.getType()).thenReturn(DebugTargetType.MANAGED_CLIENT);
+        IRuntimeDebugTargetThread liveServer = liveTypedThread(DebugTargetType.SERVER);
+        IDebugTarget target = liveTargetWithThreads(deadClient, liveServer);
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(target));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadNullAndTerminatedTargetReturnNull()
+    {
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(null));
+        IDebugTarget terminated = mock(IDebugTarget.class);
+        when(terminated.isTerminated()).thenReturn(true);
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(terminated));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadNoThreadsReturnsNull() throws Exception
+    {
+        // The pre-D7b server shape (profiling / idle server target, zero threads)
+        // stays a non-session.
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(liveTargetWithThreads()));
+    }
+
+    @Test
+    public void testFindFirstLiveClientThreadGetThreadsThrowsReturnsNull() throws Exception
+    {
+        IDebugTarget target = mock(IDebugTarget.class);
+        when(target.isTerminated()).thenReturn(false);
+        when(target.getThreads()).thenThrow(new org.eclipse.debug.core.DebugException(
+            new org.eclipse.core.runtime.Status(org.eclipse.core.runtime.IStatus.ERROR,
+                "test", "threads unavailable"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(DebugServerTargetSupport.findFirstLiveClientThread(target));
     }
 }

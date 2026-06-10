@@ -45,6 +45,8 @@ set_breakpoint -> run_yaxunit_tests(debug=true) -> wait_for_break
 ```
 Pin to ONE test (`tests`) so exactly one breakpoint trips. The deprecated `debug_yaxunit_tests` tool is a thin alias for this.
 
+A debug run is always a FRESH run: before launching, the tool detects and non-interactively terminates an existing client debug session of the application (including one started from the EDT UI via 'Debug As', which only EDT's debug target manager tracks) — so the launch delegate's blocking 'Debug session already exists' modal is never raised and the call does not hang unattended (Bitrix 20092). The detection is thread-TYPE-aware: it terminates only a live CLIENT session, never the standalone server — a debug-mode standalone server's live thread is typed SERVER and is left running untouched (Bitrix 20074). As a race net, the same 'Keep existing and start new' auto-confirmer that guards `debug_launch` is armed around the launch, so even a 1003 modal that still slips through is pressed automatically.
+
 ## Examples
 
 Run all tests via a named config:
