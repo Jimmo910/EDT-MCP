@@ -18,6 +18,7 @@ import org.eclipse.debug.core.ILaunchConfigurationType;
 import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.PlatformUI;
 
 import com.ditrix.edt.mcp.server.Activator;
 import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
@@ -454,11 +455,26 @@ public class DebugLaunchTool implements IMcpTool
     /**
      * Runs the EDT "update database before launch" step for a runtime-client launch.
      * Returns {@code null} on success, or an error message describing the failure.
+     *
+     * <p>Synthetic application ids — {@code attach:<configName>} and
+     * {@code launch:<configName>}, see
+     * {@link LaunchConfigUtils#isSyntheticApplicationId} — skip the preflight.
+     * They are minted by
+     * {@link LaunchConfigUtils#getApplicationIdFor(ILaunchConfiguration)} for
+     * configurations WITHOUT a persisted {@code ATTR_APPLICATION_ID} and cannot be
+     * resolved through {@link IApplicationManager}: feeding one into
+     * {@code updateApplicationIfNeeded} fails with "Application not found:
+     * launch:&lt;name&gt;" and would refuse a perfectly launchable configuration.
+     * (The original guard knew only the {@code attach:} prefix, so introducing the
+     * {@code launch:} fallback for UI-started-session tracking silently turned
+     * such by-name launches into errors — rv1 review FIND-1.) Skipping is safe:
+     * if the launch delegate still detects an out-of-date IB it shows its update
+     * modal, which the armed {@link LaunchUpdateDialogAutoConfirmer} presses.
      */
     private String updateDatabaseIfNeeded(String projectName, String applicationId)
     {
         if (applicationId == null || applicationId.isEmpty()
-            || applicationId.startsWith(LaunchConfigUtils.ATTACH_APP_ID_PREFIX))
+            || LaunchConfigUtils.isSyntheticApplicationId(applicationId))
         {
             return null;
         }
@@ -522,12 +538,15 @@ public class DebugLaunchTool implements IMcpTool
      * silently perform the very DB update the caller disabled, so the confirmer is
      * NOT armed and the dialog is left for a human.
      *
+     * <p>Package-private (not {@code private}) so the headless unit tests can
+     * exercise the synchronous fallback directly.
+     *
      * @return {@code null} when the launch was scheduled (or, in a headless test
      *         with no UI thread, completed) successfully; otherwise an error message.
      */
-    private String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog)
+    String performLaunch(ILaunchConfiguration config, boolean autoConfirmUpdateDialog)
     {
-        Display display = Display.getDefault();
+        Display display = workbenchDisplayOrNull();
         if (display != null && !display.isDisposed())
         {
             // Fire-and-forget on the UI thread: returns control to the MCP worker
@@ -580,6 +599,36 @@ public class DebugLaunchTool implements IMcpTool
             {
                 LaunchUpdateDialogAutoConfirmer.disarm();
             }
+        }
+    }
+
+    /**
+     * Returns the workbench {@link Display} WITHOUT creating one, or {@code null}
+     * in a headless runtime.
+     *
+     * <p>{@code Display.getDefault()} (the previous probe) is wrong here: per the
+     * SWT contract it CREATES a display on the calling thread when none exists, so
+     * it never returns {@code null}. That made the synchronous headless fallback in
+     * {@link #performLaunch} dead code, and in a truly headless runtime
+     * {@code asyncExec} queued the launch onto an event loop no thread ever pumps —
+     * the launch silently never executed while the tool had already returned
+     * {@code status: "launching"} (rv1 review FIND-2). The workbench-aware probe
+     * routes to {@code asyncExec} only when a real UI thread exists to dispatch it.
+     */
+    private static Display workbenchDisplayOrNull()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+        {
+            return null;
+        }
+        try
+        {
+            return PlatformUI.getWorkbench().getDisplay();
+        }
+        catch (IllegalStateException e)
+        {
+            // Workbench shut down between the check and the call (shutdown race).
+            return null;
         }
     }
 
