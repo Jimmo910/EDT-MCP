@@ -605,7 +605,11 @@ public class RunYaxunitTestsTool implements IMcpTool
             // there: prepareForFreshLaunch's sweep keys on getApplicationIdFor and
             // never matches it). The detect is CLIENT-typed-thread-discriminated, so
             // a debug-mode standalone server session is never matched and never
-            // terminated (Bitrix 20074). applicationId here is already the
+            // terminated (Bitrix 20074). A launch OWNED by another MCP tool (e.g. a
+            // concurrent run_yaxunit_tests RUN launch of the same app) is exempt from
+            // the sweep — it is managed by its own tool; this matters on the
+            // updateBeforeLaunch=false path, where prepareForFreshLaunch's hard-fail
+            // on owned launches did not run. applicationId here is already the
             // delegate-resolved id (ATTR_APPLICATION_ID else project default — see
             // resolveDefaultApplicationId above) and is stamped onto the working copy
             // below, so it is exactly the key the delegate's 1003 check uses.

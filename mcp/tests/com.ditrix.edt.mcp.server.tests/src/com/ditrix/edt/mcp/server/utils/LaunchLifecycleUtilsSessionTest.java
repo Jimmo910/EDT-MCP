@@ -11,6 +11,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -434,5 +435,78 @@ public class LaunchLifecycleUtilsSessionTest
         IProject project = mock(IProject.class);
         when(project.getName()).thenReturn("MyProject"); //$NON-NLS-1$
         assertFalse(LaunchLifecycleUtils.ensureNoExistingClientSession(project, "some-app")); //$NON-NLS-1$
+    }
+
+    // ============ fresh-launch sweep vs MCP-owned launches (D7b follow-up) ============
+    // The ILaunchManager-sourced branch of ensureNoExistingClientSession, exercised
+    // through its extracted seam sweepLaunchManagerSession (the live launch-manager
+    // scan needs a workbench and is covered E2E).
+
+    @Test
+    public void testSweepNullSessionIsNoOp()
+    {
+        assertFalse(LaunchLifecycleUtils.sweepLaunchManagerSession(null, "app-none")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testSweepSkipsOwnedRunLaunch() throws Exception
+    {
+        // THE FINDING: with updateBeforeLaunch=false the fresh-launch sweep is the
+        // only guard (prepareForFreshLaunch's hard-fail on owned launches did not
+        // run), and it must NOT silently terminate a concurrent MCP-OWNED RUN test
+        // launch of the same application — that launch is managed by its own tool.
+        ILaunch owned = mock(ILaunch.class);
+        when(owned.getLaunchMode()).thenReturn("run"); //$NON-NLS-1$
+        when(owned.getDebugTargets()).thenReturn(new IDebugTarget[0]);
+        LaunchLifecycleUtils.registerOwnedLaunch(owned);
+        try
+        {
+            ExistingClientSession session = new ExistingClientSession(owned, null, "run"); //$NON-NLS-1$
+            assertFalse(LaunchLifecycleUtils.sweepLaunchManagerSession(session, "app-owned")); //$NON-NLS-1$
+            verify(owned, never()).terminate();
+        }
+        finally
+        {
+            LaunchLifecycleUtils.unregisterOwnedLaunch(owned);
+        }
+    }
+
+    @Test
+    public void testSweepSkipsOwnedDebugSession() throws Exception
+    {
+        // The exemption equally covers an owned DEBUG session resolved with a live
+        // client target — its owning launch is in the registry, so neither the
+        // target nor the launch is terminated.
+        ILaunch ownedLaunch = mock(ILaunch.class);
+        when(ownedLaunch.getLaunchMode()).thenReturn("debug"); //$NON-NLS-1$
+        IDebugTarget client = targetWithThreads(liveThread());
+        when(client.getLaunch()).thenReturn(ownedLaunch);
+        LaunchLifecycleUtils.registerOwnedLaunch(ownedLaunch);
+        try
+        {
+            ExistingClientSession session =
+                new ExistingClientSession(ownedLaunch, client, "debug"); //$NON-NLS-1$
+            assertFalse(LaunchLifecycleUtils.sweepLaunchManagerSession(session, "app-owned-dbg")); //$NON-NLS-1$
+            verify(client, never()).terminate();
+            verify(ownedLaunch, never()).terminate();
+        }
+        finally
+        {
+            LaunchLifecycleUtils.unregisterOwnedLaunch(ownedLaunch);
+        }
+    }
+
+    @Test
+    public void testSweepTerminatesForeignRunLaunch() throws Exception
+    {
+        // A FOREIGN (not MCP-owned) RUN-mode client launch of the application IS
+        // still terminated — the fresh-run guarantee itself is unchanged.
+        ILaunch foreign = mock(ILaunch.class);
+        when(foreign.getLaunchMode()).thenReturn("run"); //$NON-NLS-1$
+        when(foreign.canTerminate()).thenReturn(true);
+        when(foreign.isTerminated()).thenReturn(false, true);
+        ExistingClientSession session = new ExistingClientSession(foreign, null, "run"); //$NON-NLS-1$
+        assertTrue(LaunchLifecycleUtils.sweepLaunchManagerSession(session, "app-foreign")); //$NON-NLS-1$
+        verify(foreign, times(1)).terminate();
     }
 }

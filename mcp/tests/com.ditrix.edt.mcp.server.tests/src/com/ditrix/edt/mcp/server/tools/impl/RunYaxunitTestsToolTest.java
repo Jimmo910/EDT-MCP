@@ -302,17 +302,33 @@ public class RunYaxunitTestsToolTest
     public void testGuideDocumentsDebugFreshRunTerminatesExistingClientSession()
     {
         // D7b ratchet (Bitrix 20092): the debug variant is fresh-run — it detects and
-        // non-interactively terminates an existing client debug session of the app
-        // BEFORE launching (incl. a UI-started 'Debug As' session only the debug
-        // target manager tracks), so the launch delegate's blocking 'Debug session
-        // already exists' (code 1003) modal can never hang an unattended call.
+        // non-interactively terminates an existing client session of the app — debug
+        // or RUN-mode — BEFORE launching (incl. a UI-started 'Debug As' session only
+        // the debug target manager tracks), so the launch delegate's blocking 'Debug
+        // session already exists' (code 1003) modal can never hang an unattended call.
         String guide = new RunYaxunitTestsTool().getGuide();
         assertTrue("guide must document the fresh-run terminate of an existing client session",
-            guide.contains("terminates an existing client debug session")); //$NON-NLS-1$
+            guide.contains("terminates an existing client session")); //$NON-NLS-1$
+        assertTrue("guide must say the sweep also covers a RUN-mode client",
+            guide.contains("RUN-mode client")); //$NON-NLS-1$
         assertTrue("guide must say it is always a FRESH run",
             guide.contains("FRESH run")); //$NON-NLS-1$
         assertTrue("guide must reference the 1003 modal the sweep prevents",
             guide.contains("Debug session already exists")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsFreshRunSweepExemptsMcpOwnedLaunches()
+    {
+        // D7b follow-up ratchet: with updateBeforeLaunch=false the sweep is the only
+        // guard, and it must not silently kill a concurrent MCP-owned RUN test launch
+        // of the same app — the guide documents the exemption so the contract can't
+        // drift back to "terminate everything".
+        String guide = new RunYaxunitTestsTool().getGuide();
+        assertTrue("guide must document the MCP-owned-launch exemption from the fresh-run sweep",
+            guide.contains("owned by other MCP tools")); //$NON-NLS-1$
+        assertTrue("guide must say an owned launch is managed by the tool that spawned it",
+            guide.contains("managed by the tool that spawned it")); //$NON-NLS-1$
     }
 
     @Test

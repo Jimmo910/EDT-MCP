@@ -267,6 +267,16 @@ public final class LaunchLifecycleUtils
     }
 
     /**
+     * @return {@code true} when {@code launch} is currently registered as owned by
+     *     an MCP tool (identity-equals lookup — see {@link #registerOwnedLaunch});
+     *     {@code false} for {@code null}
+     */
+    static boolean isOwnedLaunch(ILaunch launch)
+    {
+        return launch != null && OWNED_LAUNCHES.contains(launch);
+    }
+
+    /**
      * Returns the monitor object used to serialise {@link #prepareForFreshLaunch}
      * for the given {@code project + applicationId} pair. Callers that also
      * need the same lock around their own pre-launch steps (e.g. updating a
@@ -1949,8 +1959,12 @@ public final class LaunchLifecycleUtils
      * {@link #terminateExistingLaunchAndWait}: terminate + {@code forgetApplication}
      * + ≤3s wait). A debug-mode standalone server session — live thread typed
      * {@code SERVER} — is NEVER matched and NEVER terminated (Bitrix 20074).
-     * Best-effort and fully guarded: never throws; a {@code null} project /
-     * {@code null}-or-empty app id is a no-op.
+     * A launch OWNED by another MCP tool ({@link #registerOwnedLaunch} — e.g. a
+     * concurrent {@code run_yaxunit_tests} RUN launch of the same application) is
+     * never terminated by the {@code ILaunchManager}-sourced sweep either: it is
+     * skipped and logged, because it is managed by the tool that spawned it (see
+     * {@link #sweepLaunchManagerSession}). Best-effort and fully guarded: never
+     * throws; a {@code null} project / {@code null}-or-empty app id is a no-op.
      *
      * <p>{@code delegateAppId} MUST be the delegate-resolved application id
      * ({@code ATTR_APPLICATION_ID} else the project default — see
@@ -1970,26 +1984,11 @@ public final class LaunchLifecycleUtils
         {
             return false;
         }
-        boolean terminatedAny = false;
-
         // Source 1: the ILaunchManager views (registry guards), type-discriminated.
-        ExistingClientSession session = resolveExistingClientSession(delegateAppId);
-        if (session != null)
-        {
-            if (session.liveTarget != null)
-            {
-                Activator.logInfo("Fresh-launch guard: terminating existing client debug target: " //$NON-NLS-1$
-                    + "applicationId=" + delegateAppId); //$NON-NLS-1$
-                terminateExistingSessionAndWait(session.liveTarget, delegateAppId);
-            }
-            else
-            {
-                Activator.logInfo("Fresh-launch guard: terminating existing client launch (mode=" //$NON-NLS-1$
-                    + session.mode + "): applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
-                terminateExistingLaunchAndWait(session.launch, delegateAppId);
-            }
-            terminatedAny = true;
-        }
+        // An MCP-OWNED launch (a concurrent run_yaxunit_tests / debug_yaxunit_tests
+        // launch of the same application) is exempt — see sweepLaunchManagerSession.
+        boolean terminatedAny =
+            sweepLaunchManagerSession(resolveExistingClientSession(delegateAppId), delegateAppId);
 
         // Source 2: EDT's debug target manager — the delegate's own 1003 criterion
         // (catches UI-started "Debug As" sessions the ILaunchManager never sees).
@@ -2007,5 +2006,59 @@ public final class LaunchLifecycleUtils
             }
         }
         return terminatedAny;
+    }
+
+    /**
+     * Handles the {@code ILaunchManager}-sourced half of
+     * {@link #ensureNoExistingClientSession}: terminates the resolved client session
+     * non-interactively — EXCEPT a launch registered as MCP-owned
+     * ({@link #registerOwnedLaunch}). The default {@code updateBeforeLaunch=true}
+     * path never reaches an owned launch (it hard-fails on owned launches in
+     * {@link #prepareForFreshLaunch} first), but with {@code updateBeforeLaunch=false}
+     * this sweep is the only line of defence: without the exemption a YAXUnit debug
+     * call would silently terminate a concurrent MCP-owned RUN test launch of the
+     * same application (the RUN-mode branch below,
+     * {@link #terminateExistingLaunchAndWait}). Owned launches are managed by the
+     * tool that spawned them — skip and log instead. The target-manager source in
+     * {@link #ensureNoExistingClientSession} is unaffected: the sessions it finds
+     * have no owning {@link ILaunch} of ours.
+     *
+     * <p>Package-visible so the skip-vs-terminate decision is unit-testable without
+     * a live {@code ILaunchManager}.
+     *
+     * @param session the session resolved by {@link #resolveExistingClientSession}
+     *     (may be {@code null} — no-op)
+     * @param delegateAppId the delegate-resolved application id (used for registry
+     *     cleanup and logging)
+     * @return {@code true} when the session was terminated; {@code false} when there
+     *     was none or it was skipped as MCP-owned
+     */
+    static boolean sweepLaunchManagerSession(ExistingClientSession session, String delegateAppId)
+    {
+        if (session == null)
+        {
+            return false;
+        }
+        if (isOwnedLaunch(session.launch))
+        {
+            String name = session.launch.getLaunchConfiguration() != null
+                ? session.launch.getLaunchConfiguration().getName() : "<unknown>"; //$NON-NLS-1$
+            Activator.logInfo("Fresh-launch sweep: skipping MCP-owned launch '" + name //$NON-NLS-1$
+                + "'; it is managed by its own tool: applicationId=" + delegateAppId); //$NON-NLS-1$
+            return false;
+        }
+        if (session.liveTarget != null)
+        {
+            Activator.logInfo("Fresh-launch guard: terminating existing client debug target: " //$NON-NLS-1$
+                + "applicationId=" + delegateAppId); //$NON-NLS-1$
+            terminateExistingSessionAndWait(session.liveTarget, delegateAppId);
+        }
+        else
+        {
+            Activator.logInfo("Fresh-launch guard: terminating existing client launch (mode=" //$NON-NLS-1$
+                + session.mode + "): applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
+            terminateExistingLaunchAndWait(session.launch, delegateAppId);
+        }
+        return true;
     }
 }
