@@ -13,11 +13,17 @@ import java.util.Set;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.SWTException;
+import org.eclipse.swt.custom.CLabel;
 import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
 
 import com.ditrix.edt.mcp.server.Activator;
 
@@ -110,6 +116,37 @@ public final class LaunchUpdateDialogAutoConfirmer
     static final Set<String> APPLICATION_UPDATE_TITLES = Collections.unmodifiableSet(
         new LinkedHashSet<>(Arrays.asList(APPLICATION_UPDATE_TITLE, APPLICATION_UPDATE_TITLE_RU)));
 
+    /**
+     * English message-body prefix of EDT's "Debug session already exists" launch
+     * modal (status code {@code 1003}, handler {@code DebugSessionCheckStatusHandler}).
+     * The full text is "Debug session for project \"{0}\" and application \"{1}\" has
+     * already been started.\nShould it be stopped?" — we match only the stable leading
+     * prefix so the two interpolated names don't break the comparison (Bitrix 20074).
+     */
+    static final String DEBUG_SESSION_EXISTS_BODY_PREFIX = "Debug session for project"; //$NON-NLS-1$
+
+    /**
+     * Russian message-body prefix of the same modal (decodes to
+     * "Сессия отладки для проекта"). Kept {@code \\uXXXX}-escaped (no raw Cyrillic in
+     * source) so it compiles identically whatever encoding the Tycho compiler picks.
+     */
+    static final String DEBUG_SESSION_EXISTS_BODY_PREFIX_RU =
+        "\u0421\u0435\u0441\u0441\u0438\u044F \u043E\u0442\u043B\u0430\u0434\u043A\u0438 " //$NON-NLS-1$
+            + "\u0434\u043B\u044F \u043F\u0440\u043E\u0435\u043A\u0442\u0430"; //$NON-NLS-1$
+
+    /**
+     * Every shipped localized message-body prefix of the "Debug session already
+     * exists" code-1003 modal. The shell TITLE is the generic "Question"/"Вопрос",
+     * which would catch every question dialog — so this modal is matched on the
+     * BODY prefix instead.
+     */
+    static final Set<String> DEBUG_SESSION_EXISTS_BODY_PREFIXES = Collections.unmodifiableSet(
+        new LinkedHashSet<>(Arrays.asList(
+            DEBUG_SESSION_EXISTS_BODY_PREFIX, DEBUG_SESSION_EXISTS_BODY_PREFIX_RU)));
+
+    /** Cap on the widget-tree walk depth when reading a dialog's message body. */
+    private static final int MAX_BODY_SCAN_DEPTH = 6;
+
     private static final Object LOCK = new Object();
 
     private static int armCount;
@@ -129,6 +166,32 @@ public final class LaunchUpdateDialogAutoConfirmer
     static boolean isTargetTitle(String shellTitle)
     {
         return shellTitle != null && APPLICATION_UPDATE_TITLES.contains(shellTitle);
+    }
+
+    /**
+     * Pure decision (and test seam): is the given dialog message BODY the
+     * "Debug session already exists" code-1003 modal? The modal's shell title is the
+     * generic "Question"/"Вопрос", so it is matched on the localized body PREFIX
+     * (the two interpolated project/application names follow it) — never on the
+     * generic title, which would catch every question dialog (Bitrix 20074).
+     *
+     * @param body a dialog message-body string (may be {@code null})
+     * @return {@code true} when {@code body} starts with a known 1003 body prefix
+     */
+    static boolean isDebugSessionExistsBody(String body)
+    {
+        if (body == null)
+        {
+            return false;
+        }
+        for (String prefix : DEBUG_SESSION_EXISTS_BODY_PREFIXES)
+        {
+            if (body.startsWith(prefix))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -260,8 +323,22 @@ public final class LaunchUpdateDialogAutoConfirmer
     }
 
     /**
-     * Creates the {@link Display} filter that watches for the "Application
-     * update" modal and schedules the default-button auto-press.
+     * Creates the {@link Display} filter that watches for the modals we auto-confirm
+     * and schedules the default-button auto-press. Two matchers share this single
+     * filter (one global filter, reconciled under {@code LOCK} — no second filter,
+     * no deadlock):
+     * <ul>
+     *   <li>the D4 "Application update" modal — matched on the exact shell TITLE
+     *       ({@link #isTargetTitle});</li>
+     *   <li>the code-1003 "Debug session already exists" modal — matched on the
+     *       message BODY prefix ({@link #isDebugSessionExistsBody}), because its
+     *       shell title is the generic "Question"/"Вопрос" (Bitrix 20074).</li>
+     * </ul>
+     * Pressing the default button (index 0) of either dialog completes it
+     * non-interactively: "Update then run" for the update modal, "Stop existing and
+     * start new" for the 1003 modal — and we only reach config.launch (where this
+     * filter is armed) after primary detection already decided to launch, so
+     * stopping the old session honors that intent.
      */
     private static Listener createFilterListener()
     {
@@ -280,7 +357,15 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 return;
             }
-            if (!isTargetTitle(title))
+            boolean matches = isTargetTitle(title);
+            if (!matches)
+            {
+                // Title is NOT the update modal — try the 1003 body matcher. The
+                // generic "Question" title can't be matched (it would dismiss every
+                // question dialog), so read the dialog's message body instead.
+                matches = isDebugSessionExistsBody(readDialogBody(shell));
+            }
+            if (!matches)
             {
                 return;
             }
@@ -291,8 +376,111 @@ public final class LaunchUpdateDialogAutoConfirmer
     }
 
     /**
-     * Presses the default ("Update then run") button of the given dialog shell.
-     * Guarded against disposal and never throws onto the UI thread.
+     * Reads the message-body text of a JFace dialog shell by walking its widget
+     * tree and returning the first non-blank {@link Label}/{@link CLabel}/
+     * {@link Text}/{@link Link} text that matches a known 1003 body prefix — or, if
+     * none matches, the first non-blank label-like text found. JFace
+     * {@code MessageDialog} renders its message in such a control inside the dialog
+     * area; the shell title alone is too generic to key on. Bounded depth and fully
+     * guarded — never throws onto the UI thread.
+     *
+     * @param shell the dialog shell (may be {@code null}/disposed)
+     * @return a candidate message-body string, or {@code null} if none was found
+     */
+    static String readDialogBody(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+        {
+            return null;
+        }
+        try
+        {
+            return findBodyText(shell, 0);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Depth-bounded pre-order walk of a control tree collecting label-like text.
+     * Returns the first text that already matches a 1003 prefix (so the caller's
+     * decision is unambiguous); failing that, the first non-blank label-like text it
+     * sees (a best-effort fallback that the prefix check then rejects for unrelated
+     * dialogs).
+     */
+    private static String findBodyText(Control control, int depth)
+    {
+        if (control == null || control.isDisposed() || depth > MAX_BODY_SCAN_DEPTH)
+        {
+            return null;
+        }
+        String firstSeen = null;
+        String text = labelLikeText(control);
+        if (text != null && !text.trim().isEmpty())
+        {
+            if (isDebugSessionExistsBody(text))
+            {
+                return text;
+            }
+            firstSeen = text;
+        }
+        if (control instanceof Composite)
+        {
+            for (Control child : ((Composite)control).getChildren())
+            {
+                String childText = findBodyText(child, depth + 1);
+                if (childText != null)
+                {
+                    if (isDebugSessionExistsBody(childText))
+                    {
+                        return childText;
+                    }
+                    if (firstSeen == null)
+                    {
+                        firstSeen = childText;
+                    }
+                }
+            }
+        }
+        return firstSeen;
+    }
+
+    /** @return the text of a {@link Label}/{@link CLabel}/{@link Text}/{@link Link}, else {@code null}. */
+    private static String labelLikeText(Control control)
+    {
+        try
+        {
+            if (control instanceof Label)
+            {
+                return ((Label)control).getText();
+            }
+            if (control instanceof CLabel)
+            {
+                return ((CLabel)control).getText();
+            }
+            if (control instanceof Text)
+            {
+                return ((Text)control).getText();
+            }
+            if (control instanceof Link)
+            {
+                return ((Link)control).getText();
+            }
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * Presses the default (index 0) button of the given dialog shell — "Update then
+     * run" for the D4 update modal, or "Stop existing and start new" /
+     * "Завершить старую и запустить новую" for the code-1003 "Debug session already
+     * exists" modal. Guarded against disposal and never throws onto the UI thread.
      */
     private static void pressDefaultButton(Shell shell)
     {
@@ -307,8 +495,20 @@ public final class LaunchUpdateDialogAutoConfirmer
             {
                 return;
             }
-            Activator.logInfo("Auto-confirming launch dialog '" + safeShellText(shell) //$NON-NLS-1$
-                + "' via button '" + safeText(button) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+            // Distinguish the two modals in the log so an unattended run's trail shows
+            // exactly which dialog was auto-completed (Bitrix 20074).
+            boolean debugSessionDialog = isDebugSessionExistsBody(readDialogBody(shell));
+            if (debugSessionDialog)
+            {
+                Activator.logInfo("Auto-confirming debug-session dialog '" //$NON-NLS-1$
+                    + safeShellText(shell) + "' via button '" + safeText(button) //$NON-NLS-1$
+                    + "' (stop existing and start new)"); //$NON-NLS-1$
+            }
+            else
+            {
+                Activator.logInfo("Auto-confirming launch dialog '" + safeShellText(shell) //$NON-NLS-1$
+                    + "' via button '" + safeText(button) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             Event event = new Event();
             event.widget = button;
             // Mirrors a user click: JFace dialog buttons fire buttonPressed() on

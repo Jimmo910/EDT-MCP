@@ -74,6 +74,51 @@ public class DebugLaunchToolTest
     }
 
     @Test
+    public void testSchemaDeclaresRestartIfRunning()
+    {
+        // D5 (Bitrix 20074): restartIfRunning must be a declared input so the
+        // schema<->execute parity test passes and clients can discover it. Its
+        // read in execute() is enforced by SchemaExecuteParamParityTest.
+        String schema = new DebugLaunchTool().getInputSchema();
+        assertNotNull(schema);
+        assertTrue("schema must declare restartIfRunning",
+            schema.contains("\"restartIfRunning\"")); //$NON-NLS-1$
+        assertTrue("schema must document the default short-circuit contract",
+            schema.contains("alreadyRunning:true")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testRestartIfRunningDefaultsToFalse()
+    {
+        // Default-false contract is reachable headlessly only through the
+        // project+application validation that runs BEFORE any launch-manager touch:
+        // omitting restartIfRunning must NOT change the required-arg behavior. The
+        // launch path itself (where false => alreadyRunning short-circuit) needs a
+        // live workbench and is covered E2E.
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "MyProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new DebugLaunchTool().execute(params);
+        assertTrue(result.contains("applicationId is required")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testGuideDocumentsRestartIfRunningAndTargetManagerGuard()
+    {
+        // D5: the guide must document both halves of the fix — the new
+        // restartIfRunning switch and that the already-running guard now also catches
+        // a session EDT tracks only through its debug target manager (the code-1003
+        // "Debug session already exists" modal source). Ratchet so it can't drift.
+        String guide = new DebugLaunchTool().getGuide();
+        assertNotNull(guide);
+        assertTrue("guide must document restartIfRunning",
+            guide.contains("restartIfRunning")); //$NON-NLS-1$
+        assertTrue("guide must document the target-manager already-running detection",
+            guide.contains("target manager")); //$NON-NLS-1$
+        assertTrue("guide must reference the 'Debug session already exists' modal it prevents",
+            guide.contains("Debug session already exists")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testOutputSchemaDeclaresLaunchingStatus()
     {
         // The launch is async: a fresh launch emits status:"launching" so the caller

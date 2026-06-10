@@ -109,6 +109,97 @@ public class LaunchUpdateDialogAutoConfirmerTest
             LaunchUpdateDialogAutoConfirmer.isTargetTitle(null));
     }
 
+    /**
+     * Russian body prefix of the code-1003 "Debug session already exists" modal
+     * ("Сессия отладки для проекта"), {@code \\uXXXX}-escaped exactly like the
+     * production constant so it compiles identically whatever encoding the Tycho
+     * compiler picks for the test bundle.
+     */
+    private static final String RUSSIAN_BODY_PREFIX =
+        "\u0421\u0435\u0441\u0441\u0438\u044F \u043E\u0442\u043B\u0430\u0434\u043A\u0438 "
+            + "\u0434\u043B\u044F \u043F\u0440\u043E\u0435\u043A\u0442\u0430";
+
+    // === code-1003 "Debug session already exists" body-prefix matcher (Bitrix 20074) ===
+
+    @Test
+    public void testDebugSessionExistsEnglishBodyMatches()
+    {
+        // The full English message starts with the matched prefix; the two
+        // interpolated names follow it, so a startsWith() match is required.
+        assertTrue("the English 1003 message body must match",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody(
+                "Debug session for project \"MyProject\" and application \"Main\" "
+                    + "has already been started.\nShould it be stopped?"));
+    }
+
+    @Test
+    public void testDebugSessionExistsRussianBodyMatches()
+    {
+        // The stand that hit Bitrix 20074 runs a Russian EDT — its localized body
+        // must match, or the safety-net auto-confirm never fires on the 1003 modal.
+        assertTrue("the Russian 1003 message body must match",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody(
+                RUSSIAN_BODY_PREFIX + " \"\u041F\u0440\u043E\u0435\u043A\u0442\""));
+    }
+
+    @Test
+    public void testDebugSessionExistsRussianConstantDecodesCorrectly()
+    {
+        // Guard against a typo in the escaped production constant.
+        assertEquals("the Russian body-prefix constant must equal the expected string",
+            RUSSIAN_BODY_PREFIX, LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_EXISTS_BODY_PREFIX_RU);
+        assertEquals("the Russian body prefix is 'Сессия отладки для проекта' (26 chars)",
+            26, LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_EXISTS_BODY_PREFIX_RU.length());
+    }
+
+    @Test
+    public void testBareQuestionBodyDoesNotMatch()
+    {
+        // CRITICAL: a generic question dialog (the 1003 modal's shell title is the
+        // generic "Question") whose body is NOT the debug-session message must NOT
+        // match — else the safety net would auto-dismiss every question dialog.
+        assertFalse("an unrelated question-dialog body must not match",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody(
+                "Are you sure you want to delete this object?"));
+    }
+
+    @Test
+    public void testNullBodyDoesNotMatch()
+    {
+        assertFalse("a null dialog body must not match",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody(null));
+    }
+
+    @Test
+    public void testEmptyBodyDoesNotMatch()
+    {
+        assertFalse("an empty dialog body must not match",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody(""));
+    }
+
+    @Test
+    public void testBodyPrefixSetHasBothLocales()
+    {
+        assertTrue("the 1003 body-prefix set must contain the English prefix",
+            LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_EXISTS_BODY_PREFIXES
+                .contains("Debug session for project"));
+        assertTrue("the 1003 body-prefix set must contain the Russian prefix",
+            LaunchUpdateDialogAutoConfirmer.DEBUG_SESSION_EXISTS_BODY_PREFIXES
+                .contains(RUSSIAN_BODY_PREFIX));
+    }
+
+    @Test
+    public void testUpdateTitleBodyMatcherDisjoint()
+    {
+        // The two matchers must stay disjoint: the update modal's TITLE must not be
+        // mistaken for a 1003 body, and the 1003 body must not be a known update title.
+        assertFalse("the update-modal title must not match the 1003 body matcher",
+            LaunchUpdateDialogAutoConfirmer.isDebugSessionExistsBody("Application update"));
+        assertFalse("a 1003 body must not be matched as an update-modal title",
+            LaunchUpdateDialogAutoConfirmer.isTargetTitle(
+                "Debug session for project \"X\" and application \"Y\" has already been started."));
+    }
+
     @Test
     public void testUnbalancedDisarmIsNoOp()
     {
