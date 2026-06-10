@@ -9,11 +9,14 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.ditrix.edt.mcp.server.utils.FormElementWriter;
+import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormObjectRef;
 
 /**
  * Lightweight contract tests for {@link DeleteMetadataTool}: tool metadata and JSON schema, without
@@ -121,5 +124,38 @@ public class DeleteMetadataToolTest
         assertTrue("guide should warn it is a cascading delete", guide.contains("Think twice")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("guide should document the two-phase workflow", guide.contains("confirm=true")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("guide should list member kinds", guide.contains("enum value")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ---- FIX-2: the 4-part form-object FQN is recognized by the delete dispatch -------------------
+
+    /**
+     * The delete dispatch routes a 4-part form-object FQN ({@code Type.Object.Form.Name}) to the
+     * owned-form branch via the SAME recognizer create_metadata uses ({@code parseFormObjectCreate}), so
+     * an owned form created by FQN is deletable by that FQN (symmetric with create). This asserts the
+     * recognizer the dispatch keys off, runtime-free.
+     */
+    @Test
+    public void testFormObjectFqnRecognizedByDeleteDispatch()
+    {
+        FormObjectRef ref = FormElementWriter.parseFormObjectCreate("Catalog.Products.Form.ItemForm"); //$NON-NLS-1$
+        assertNotNull("a 4-part form FQN must be recognized as an owned form object", ref); //$NON-NLS-1$
+        assertEquals("Catalog", ref.ownerType); //$NON-NLS-1$
+        assertEquals("Products", ref.ownerName); //$NON-NLS-1$
+        assertEquals("ItemForm", ref.formName); //$NON-NLS-1$
+        // The dispatch checks the form-MEMBER parser first; it must NOT also claim a 4-part form FQN
+        // (otherwise the form-object branch would be unreachable).
+        assertNull("a 4-part form FQN is not a form member", //$NON-NLS-1$
+            FormElementWriter.parse("Catalog.Products.Form.ItemForm")); //$NON-NLS-1$
+    }
+
+    /**
+     * A CommonForm ({@code CommonForm.Name}, 2 parts) is a real top object - it must fall through the
+     * form-object recognizer to the mdclass refactoring path, NOT the owned-form branch.
+     */
+    @Test
+    public void testCommonFormIsNotAnOwnedFormObject()
+    {
+        assertNull("a CommonForm is a top object, not an owned form", //$NON-NLS-1$
+            FormElementWriter.parseFormObjectCreate("CommonForm.MyForm")); //$NON-NLS-1$
     }
 }
