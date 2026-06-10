@@ -23,7 +23,9 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.ILaunch;
+import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.ILaunchManager;
+import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.PlatformUI;
@@ -262,6 +264,16 @@ public final class LaunchLifecycleUtils
         {
             OWNED_LAUNCHES.remove(launch);
         }
+    }
+
+    /**
+     * @return {@code true} when {@code launch} is currently registered as owned by
+     *     an MCP tool (identity-equals lookup — see {@link #registerOwnedLaunch});
+     *     {@code false} for {@code null}
+     */
+    static boolean isOwnedLaunch(ILaunch launch)
+    {
+        return launch != null && OWNED_LAUNCHES.contains(launch);
     }
 
     /**
@@ -1559,5 +1571,494 @@ public final class LaunchLifecycleUtils
             }
         });
         return holder[0];
+    }
+
+    // ==================================================================================
+    // Existing-CLIENT-session layer (D5c/D7b, Bitrix 20074 + 20092). Moved here from
+    // DebugLaunchTool so EVERY tool that spawns a 1C client (debug_launch, the YAXUnit
+    // debug path) shares ONE detect+terminate policy: a session counts as an existing
+    // CLIENT session only with ≥1 live CLIENT-typed thread (the type-aware
+    // discriminator, DebugServerTargetSupport.findFirstLiveClientThread), so a
+    // debug-mode standalone server — whose live thread is typed SERVER — never
+    // short-circuits a client launch and is NEVER terminated.
+    // ==================================================================================
+
+    /** Max wait (ms) for a non-interactive terminate to take effect — mirrors the
+     * delegate's {@code terminateOldDebugSessions} ~3s grace. */
+    private static final long RESTART_TERMINATE_TIMEOUT_MS = 3000L;
+
+    /**
+     * The single existing-session decision (D5c, Bitrix 20074): one
+     * {@code (project, applicationId)} resolves to AT MOST one
+     * {@link ExistingClientSession} via {@link #resolveExistingClientSession}, and
+     * every call site funnels that result through one policy point (the
+     * {@code restartIfRunning} handler in {@code DebugLaunchTool}, or
+     * {@link #ensureNoExistingClientSession} for the always-fresh YAXUnit debug
+     * path), so the decision is honored identically in EVERY path — by-name and
+     * by-project+application, and BOTH the {@link DebugSessionRegistry}
+     * ({@code ILaunchManager}) guards and the {@link DebugServerTargetSupport}
+     * (target-manager) detect.
+     *
+     * <p>A session is a real CLIENT session worth short-circuiting/terminating only
+     * when it is either:
+     * <ul>
+     *   <li>a DEBUG launch/target with ≥1 non-terminated CLIENT-typed thread — a
+     *       thin-client debug session
+     *       ({@link DebugServerTargetSupport#findFirstLiveClientThread} applies the
+     *       canonical {@code DebugTargetTypeUtil} classifier to
+     *       {@code IRuntimeDebugTargetThread.getType()}), or</li>
+     *   <li>a RUN-mode launch — a genuine running 1C client that carries NO debug
+     *       target at all (the A12/A13 already-running guard); the thread-type gate
+     *       does not apply because there is no debug target to inspect.</li>
+     * </ul>
+     * A DEBUG launch/target whose live threads are all server-typed (a debug-mode
+     * standalone server carries a live thread typed {@code SERVER}) — or that has no
+     * live thread at all (profiling/idle server target) — is NEVER a client session:
+     * it must not short-circuit the client (the client proceeds and attaches) and
+     * must never be terminated (Bitrix 20074).
+     */
+    public static final class ExistingClientSession
+    {
+        /**
+         * The owning Eclipse launch. Non-{@code null} for the {@code ILaunchManager}
+         * paths (it IS the terminate handle when {@link #liveTarget} is {@code null},
+         * the RUN-mode case); may be {@code null} for the target-manager path, where
+         * {@link #liveTarget} is always set and is the terminate handle instead.
+         */
+        public final ILaunch launch;
+        /**
+         * The matched live DEBUG target with ≥1 live CLIENT-typed thread, or
+         * {@code null} when the session is a RUN-mode launch (no debug target).
+         * Drives the terminate path: a target is terminated via the target; a
+         * RUN-mode launch via the launch.
+         */
+        public final IDebugTarget liveTarget;
+        /** The session's launch mode (e.g. {@code debug}, {@code run}). */
+        public final String mode;
+
+        public ExistingClientSession(ILaunch launch, IDebugTarget liveTarget, String mode)
+        {
+            this.launch = launch;
+            this.liveTarget = liveTarget;
+            this.mode = mode;
+        }
+    }
+
+    /**
+     * Resolves the ONE live CLIENT session the {@code ILaunchManager} knows for the
+     * given applicationId, with the CLIENT-typed-thread discriminator applied so a
+     * standalone-SERVER / profiling session never matches (Bitrix 20074) — including
+     * a debug-mode standalone server whose live thread is typed {@code SERVER}.
+     *
+     * <p>Order, mirroring the legacy guards it unifies:
+     * <ol>
+     *   <li>{@link DebugSessionRegistry#findActiveTarget} — a non-terminated DEBUG
+     *       target for this app id. It matches ONLY when that target also carries a
+     *       live CLIENT-typed thread
+     *       ({@link DebugServerTargetSupport#findFirstLiveClientThread}); a
+     *       server/profiling target is rejected so the client proceeds.</li>
+     *   <li>{@link DebugSessionRegistry#findActiveLaunch} — any non-terminated launch
+     *       for this app id, catching a RUN-mode (or otherwise debug-target-less)
+     *       client the target scan misses. A RUN-mode launch carries no debug target,
+     *       so it is a genuine running client (returned as a session with a
+     *       {@code null} target). A DEBUG launch is returned ONLY when one of its
+     *       debug targets has a live CLIENT-typed thread — otherwise it is the same
+     *       server session and is rejected.</li>
+     * </ol>
+     *
+     * @param applicationId the application id (real or synthetic); {@code null}/empty
+     *     never matches
+     * @return the live client session, or {@code null} when none exists (so the
+     *     caller proceeds to launch, including when only a server session shares
+     *     this app id)
+     */
+    public static ExistingClientSession resolveExistingClientSession(String applicationId)
+    {
+        if (applicationId == null || applicationId.isEmpty())
+        {
+            return null;
+        }
+        // The two ILaunchManager views the legacy guards used, now run through one
+        // type-aware decision (decideExistingClientSession). The lookups are the only
+        // workbench-bound part; the decision is pure and unit-tested.
+        return decideExistingClientSession(
+            DebugSessionRegistry.findActiveTarget(applicationId),
+            DebugSessionRegistry.findActiveLaunch(applicationId));
+    }
+
+    /**
+     * The PURE existing-client decision over the two {@code ILaunchManager} views
+     * (D5c/D7b, Bitrix 20074) — split out from {@link #resolveExistingClientSession}
+     * so the CLIENT-typed-thread discrimination is unit-testable without a live
+     * workbench.
+     *
+     * <ol>
+     *   <li>{@code activeTarget} (from {@link DebugSessionRegistry#findActiveTarget}) —
+     *       a live DEBUG target. Matches a client ONLY when it carries a live
+     *       CLIENT-typed thread
+     *       ({@link DebugServerTargetSupport#findFirstLiveClientThread}); a target
+     *       whose live threads are all server-typed (debug-mode standalone server) or
+     *       absent (profiling/idle server) is rejected here.</li>
+     *   <li>{@code activeLaunch} (from {@link DebugSessionRegistry#findActiveLaunch}) —
+     *       any non-terminated launch the target scan missed. A live-CLIENT-thread
+     *       debug target it owns ⇒ client; ZERO debug targets ⇒ genuine RUN-mode
+     *       client (the A12/A13 guard); debug target(s) but none with a live
+     *       CLIENT-typed thread ⇒ server session ⇒ NOT a client (returns
+     *       {@code null}, so the client proceeds and attaches).</li>
+     * </ol>
+     *
+     * @param activeTarget the live DEBUG target for the app id, or {@code null}
+     * @param activeLaunch a non-terminated launch for the app id, or {@code null}
+     * @return the live client session, or {@code null} when none is a real client
+     */
+    public static ExistingClientSession decideExistingClientSession(IDebugTarget activeTarget,
+        ILaunch activeLaunch)
+    {
+        // 1) A live DEBUG target with a live CLIENT-typed thread = a real client
+        //    debug session. A live SERVER-typed thread (debug-mode standalone server)
+        //    deliberately does NOT match (Bitrix 20074).
+        if (activeTarget != null
+            && DebugServerTargetSupport.findFirstLiveClientThread(activeTarget) != null)
+        {
+            ILaunch launch = activeTarget.getLaunch();
+            String mode = launch != null ? launch.getLaunchMode() : ILaunchManager.DEBUG_MODE;
+            return new ExistingClientSession(launch, activeTarget, mode);
+        }
+
+        // 2) A non-terminated launch the target scan missed (e.g. RUN mode, no debug
+        //    target). A RUN-mode launch is a genuine running client and short-circuits
+        //    as before; a DEBUG launch with debug target(s) but no live CLIENT-typed
+        //    thread is the same standalone-server session and must NOT short-circuit
+        //    the client.
+        if (activeLaunch == null)
+        {
+            return null;
+        }
+        IDebugTarget liveTarget = firstLiveClientThreadTarget(activeLaunch);
+        if (liveTarget != null)
+        {
+            // A live CLIENT debug target this launch owns — a client debug session.
+            return new ExistingClientSession(activeLaunch, liveTarget, activeLaunch.getLaunchMode());
+        }
+        if (activeLaunch.getDebugTargets().length == 0)
+        {
+            // No debug target at all (RUN mode, or a launch that never produced one):
+            // a genuine running client — the A12/A13 already-running guard. There is
+            // no server debug target to confuse it with.
+            return new ExistingClientSession(activeLaunch, null, activeLaunch.getLaunchMode());
+        }
+        // The launch HAS debug target(s) but none carries a live CLIENT-typed thread —
+        // a standalone-server / profiling session. Do NOT short-circuit; the client
+        // proceeds and attaches (Bitrix 20074).
+        return null;
+    }
+
+    /**
+     * @return the first debug target of {@code launch} that carries a non-terminated
+     *     CLIENT-typed thread
+     *     ({@link DebugServerTargetSupport#findFirstLiveClientThread}), or
+     *     {@code null} when the launch has no such live-client target (e.g. its only
+     *     target is a debug-mode standalone server, whose live thread is typed
+     *     SERVER). Best-effort.
+     */
+    static IDebugTarget firstLiveClientThreadTarget(ILaunch launch)
+    {
+        if (launch == null)
+        {
+            return null;
+        }
+        for (IDebugTarget target : launch.getDebugTargets())
+        {
+            if (target != null && !target.isTerminated()
+                && DebugServerTargetSupport.findFirstLiveClientThread(target) != null)
+            {
+                return target;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Terminates the given live CLIENT debug target non-interactively and waits up
+     * to {@link #RESTART_TERMINATE_TIMEOUT_MS} for it to die, then clears the
+     * registry for {@code appId} — mirroring the delegate's
+     * {@code terminateOldDebugSessions} (terminate → short wait → proceed) and the
+     * {@code terminate_launch} cleanup (forget the application so a half-dead client
+     * is not raced). Best-effort: a termination failure is logged, not thrown — the
+     * caller proceeds to launch regardless, and if a stale client lingers the launch
+     * delegate's modal is the armed auto-confirmer's job. Callers must only ever pass
+     * a target the type-aware discriminator matched as a CLIENT — never a server
+     * target (Bitrix 20074).
+     */
+    public static void terminateExistingSessionAndWait(IDebugTarget target, String appId)
+    {
+        if (target == null)
+        {
+            if (appId != null && !appId.isEmpty())
+            {
+                DebugSessionRegistry.get().forgetApplication(appId);
+            }
+            return;
+        }
+        try
+        {
+            if (target.canTerminate())
+            {
+                target.terminate();
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error terminating existing debug session before restart", e); //$NON-NLS-1$
+        }
+        long deadline = System.currentTimeMillis() + RESTART_TERMINATE_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline)
+        {
+            try
+            {
+                if (target.isTerminated())
+                {
+                    break;
+                }
+            }
+            catch (Exception e)
+            {
+                break;
+            }
+            try
+            {
+                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (appId != null && !appId.isEmpty())
+        {
+            DebugSessionRegistry.get().forgetApplication(appId);
+        }
+    }
+
+    /**
+     * Terminates the given running launch non-interactively (the RUN-mode / no-debug-
+     * target client case) and waits up to {@link #RESTART_TERMINATE_TIMEOUT_MS} for it
+     * to die, then clears the registry for {@code appId} — the launch analogue of
+     * {@link #terminateExistingSessionAndWait}. Best-effort: a failure is logged, not
+     * thrown; the caller proceeds to launch regardless.
+     */
+    public static void terminateExistingLaunchAndWait(ILaunch launch, String appId)
+    {
+        if (launch == null)
+        {
+            if (appId != null && !appId.isEmpty())
+            {
+                DebugSessionRegistry.get().forgetApplication(appId);
+            }
+            return;
+        }
+        try
+        {
+            if (launch.canTerminate())
+            {
+                launch.terminate();
+            }
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error terminating existing launch before restart", e); //$NON-NLS-1$
+        }
+        long deadline = System.currentTimeMillis() + RESTART_TERMINATE_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline)
+        {
+            try
+            {
+                if (launch.isTerminated())
+                {
+                    break;
+                }
+            }
+            catch (Exception e)
+            {
+                break;
+            }
+            try
+            {
+                Thread.sleep(LaunchConfigUtils.LAUNCH_POLL_INTERVAL_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (appId != null && !appId.isEmpty())
+        {
+            DebugSessionRegistry.get().forgetApplication(appId);
+        }
+    }
+
+    /**
+     * Resolves the application id EXACTLY the way EDT's launch delegate's
+     * {@code findConfiguredApplicationIdentifier} does: the config's persisted
+     * {@code ATTR_APPLICATION_ID} when present, else the project's
+     * {@code IApplicationManager.getDefaultApplication(project)} id. NOT the
+     * synthetic {@code launch:<configName>} our {@code getApplicationIdFor} mints
+     * when no real id is persisted — that synthetic id is what made the duplicate
+     * guard miss the delegate's session in Bitrix 20074 (and what let the YAXUnit
+     * debug path's {@code prepareForFreshLaunch} sweep miss a UI-started session in
+     * Bitrix 20092: it never equals the delegate's real/default app id). Returns
+     * {@code null} if the id cannot be resolved (no persisted id and no default
+     * application).
+     */
+    public static String resolveDelegateApplicationId(ILaunchConfiguration config, String projectName)
+    {
+        String realId = LaunchConfigUtils.readAttribute(config,
+            LaunchConfigUtils.ATTR_APPLICATION_ID, ""); //$NON-NLS-1$
+        if (realId != null && !realId.isEmpty())
+        {
+            return realId;
+        }
+        ProjectContext ctx = ProjectContext.of(projectName);
+        if (!ctx.isOpen())
+        {
+            return null;
+        }
+        IApplicationManager appManager = Activator.getDefault().getApplicationManager();
+        if (appManager == null)
+        {
+            return null;
+        }
+        // resolveDefaultApplicationId returns the original (empty) value when there is
+        // no default — normalize that to null so findRuntimeClientDebugTarget's
+        // empty-id guard short-circuits instead of matching on "".
+        String resolved = resolveDefaultApplicationId(ctx.project(), null, appManager);
+        return resolved != null && !resolved.isEmpty() ? resolved : null;
+    }
+
+    /**
+     * Detects and non-interactively terminates ANY existing live CLIENT session of
+     * {@code (project, delegateAppId)} — the fresh-run guarantee of the YAXUnit
+     * debug path (Bitrix 20092), equivalent to {@code debug_launch}'s
+     * {@code restartIfRunning=true} semantics. Detection runs over BOTH sources,
+     * each with the type-aware CLIENT discriminator:
+     * <ol>
+     *   <li>the {@code ILaunchManager} views ({@link #resolveExistingClientSession} —
+     *       the {@link DebugSessionRegistry} guards), and</li>
+     *   <li>EDT's debug target manager
+     *       ({@link DebugServerTargetSupport#findRuntimeClientDebugTarget}, keyed the
+     *       launch delegate's way on {@code (project, delegateAppId)}) — the set the
+     *       delegate's code-1003 "Debug session already exists" check scans, which
+     *       includes UI-started "Debug As" sessions invisible to the
+     *       {@code ILaunchManager} guards and to {@code prepareForFreshLaunch}'s
+     *       {@code getApplicationIdFor}-keyed sweep.</li>
+     * </ol>
+     * Each found CLIENT session is terminated non-interactively
+     * ({@link #terminateExistingSessionAndWait} /
+     * {@link #terminateExistingLaunchAndWait}: terminate + {@code forgetApplication}
+     * + ≤3s wait). A debug-mode standalone server session — live thread typed
+     * {@code SERVER} — is NEVER matched and NEVER terminated (Bitrix 20074).
+     * A launch OWNED by another MCP tool ({@link #registerOwnedLaunch} — e.g. a
+     * concurrent {@code run_yaxunit_tests} RUN launch of the same application) is
+     * never terminated by the {@code ILaunchManager}-sourced sweep either: it is
+     * skipped and logged, because it is managed by the tool that spawned it (see
+     * {@link #sweepLaunchManagerSession}). Best-effort and fully guarded: never
+     * throws; a {@code null} project / {@code null}-or-empty app id is a no-op.
+     *
+     * <p>{@code delegateAppId} MUST be the delegate-resolved application id
+     * ({@code ATTR_APPLICATION_ID} else the project default — see
+     * {@link #resolveDelegateApplicationId}); a synthetic {@code launch:<name>} id
+     * never matches the delegate's session.
+     *
+     * @param project the launch's target project (may be {@code null} — skips the
+     *     target-manager source)
+     * @param delegateAppId the delegate-resolved application id (may be
+     *     {@code null}/empty — no-op)
+     * @return {@code true} when at least one existing client session was found and
+     *     terminated
+     */
+    public static boolean ensureNoExistingClientSession(IProject project, String delegateAppId)
+    {
+        if (delegateAppId == null || delegateAppId.isEmpty())
+        {
+            return false;
+        }
+        // Source 1: the ILaunchManager views (registry guards), type-discriminated.
+        // An MCP-OWNED launch (a concurrent run_yaxunit_tests / debug_yaxunit_tests
+        // launch of the same application) is exempt — see sweepLaunchManagerSession.
+        boolean terminatedAny =
+            sweepLaunchManagerSession(resolveExistingClientSession(delegateAppId), delegateAppId);
+
+        // Source 2: EDT's debug target manager — the delegate's own 1003 criterion
+        // (catches UI-started "Debug As" sessions the ILaunchManager never sees).
+        if (project != null)
+        {
+            IDebugTarget existing = DebugServerTargetSupport.findRuntimeClientDebugTarget(
+                project.getName(), delegateAppId);
+            if (existing != null)
+            {
+                Activator.logInfo("Fresh-launch guard: terminating existing client session from " //$NON-NLS-1$
+                    + "the debug target manager (e.g. UI-started 'Debug As'): applicationId=" //$NON-NLS-1$
+                    + delegateAppId);
+                terminateExistingSessionAndWait(existing, delegateAppId);
+                terminatedAny = true;
+            }
+        }
+        return terminatedAny;
+    }
+
+    /**
+     * Handles the {@code ILaunchManager}-sourced half of
+     * {@link #ensureNoExistingClientSession}: terminates the resolved client session
+     * non-interactively — EXCEPT a launch registered as MCP-owned
+     * ({@link #registerOwnedLaunch}). The default {@code updateBeforeLaunch=true}
+     * path never reaches an owned launch (it hard-fails on owned launches in
+     * {@link #prepareForFreshLaunch} first), but with {@code updateBeforeLaunch=false}
+     * this sweep is the only line of defence: without the exemption a YAXUnit debug
+     * call would silently terminate a concurrent MCP-owned RUN test launch of the
+     * same application (the RUN-mode branch below,
+     * {@link #terminateExistingLaunchAndWait}). Owned launches are managed by the
+     * tool that spawned them — skip and log instead. The target-manager source in
+     * {@link #ensureNoExistingClientSession} is unaffected: the sessions it finds
+     * have no owning {@link ILaunch} of ours.
+     *
+     * <p>Package-visible so the skip-vs-terminate decision is unit-testable without
+     * a live {@code ILaunchManager}.
+     *
+     * @param session the session resolved by {@link #resolveExistingClientSession}
+     *     (may be {@code null} — no-op)
+     * @param delegateAppId the delegate-resolved application id (used for registry
+     *     cleanup and logging)
+     * @return {@code true} when the session was terminated; {@code false} when there
+     *     was none or it was skipped as MCP-owned
+     */
+    static boolean sweepLaunchManagerSession(ExistingClientSession session, String delegateAppId)
+    {
+        if (session == null)
+        {
+            return false;
+        }
+        if (isOwnedLaunch(session.launch))
+        {
+            String name = session.launch.getLaunchConfiguration() != null
+                ? session.launch.getLaunchConfiguration().getName() : "<unknown>"; //$NON-NLS-1$
+            Activator.logInfo("Fresh-launch sweep: skipping MCP-owned launch '" + name //$NON-NLS-1$
+                + "'; it is managed by its own tool: applicationId=" + delegateAppId); //$NON-NLS-1$
+            return false;
+        }
+        if (session.liveTarget != null)
+        {
+            Activator.logInfo("Fresh-launch guard: terminating existing client debug target: " //$NON-NLS-1$
+                + "applicationId=" + delegateAppId); //$NON-NLS-1$
+            terminateExistingSessionAndWait(session.liveTarget, delegateAppId);
+        }
+        else
+        {
+            Activator.logInfo("Fresh-launch guard: terminating existing client launch (mode=" //$NON-NLS-1$
+                + session.mode + "): applicationId=" + delegateAppId); //$NON-NLS-1$ //$NON-NLS-2$
+            terminateExistingLaunchAndWait(session.launch, delegateAppId);
+        }
+        return true;
     }
 }
