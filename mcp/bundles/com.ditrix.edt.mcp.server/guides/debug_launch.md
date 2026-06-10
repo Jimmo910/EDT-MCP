@@ -14,7 +14,7 @@ Use this to bring up a debuggable 1C session before setting breakpoints and step
 - **launchConfigurationName** (string) — exact config name; if set, projectName and applicationId are ignored. Use `list_configurations` to find the name.
 - **projectName** (string) — EDT project name; required when launchConfigurationName is absent.
 - **applicationId** (string) — from `get_applications`; required in the projectName+applicationId mode.
-- **updateBeforeLaunch** (boolean, default true) — run the EDT 'update database before launch' preflight. Ignored for Attach configs (nothing to update). The update analysis is shared with the YAXUnit tools: skip when already UPDATED, wait when BEING_UPDATED, otherwise incremental-update.
+- **updateBeforeLaunch** (boolean, default true) — silently apply the configuration->DB update before launching so the EDT launch delegate finds the infobase already UPDATED and shows no 'Update database?' modal. Ignored for Attach configs (nothing to update). The update analysis is shared with the YAXUnit tools: skip when already UPDATED, wait when BEING_UPDATED, otherwise incremental-update. As a belt-and-suspenders safeguard, the actual `config.launch(...)` is wrapped in an auto-confirmer that programmatically presses 'Update then run' if the delegate's modal still appears — in either EDT locale (English 'Application update' / Russian 'Обновление приложения'), so an unattended Russian stand never hangs on it. With `updateBeforeLaunch=false` the update is skipped and the platform may then show that modal.
 
 ## Already-running guard
 
@@ -32,7 +32,7 @@ If a launch of the same configuration/application is still alive, the tool short
 - Returns JSON. On a fresh launch: `launchConfiguration`, `configurationType`, `attach`, `mode`, `status: "launching"`, `project`/`applicationId` (when known), and a `message`. The `alreadyRunning: true` short-circuit returns the same identity fields but no `status` (nothing was launched).
 - The launch is ASYNCHRONOUS and non-blocking: the tool dispatches `config.launch(DEBUG_MODE, null)` onto the EDT UI thread and returns `status: "launching"` immediately, WITHOUT waiting for the 1C client to finish starting (it may show login / database-update dialogs). Poll `debug_status` until the session appears running, then use `wait_for_break`. Because the launch runs after the call returns, a launch failure is NOT reported in this response — it is written to the EDT error log instead.
 - On a not-found config the error payload includes `availableConfigurations` (every debug-capable config: runtime client + attach), so you can pick a valid name.
-- The launch goes through a direct `config.launch(DEBUG_MODE, null)` to avoid modal EDT dialogs that would block the MCP worker thread.
+- The launch goes through a direct `config.launch(DEBUG_MODE, null)` to avoid modal EDT dialogs that would block the MCP worker thread. While that call runs, an auto-confirmer (`LaunchUpdateDialogAutoConfirmer`) is armed to dismiss the launch delegate's 'Application update' modal non-interactively; it runs on the EDT UI thread (the modal's own nested event loop dispatches the button press), and because the MCP worker has already returned `status: "launching"`, the server is never blocked on the dialog.
 
 ## Gotchas
 
