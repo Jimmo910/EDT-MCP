@@ -281,4 +281,20 @@ public class RunYaxunitTestsToolTest
             guide.contains("finished-but-unfetched")
                 || guide.contains("finished BETWEEN your calls"));
     }
+
+    @Test
+    public void testGuideDocumentsServerApplicationDeferredUpdate()
+    {
+        // D6 ratchet (Bitrix 20091): on a standalone-server application the auto-chain
+        // skips its silent DB update — the update is performed by EDT's coordinated
+        // launch flow (auto-confirmed around workingCopy.launch) because an out-of-band
+        // pre-update started the server in RUN mode and wedged the debug restart.
+        String guide = new RunYaxunitTestsTool().getGuide();
+        assertTrue("guide must name the ServerApplication. id prefix gate",
+            guide.contains("ServerApplication.")); //$NON-NLS-1$
+        assertTrue("guide must say server apps are not pre-updated out-of-band",
+            guide.contains("does NOT pre-update such applications out-of-band")); //$NON-NLS-1$
+        assertTrue("guide must document the coordinated launch flow performing the update",
+            guide.contains("coordinated launch flow")); //$NON-NLS-1$
+    }
 }

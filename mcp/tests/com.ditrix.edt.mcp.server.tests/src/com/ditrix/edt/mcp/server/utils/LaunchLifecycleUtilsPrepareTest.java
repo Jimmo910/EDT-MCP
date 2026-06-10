@@ -315,4 +315,59 @@ public class LaunchLifecycleUtilsPrepareTest
         verify(runtimeLaunch, atLeastOnce()).terminate();
         verify(attachLaunch, atLeastOnce()).terminate();
     }
+
+    // ============ D6: server-application update deferred to the launch delegate (Bitrix 20091) ============
+
+    /** A standalone-server application id — the literal {@code ServerApplication.} prefix. */
+    private static final String SERVER_APP_ID = "ServerApplication.MyServer";
+
+    @Test
+    public void testServerApplicationSkipsProgrammaticUpdate() throws Exception
+    {
+        // D6 (Bitrix 20091): for a ServerApplication.* id the auto-chain must NOT run
+        // the programmatic DB update — IApplicationManager.update on a standalone-server
+        // application starts the server in RUN mode and caches a designer-agent
+        // connection whose teardown wedges the launch delegate's debug restart. The
+        // chain still succeeds (ok=true) so the caller proceeds to workingCopy.launch,
+        // where the armed update confirmer covers the delegate's coordinated update
+        // dialog — but the application manager must never be touched.
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[0]);
+        IApplicationManager mgr = mock(IApplicationManager.class);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), SERVER_APP_ID, mgr, 2, null);
+
+        assertTrue("auto-chain must succeed for a server application: " + result.getError(),
+            result.isOk());
+        verify(mgr, never()).update(any(), any(), any(), any());
+        verify(mgr, never()).getUpdateState(any());
+        verify(mgr, never()).getApplication(any(IProject.class), anyString());
+    }
+
+    @Test
+    public void testServerApplicationStillSweepsStaleLaunches() throws Exception
+    {
+        // The D6 gate skips ONLY the update step: the terminate-stale pass (which does
+        // not open infobase connections) must still sweep a live launch carrying the
+        // same ServerApplication.* id, and the counter must reflect it — while the
+        // update itself stays deferred to the launch delegate.
+        ILaunchConfiguration runtimeCfg = mockRuntimeConfig(
+            "MyServer.ThinClient", PROJECT_NAME, SERVER_APP_ID);
+        ILaunch runtimeLaunch = mock(ILaunch.class);
+        when(runtimeLaunch.getLaunchConfiguration()).thenReturn(runtimeCfg);
+        wireSelfTerminating(runtimeLaunch);
+
+        ILaunchManager launchManager = mock(ILaunchManager.class);
+        when(launchManager.getLaunches()).thenReturn(new ILaunch[] { runtimeLaunch });
+        IApplicationManager mgr = mock(IApplicationManager.class);
+
+        PreLaunchResult result = LaunchLifecycleUtils.prepareForFreshLaunch(
+            launchManager, mockOpenProject(), SERVER_APP_ID, mgr, 2, null);
+
+        assertTrue("auto-chain must succeed: " + result.getError(), result.isOk());
+        assertEquals("the stale launch must still be swept", 1, result.getTerminatedCount());
+        verify(runtimeLaunch, atLeastOnce()).terminate();
+        verify(mgr, never()).update(any(), any(), any(), any());
+    }
 }

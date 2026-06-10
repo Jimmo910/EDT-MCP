@@ -74,6 +74,41 @@ public final class DebugServerTargetSupport
     }
 
     /**
+     * Returns {@code true} when {@code applicationId} addresses a 1C STANDALONE-SERVER
+     * application — the literal {@code ServerApplication.} prefix that real server
+     * application ids carry (and which the synthetic ids minted by
+     * {@link #listServerTargets()} mirror on purpose).
+     *
+     * <p>This is the D6 gate (Bitrix 20091): a server application must NEVER be
+     * DB-updated out-of-band by this plugin. {@code IApplicationManager.update} on a
+     * {@code ServerApplication} routes through EDT's
+     * {@code ServerApplicationBehaviourDelegate.update} →
+     * {@code JobBasedServerModulePublisher.publish}, which STARTS the standalone
+     * server in RUN mode and caches a live designer-agent connection in the global
+     * {@code DesignerSessionPool} singleton. A subsequent debug launch then has to
+     * restart the server in DEBUG mode, and the stop's {@code closeDesignerSession}
+     * tears down that cached live connection — un-timed SSH exchanges against a
+     * shutting-down server under the pool's single global lock wedge the launch.
+     * EDT's native flow ({@code ApplicationUiSupport.ensureUpdated}) avoids this by
+     * ORDER: it {@code prepare}s the server directly in the target (debug) mode
+     * FIRST and only then updates — no restart, no teardown. So for server
+     * applications the update is deferred to the launch delegate's coordinated path;
+     * its "Application update" dialog (shown only when the IB is stale) is pressed
+     * by the armed {@link LaunchUpdateDialogAutoConfirmer}.
+     *
+     * <p>Deliberately a literal id-prefix test, NOT an {@code instanceof} check
+     * against the server-applications bundle — that would add a new bundle
+     * dependency for what the id already encodes.
+     *
+     * @param applicationId the id to test (may be {@code null})
+     * @return {@code true} for a {@code ServerApplication.*} id
+     */
+    public static boolean isServerApplicationId(String applicationId)
+    {
+        return applicationId != null && applicationId.startsWith(SERVER_APP_ID_PREFIX);
+    }
+
+    /**
      * A single debug-server target seen through the Eclipse debug model, with the
      * stable applicationId the MCP tools address it by.
      */

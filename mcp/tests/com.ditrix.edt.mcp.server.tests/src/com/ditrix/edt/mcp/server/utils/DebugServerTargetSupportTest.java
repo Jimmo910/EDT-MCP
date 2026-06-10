@@ -40,6 +40,32 @@ public class DebugServerTargetSupportTest
     }
 
     @Test
+    public void testIsServerApplicationIdMatchesServerPrefix()
+    {
+        // The D6 gate (Bitrix 20091): the literal "ServerApplication." prefix marks a
+        // standalone-server application that must never be DB-updated out-of-band.
+        assertTrue(DebugServerTargetSupport.isServerApplicationId("ServerApplication.MyServer")); //$NON-NLS-1$
+        assertTrue(DebugServerTargetSupport.isServerApplicationId(
+            DebugServerTargetSupport.SERVER_APP_ID_PREFIX + "x")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testIsServerApplicationIdRejectsOtherIds()
+    {
+        // Null/empty, the other synthetic prefixes and a real infobase-application id
+        // are all NOT server applications — their programmatic pre-update keeps running.
+        assertFalse(DebugServerTargetSupport.isServerApplicationId(null));
+        assertFalse(DebugServerTargetSupport.isServerApplicationId("")); //$NON-NLS-1$
+        assertFalse(DebugServerTargetSupport.isServerApplicationId("launch:MyConfig")); //$NON-NLS-1$
+        assertFalse(DebugServerTargetSupport.isServerApplicationId("attach:MyConfig")); //$NON-NLS-1$
+        assertFalse(DebugServerTargetSupport.isServerApplicationId(
+            "0461b6bb-39f8-4b2b-9268-0d4bbc9e3df9")); //$NON-NLS-1$
+        // The gate is the literal prefix — never case-insensitive, never a bare name.
+        assertFalse(DebugServerTargetSupport.isServerApplicationId("serverapplication.x")); //$NON-NLS-1$
+        assertFalse(DebugServerTargetSupport.isServerApplicationId("ServerApplication")); //$NON-NLS-1$
+    }
+
+    @Test
     public void testListServerTargetsNeverNull()
     {
         // Headless: no debug-core manager → empty, never null, never throws.

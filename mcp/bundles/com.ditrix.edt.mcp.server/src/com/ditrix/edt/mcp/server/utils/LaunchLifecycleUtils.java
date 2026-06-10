@@ -1277,7 +1277,14 @@ public final class LaunchLifecycleUtils
      *   <li>FORCE a derived-data recompute of the requested projects so a freshly
      *       edited extension {@code .cfe} is regenerated, then wait for it to settle;</li>
      *   <li>Run {@link #updateApplicationIfNeeded} to settle the IB in
-     *       {@code UPDATED} state — the launch delegate then skips its dialog.</li>
+     *       {@code UPDATED} state — the launch delegate then skips its dialog.
+     *       EXCEPT for a STANDALONE-SERVER application
+     *       ({@link DebugServerTargetSupport#isServerApplicationId}): updating one
+     *       out-of-band starts the standalone server in RUN mode and holds a cached
+     *       designer-agent connection that wedges the launch delegate's debug
+     *       restart (D6, Bitrix 20091) — for those the update is deferred to the
+     *       delegate's coordinated path, whose dialog the YAXUnit tools'
+     *       {@link LaunchUpdateDialogAutoConfirmer} arming auto-presses.</li>
      * </ol>
      *
      * <p>If any step fails, the result has {@code ok=false} and the caller must
@@ -1426,6 +1433,30 @@ public final class LaunchLifecycleUtils
             // extension, missing freshly added tests (bug #19925). updateScope
             // narrows the recompute when only a specific extension changed.
             recomputeAndSettle(resolveUpdateScope(project, updateScope));
+
+            // D6 (Bitrix 20091): a STANDALONE-SERVER application (literal
+            // "ServerApplication." id prefix) must NOT be DB-updated out-of-band
+            // here. IApplicationManager.update on a ServerApplication routes through
+            // ServerApplicationBehaviourDelegate.update →
+            // JobBasedServerModulePublisher.publish, which STARTS the standalone
+            // server in RUN mode and caches a live designer-agent connection in the
+            // global DesignerSessionPool; the launch delegate then needs the server
+            // in DEBUG mode, and the restart's teardown of that cached connection
+            // wedges the launch. Defer to the delegate's coordinated path instead —
+            // EDT's native ApplicationUiSupport.ensureUpdated prepares the server
+            // directly in the target mode FIRST and only then updates (no restart).
+            // Both YAXUnit tools arm LaunchUpdateDialogAutoConfirmer around
+            // workingCopy.launch, so the delegate's "Application update" dialog
+            // (shown only when the IB is stale) is auto-pressed; when the IB is in
+            // sync there is no dialog at all. The terminate-stale passes and the
+            // recompute/settle above still ran — they do not open IB connections.
+            if (DebugServerTargetSupport.isServerApplicationId(applicationId))
+            {
+                Activator.logInfo("Pre-launch auto-chain: server application: deferring DB update " //$NON-NLS-1$
+                    + "to the launch delegate's coordinated path (auto-confirmed): applicationId=" //$NON-NLS-1$
+                    + applicationId);
+                return new PreLaunchResult(true, terminated, null);
+            }
 
             // settleAfterPossibleRecompute=true: we JUST forced a recompute, so a cached
             // UPDATED may lag the freshly regenerated .cfe — wait out the settle window
