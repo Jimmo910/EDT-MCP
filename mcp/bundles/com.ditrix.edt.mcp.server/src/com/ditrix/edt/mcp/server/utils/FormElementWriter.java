@@ -36,13 +36,6 @@ import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.dt.core.model.IModelObjectFactory;
 import com._1c.g5.v8.dt.core.naming.ITopObjectFqnGenerator;
 import com._1c.g5.v8.dt.core.platform.IBmModelManager;
-import com._1c.g5.v8.dt.form.model.AutoCommandBar;
-import com._1c.g5.v8.dt.form.model.Form;
-import com._1c.g5.v8.dt.form.model.FormChildrenGroup;
-import com._1c.g5.v8.dt.form.model.FormCommandInterface;
-import com._1c.g5.v8.dt.form.model.FormFactory;
-import com._1c.g5.v8.dt.form.model.FormPackage;
-import com._1c.g5.v8.dt.form.model.ItemHorizontalAlignment;
 import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
@@ -57,12 +50,14 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
  * Shared writer for the editable FORM CONTENT model ({@code com._1c.g5.v8.dt.form.model.Form}, a
  * separate top object reached from a {@code BasicForm} mdo via {@code getForm()}).
  *
- * <p>Form-MEMBER editing (adding a form attribute, command or visual item, binding event handlers,
- * moving items) touches the whole form package REFLECTIVELY (by feature / classifier name) so those
- * paths need no compile-time dependency on the form model - the same technique the form-editing
- * tools use. Form-OBJECT creation ({@link #createForm}), in contrast, uses the typed
- * {@code com._1c.g5.v8.dt.form.model} API ({@code Form}, {@code AutoCommandBar}, {@code FormFactory},
- * ...) to build the renderable content form with EDT's default structure.</p>
+ * <p>The whole form package is touched REFLECTIVELY (by feature / classifier name) so this bundle
+ * needs no compile-time dependency on the form model. Form-MEMBER editing (adding a form attribute,
+ * command or visual item, binding event handlers, moving items) resolves everything on the editable
+ * form instance's own EPackage; form-OBJECT creation ({@link #createForm}) resolves the form
+ * EPackage from the global EMF package registry by its nsURI ({@code http://g5.1c.ru/v8/dt/form} -
+ * the mdclass {@code BasicForm.form} reference is typed by the mdclass-own {@code AbstractForm}
+ * base, so the mdclass metamodel deliberately does NOT lead into the form package) and builds the
+ * renderable content form with EDT's default structure through that package's factory.</p>
  *
  * <p>This is the canonical home for the form-write logic that {@code create_metadata} (and, until
  * they are removed, the {@code add_form_*} tools) use. Mutation MUST run inside a BM write
@@ -92,6 +87,13 @@ public final class FormElementWriter
     private static final String FEATURE_COMMON = "common"; //$NON-NLS-1$
     private static final String FEATURE_EXTENDED_TOOLTIP = "extendedTooltip"; //$NON-NLS-1$
     private static final String FEATURE_CONTEXT_MENU = "contextMenu"; //$NON-NLS-1$
+    private static final String FEATURE_MD_FORM = "mdForm"; //$NON-NLS-1$
+    private static final String FEATURE_GROUP = "group"; //$NON-NLS-1$
+    private static final String FEATURE_COMMAND_INTERFACE = "commandInterface"; //$NON-NLS-1$
+    private static final String FEATURE_NAVIGATION_PANEL = "navigationPanel"; //$NON-NLS-1$
+    private static final String FEATURE_COMMAND_BAR = "commandBar"; //$NON-NLS-1$
+    /** {@code FormChildrenGroup.VERTICAL} - the default children grouping of a managed form. */
+    private static final String LITERAL_VERTICAL = "Vertical"; //$NON-NLS-1$
 
     // Concrete form-model classifier names (resolved on the form EPackage).
     private static final String ECLASS_FORM_GROUP = "FormGroup"; //$NON-NLS-1$
@@ -106,6 +108,8 @@ public final class FormElementWriter
     private static final String ECLASS_EXTENDED_TOOLTIP = "ExtendedTooltip"; //$NON-NLS-1$
     private static final String ECLASS_FORM_COMMAND_HANDLER_CONTAINER = "FormCommandHandlerContainer"; //$NON-NLS-1$
     private static final String ECLASS_COMMAND_HANDLER = "CommandHandler"; //$NON-NLS-1$
+    private static final String ECLASS_FORM_COMMAND_INTERFACE = "FormCommandInterface"; //$NON-NLS-1$
+    private static final String ECLASS_FORM_COMMAND_INTERFACE_ITEMS = "FormCommandInterfaceItems"; //$NON-NLS-1$
     private static final String TYPE_LITERAL_USUAL_GROUP = "UsualGroup"; //$NON-NLS-1$
     private static final String TYPE_LITERAL_LABEL = "Label"; //$NON-NLS-1$
     /** Group {@code type} literals whose items are command-bar buttons (CommandBarButton). */
@@ -675,7 +679,7 @@ public final class FormElementWriter
     /**
      * Creates a managed form OBJECT on {@code owner} inside an active BM write transaction: the
      * MD-form ({@link BasicForm}, added to the owner's {@code forms} collection) AND an empty,
-     * renderable content {@link Form}, linked both ways, with the content form registered as a BM top
+     * renderable content {@code Form}, linked both ways, with the content form registered as a BM top
      * object under the canonical external-property FQN. Mirrors the EDT "New form" wizard.
      * <p>
      * The content form is built by the FORM model factory ({@code formFactory}, the same
@@ -740,11 +744,11 @@ public final class FormElementWriter
         // (2) The content form, built by the FORM factory so it gets EDT's default structure
         // (autoCommandBar, command interface, form flags). Falls back to a manual minimal-but-
         // renderable build if the factory is unavailable.
-        Form content = createContentForm(formFactory, owner, version);
+        EObject content = createContentForm(formFactory, owner, version);
 
-        // (3) Link MD-form <-> content form (both directions).
-        mdForm.setForm(content);
-        content.setMdForm(mdForm);
+        // (3) Link MD-form <-> content form (both directions, by feature - no typed form API).
+        mdForm.eSet(MdClassPackage.Literals.BASIC_FORM__FORM, content);
+        setSingleReference(content, FEATURE_MD_FORM, mdForm);
 
         // (4) Add the MD-form to the owner's forms collection BEFORE generating the content FQN, so the
         // MD-form has a resolvable parent chain (owner -> configuration) and therefore a resolvable FQN.
@@ -771,59 +775,96 @@ public final class FormElementWriter
     }
 
     /**
-     * Builds the content {@link Form} with EDT's default structure. Prefers the FORM model factory
-     * ({@code FormObjectFactory}) - {@code create(FormPackage.Literals.FORM, owner, version)} produces
-     * exactly what the "New form" wizard builds (predefined {@code autoCommandBar}, command interface,
-     * form flags). Falls back to a bare {@code FormFactory.createForm()} when the factory is absent.
-     * In both cases the render-critical {@code autoCommandBar} and the standard form-level defaults are
-     * applied explicitly afterwards, so the form renders whether or not the factory ran.
+     * Builds the content {@code Form} with EDT's default structure. Prefers the FORM model factory
+     * ({@code FormObjectFactory}) - {@code create(Form, owner, version)} produces exactly what the
+     * "New form" wizard builds (predefined {@code autoCommandBar}, command interface, form flags).
+     * Falls back to a bare EFactory create when the factory is absent. In both cases the
+     * render-critical {@code autoCommandBar} and the standard form-level defaults are applied
+     * explicitly afterwards, so the form renders whether or not the factory ran.
+     * <p>
+     * Fully reflective: the {@code Form} EClass is reached through {@link #contentFormEClass()} (the
+     * EMF package registry, by nsURI), so no compile-time dependency on
+     * {@code com._1c.g5.v8.dt.form.model} is needed. Package-visible for the headless unit test.
      */
-    private static Form createContentForm(IModelObjectFactory formFactory, MdObject owner, Version version)
+    static EObject createContentForm(IModelObjectFactory formFactory, MdObject owner, Version version)
     {
-        Form content = null;
+        EClass formEClass = contentFormEClass();
+        EObject content = null;
         if (formFactory != null)
         {
-            content = formFactory.create(FormPackage.Literals.FORM, owner, version);
+            content = formFactory.create(formEClass, owner, version);
         }
         if (content == null)
         {
-            content = FormFactory.eINSTANCE.createForm();
+            content = formEClass.getEPackage().getEFactoryInstance().create(formEClass);
         }
         // Guard: the factory may not run in this environment (its injector may be absent), or a future
         // change may stop seeding the command bar. Ensure the render-critical element is present.
-        if (content.getAutoCommandBar() == null)
+        if (singleReference(content, FEATURE_AUTO_COMMAND_BAR) == null)
         {
-            content.setAutoCommandBar(createDefaultAutoCommandBar());
+            setSingleReference(content, FEATURE_AUTO_COMMAND_BAR, createDefaultAutoCommandBar(content));
         }
         applyFormDefaults(content);
         return content;
+    }
+
+    /** The form model EPackage nsURI ({@code com._1c.g5.v8.dt.form.model.FormPackage.eNS_URI}). */
+    private static final String FORM_PACKAGE_NS_URI = "http://g5.1c.ru/v8/dt/form"; //$NON-NLS-1$
+
+    /**
+     * The CONCRETE content {@code Form} EClass, reached WITHOUT a form-model import: the form
+     * EPackage is resolved from the global EMF package registry by its nsURI
+     * ({@code http://g5.1c.ru/v8/dt/form}) and the {@code Form} classifier by name on it. The
+     * mdclass metamodel cannot lead here - the {@code BasicForm.form} reference is deliberately
+     * typed by the mdclass-own {@code AbstractForm} base, NOT by the form package - so the registry
+     * is the one compile-time-free route. Package-visible for the headless unit test.
+     *
+     * @throws RuntimeException (wrapped into the tool error by the caller) when the form model
+     *     package is not available in this platform
+     */
+    static EClass contentFormEClass()
+    {
+        EPackage formPkg = EPackage.Registry.INSTANCE.getEPackage(FORM_PACKAGE_NS_URI);
+        EClassifier concrete = formPkg != null ? formPkg.getEClassifier("Form") : null; //$NON-NLS-1$
+        if (!(concrete instanceof EClass))
+        {
+            throw new RuntimeException("The form model EPackage (" + FORM_PACKAGE_NS_URI //$NON-NLS-1$
+                + ") is not available in this platform."); //$NON-NLS-1$
+        }
+        return (EClass)concrete;
     }
 
     /**
      * Sets the standard default form-level properties a managed form authored in EDT has - the eight
      * form flags ({@code saveWindowSettings}, {@code autoTitle}, {@code autoUrl}, {@code autoFillCheck},
      * {@code allowFormCustomize}, {@code enabled}, {@code showTitle}, {@code showCloseButton}) true, the
-     * children grouping {@link FormChildrenGroup#VERTICAL}, and an (empty) {@link FormCommandInterface}
+     * children grouping {@code FormChildrenGroup.VERTICAL}, and an (empty) {@code FormCommandInterface}
      * holding an empty navigation panel and command bar - so an MCP-created form matches the reference
      * regardless of whether {@code FormObjectFactory} resolved and ran. The {@code autoCommandBar} is
-     * created separately (it is render-critical); this method does not touch it.
+     * created separately (it is render-critical); this method does not touch it. Reflective (by
+     * feature / classifier name), like every other write in this class.
      */
-    private static void applyFormDefaults(Form form)
+    private static void applyFormDefaults(EObject form)
     {
-        form.setSaveWindowSettings(true);
-        form.setAutoTitle(true);
-        form.setAutoUrl(true);
-        form.setAutoFillCheck(true);
-        form.setAllowFormCustomize(true);
-        form.setEnabled(true);
-        form.setShowTitle(true);
-        form.setShowCloseButton(true);
-        form.setGroup(FormChildrenGroup.VERTICAL);
+        setBooleanFeature(form, "saveWindowSettings", true); //$NON-NLS-1$
+        setBooleanFeature(form, "autoTitle", true); //$NON-NLS-1$
+        setBooleanFeature(form, "autoUrl", true); //$NON-NLS-1$
+        setBooleanFeature(form, "autoFillCheck", true); //$NON-NLS-1$
+        setBooleanFeature(form, "allowFormCustomize", true); //$NON-NLS-1$
+        setBooleanFeature(form, FEATURE_ENABLED, true);
+        setBooleanFeature(form, "showTitle", true); //$NON-NLS-1$
+        setBooleanFeature(form, "showCloseButton", true); //$NON-NLS-1$
+        setEnumFeature(form, FEATURE_GROUP, LITERAL_VERTICAL);
 
-        FormCommandInterface commandInterface = FormFactory.eINSTANCE.createFormCommandInterface();
-        commandInterface.setNavigationPanel(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
-        commandInterface.setCommandBar(FormFactory.eINSTANCE.createFormCommandInterfaceItems());
-        form.setCommandInterface(commandInterface);
+        EObject commandInterface = createFromClassifier(form, ECLASS_FORM_COMMAND_INTERFACE);
+        if (commandInterface != null)
+        {
+            setSingleReference(commandInterface, FEATURE_NAVIGATION_PANEL,
+                createFromClassifier(form, ECLASS_FORM_COMMAND_INTERFACE_ITEMS));
+            setSingleReference(commandInterface, FEATURE_COMMAND_BAR,
+                createFromClassifier(form, ECLASS_FORM_COMMAND_INTERFACE_ITEMS));
+            setSingleReference(form, FEATURE_COMMAND_INTERFACE, commandInterface);
+        }
     }
 
     /**
@@ -832,14 +873,21 @@ public final class FormElementWriter
      * LEFT}, id {@code -1} (the sentinel EDT persists for a form's own predefined command bar, keeping
      * it out of the regular element id space). A name is assigned so the element is well-formed; EDT
      * renames predefined items to their canonical names on the next form sync.
+     *
+     * @param formModel any object of the form package (resolves the {@code AutoCommandBar} classifier)
+     * @return the bar, or {@code null} when the classifier does not resolve
      */
-    private static AutoCommandBar createDefaultAutoCommandBar()
+    private static EObject createDefaultAutoCommandBar(EObject formModel)
     {
-        AutoCommandBar bar = FormFactory.eINSTANCE.createAutoCommandBar();
-        bar.setAutoFill(true);
-        bar.setHorizontalAlign(ItemHorizontalAlignment.LEFT);
-        bar.setId(-1);
-        bar.setName(RU_FORM_COMMAND_BAR);
+        EObject bar = createFromClassifier(formModel, ECLASS_AUTO_COMMAND_BAR);
+        if (bar == null)
+        {
+            return null;
+        }
+        setBooleanFeature(bar, "autoFill", true); //$NON-NLS-1$
+        setEnumFeature(bar, "horizontalAlign", "Left"); //$NON-NLS-1$ //$NON-NLS-2$
+        setIntFeature(bar, FEATURE_ID, -1);
+        setStringFeature(bar, FEATURE_NAME, RU_FORM_COMMAND_BAR);
         return bar;
     }
 
@@ -2474,6 +2522,17 @@ public final class FormElementWriter
         }
         Object value = owner.eGet(feature);
         return value instanceof EObject ? (EObject)value : null;
+    }
+
+    /** Sets a single-valued EReference by feature name; a no-op when the feature is absent / not a
+     * single-valued reference or {@code value} is {@code null} (best-effort, like the other setters). */
+    private static void setSingleReference(EObject owner, String featureName, EObject value)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (feature instanceof EReference && !feature.isMany() && value != null)
+        {
+            owner.eSet(feature, value);
+        }
     }
 
     /** The literal of a set EEnum attribute (e.g. a group's {@code type}), or {@code null}. */

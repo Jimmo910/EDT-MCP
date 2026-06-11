@@ -524,7 +524,7 @@ public class EdtServices
      * {@link #getModelObjectFactory()}: that one is bound in the MD language
      * injector and only knows the {@code mdclass} EPackage (Catalog, Document, …);
      * it cannot create form-model objects. A {@code Form} built with the MD factory
-     * (or a bare {@code FormFactory.eINSTANCE.createForm()}) is missing the
+     * (or a bare EFactory create on the form EPackage) is missing the
      * predefined {@code autoCommandBar} that EDT's WYSIWYG layout generator
      * ({@code HippoGenerator.readElement}) unconditionally reads for a
      * {@code CommandBarHolder}; when it is {@code null} the generator throws and the

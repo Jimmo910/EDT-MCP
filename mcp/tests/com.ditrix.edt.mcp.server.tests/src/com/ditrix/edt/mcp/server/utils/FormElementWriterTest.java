@@ -1007,6 +1007,64 @@ public class FormElementWriterTest
         assertEquals("CommandBarButton", literalOf(button, "type")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    // ==================== whole-form creation (reflective, the REAL EDT packages) =================
+    // The form EPackage is resolved from the global EMF package registry by nsURI - the design rule:
+    // NO compile-time dependency on com._1c.g5.v8.dt.form.model anywhere in the server bundle (the
+    // mdclass metamodel cannot lead there: BasicForm.form is typed by the mdclass-own AbstractForm
+    // base). The form model bundle is in the OSGi test runtime transitively, so the registry chain
+    // and the reflective whole-form defaults ARE headless-testable here.
+
+    @Test
+    public void testContentFormEClassReachableWithoutFormModelImport()
+    {
+        EClass formEClass = FormElementWriter.contentFormEClass();
+        assertNotNull(formEClass);
+        // The CONCRETE Form (the reference EType is the AbstractForm base on current EDT).
+        assertEquals("Form", formEClass.getName()); //$NON-NLS-1$
+        assertFalse(formEClass.isAbstract());
+        EPackage formPkg = formEClass.getEPackage();
+        assertNotNull(formPkg);
+        // The sibling classifiers the whole-form build resolves by name on that package.
+        assertTrue(formPkg.getEClassifier("AutoCommandBar") instanceof EClass); //$NON-NLS-1$
+        assertTrue(formPkg.getEClassifier("FormCommandInterface") instanceof EClass); //$NON-NLS-1$
+        assertTrue(formPkg.getEClassifier("FormCommandInterfaceItems") instanceof EClass); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCreateContentFormDefaultsOnRealFormPackage()
+    {
+        // No FORM factory (null, like a missing injector): the reflective fallback must still build
+        // a renderable content form with the designer defaults the typed build used to set.
+        EObject content = FormElementWriter.createContentForm(null, null, null);
+        assertNotNull(content);
+        assertEquals("Form", content.eClass().getName()); //$NON-NLS-1$
+        // The eight form flags.
+        for (String flag : new String[] { "saveWindowSettings", "autoTitle", "autoUrl", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "autoFillCheck", "allowFormCustomize", "enabled", "showTitle", "showCloseButton" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        {
+            assertEquals(flag, Boolean.TRUE, content.eGet(feature(content, flag)));
+        }
+        // The children grouping FormChildrenGroup.VERTICAL.
+        assertEquals("Vertical", literalOf(content, "group")); //$NON-NLS-1$ //$NON-NLS-2$
+        // The render-critical predefined auto command bar: autoFill, LEFT, the -1 id sentinel and
+        // the canonical predefined-command-bar name (FormaKomandnayaPanel, from code points).
+        EObject bar = (EObject)content.eGet(feature(content, "autoCommandBar")); //$NON-NLS-1$
+        assertNotNull("the WYSIWYG generator requires the predefined autoCommandBar", bar); //$NON-NLS-1$
+        assertEquals("AutoCommandBar", bar.eClass().getName()); //$NON-NLS-1$
+        assertEquals(Boolean.TRUE, bar.eGet(feature(bar, "autoFill"))); //$NON-NLS-1$
+        assertEquals("Left", literalOf(bar, "horizontalAlign")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals(Integer.valueOf(-1), bar.eGet(feature(bar, "id"))); //$NON-NLS-1$
+        String ruBarName = fromCp(0x0424, 0x043e, 0x0440, 0x043c, 0x0430, 0x041a, 0x043e, 0x043c,
+            0x0430, 0x043d, 0x0434, 0x043d, 0x0430, 0x044f, 0x041f, 0x0430, 0x043d, 0x0435, 0x043b,
+            0x044c);
+        assertEquals(ruBarName, bar.eGet(feature(bar, "name"))); //$NON-NLS-1$
+        // The (empty) command interface holding an empty navigation panel and command bar.
+        EObject commandInterface = (EObject)content.eGet(feature(content, "commandInterface")); //$NON-NLS-1$
+        assertNotNull(commandInterface);
+        assertNotNull(commandInterface.eGet(feature(commandInterface, "navigationPanel"))); //$NON-NLS-1$
+        assertNotNull(commandInterface.eGet(feature(commandInterface, "commandBar"))); //$NON-NLS-1$
+    }
+
     // ==================== dynamic form-like EMF metamodel ====================
 
     private static final FormLikeModel MODEL = new FormLikeModel();
