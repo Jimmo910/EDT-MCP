@@ -39,6 +39,7 @@ from harness import (
     assert_contains,
     assert_not_contains,
     assert_no_diff,
+    diff,
     poll_diff_contains,
     wait_for_project_ready,
     diff,
@@ -575,6 +576,16 @@ def test_create_form_field_bound_to_attribute():
     assert "FormField" in (r2.structured.get("kind") or ""), "kind must be FormField: %r" % (r2.structured,)
     poll_diff_contains("<segments>%s</segments>" % attr,
                        ctx="the field's dataPath must bind to the attribute on disk")
+    # Designer parity: a created field must serialize the same designer defaults a
+    # UI-created field carries (the booleans default to false in the model).
+    poll_diff_contains("<showInHeader>true</showInHeader>",
+                       ctx="a created field must show in the table header like a designer one")
+    poll_diff_contains("<wrap>true</wrap>",
+                       ctx="the input-field extInfo must carry the designer defaults")
+    poll_diff_contains(fld + "ExtendedTooltip",
+                       ctx="the designer's extended-tooltip auto-child must be created")
+    poll_diff_contains(fld + "ContextMenu",
+                       ctx="the designer's context-menu auto-child must be created")
 
 
 @e2e_test(tool="create_metadata", kind="write-metadata")
@@ -670,6 +681,199 @@ def test_create_form_button_missing_command_is_error():
     e = assert_error(r, "button bound to a missing command")
     assert_error_quality(e, names=["NoSuchCmd_zz"], suggests=["not found"],
                          ctx="a button bound to a missing command is a clean error")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_button_enabled_and_in_auto_command_bar():
+    # Issue #138 bugs 2+3: parent 'AutoCommandBar' must place the button INSIDE the form's command
+    # bar (not the form root), and the created button must export <enabled>true</enabled> (the model
+    # default is false -> a disabled, half-transparent button in the client).
+    cmd, btn = "BarCmd", "BarBtn"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + btn,
+        "properties": [{"name": "command", "value": cmd},
+                       {"name": "parent", "value": "AutoCommandBar"}]})
+    assert_ok(r2, "create a Button inside the form's AutoCommandBar")
+    poll_diff_contains(btn, ctx="the new button must land in the form's .form on disk")
+    poll_diff_contains("<enabled>true</enabled>",
+                       ctx="a created button must be explicitly enabled like a designer-created one")
+    # Inside a command bar the platform requires the CommandBarButton type. CommandBarButton is the
+    # EMF default literal (value 0), so the XMI OMITS <type> for it - the wrong outcome would be an
+    # explicit <type>UsualButton</type> in this test's diff (which adds only the command + this button).
+    assert "UsualButton" not in diff(), \
+        "a button in the command bar must NOT serialize the UsualButton type"
+    # The structure read-back shows the button nested under the bar (the verification surface).
+    r3 = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_ok(r3, "read the form structure back")
+    assert_contains(r3.text, "AutoCommandBar", "the structure must surface the auto command bar")
+    assert_contains(r3.text, btn, "the structure must show the button inside the bar")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_button_parent_dotted_auto_command_bar_path():
+    # The parent shapes reported in issue #138 ('Form.X.AutoCommandBar' / '...ChildItems') resolve too.
+    cmd, btn = "BarCmd2", "BarBtn2"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + btn,
+        "properties": [{"name": "command", "value": cmd},
+                       {"name": "parent", "value": "Form.ItemForm.AutoCommandBar.ChildItems"}]})
+    assert_ok(r2, "a dotted AutoCommandBar parent path resolves to the form's bar")
+    poll_diff_contains(btn, ctx="the button created via the dotted parent path must land on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_unknown_parent_suggests_auto_command_bar():
+    cmd = "OrphanParentCmd"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.OrphanParentBtn",
+        "properties": [{"name": "command", "value": cmd},
+                       {"name": "parent", "value": "NoSuchParent_zz"}]})
+    e = assert_error(r2, "button under a missing parent")
+    assert_error_quality(e, names=["NoSuchParent_zz"], suggests=["AutoCommandBar"],
+                         ctx="a missing parent error must advertise the AutoCommandBar token")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_popup_group_with_button():
+    # A print-style submenu: a Group with an explicit type=Popup in the command bar, holding a
+    # button. Inside the popup the platform requires command-bar buttons.
+    cmd, grp, btn = "PopCmd", "PopMenu", "PopBtn"
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r, "seed form command")
+    wait_for_project_ready()
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group." + grp,
+        "properties": [{"name": "parent", "value": "AutoCommandBar"},
+                       {"name": "type", "value": "Popup"}]})
+    assert_ok(r, "create a Popup group in the command bar")
+    poll_diff_contains("<type>Popup</type>",
+                       ctx="the explicit group type must serialize to the .form on disk")
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button." + btn,
+        "properties": [{"name": "command", "value": cmd}, {"name": "parent", "value": grp}]})
+    assert_ok(r, "create a button inside the popup submenu")
+    poll_diff_contains(btn, ctx="the popup's button must land on disk")
+    # CommandBarButton is the model-default literal (omitted by XMI); the wrong outcome would be an
+    # explicit UsualButton inside the popup.
+    assert "UsualButton" not in diff(), \
+        "a button inside a popup submenu must not serialize the UsualButton type"
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_group_unknown_type_lists_allowed():
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.BadTypeGrp",
+        "properties": [{"name": "type", "value": "Bogus_zz"}]})
+    e = assert_error(r, "unknown group type")
+    assert_error_quality(e, names=["Bogus_zz"], suggests=["Allowed group types", "Popup"],
+                         ctx="an unknown group type must list the allowed literals")
+    assert_no_diff("a rejected group type must not change the form")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_decoration_in_command_bar_is_rejected():
+    # The designer forbids decorations in command bars (FormItemTypeInformationService) - placing
+    # one would build a model the UI could never produce.
+    r = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Decoration.BarDeco_zz",
+        "properties": [{"name": "parent", "value": "AutoCommandBar"}]})
+    e = assert_error(r, "decoration into the command bar")
+    assert_error_quality(e, names=["AutoCommandBar"], suggests=["cannot hold decorations"],
+                         ctx="the placement error must name the parent and the rule")
+    assert_no_diff("a rejected placement must not change the form on disk")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_command_action_handler():
+    # Issue #138 bug 1: ...Command.X.Handler.Action binds the command's Action (the designer's
+    # "Action" property) -> Designer XML <Command><Action>Proc</Action></Command>.
+    cmd, proc = "ActCmd", "ActCmdProc"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Command.%s.Handler.Action" % cmd,
+        "properties": [{"name": "procedure", "value": proc}]})
+    assert_ok(r2, "bind the command's Action handler")
+    assert "CommandHandler" in (r2.structured.get("kind") or ""), \
+        "kind must be CommandHandler: %r" % (r2.structured,)
+    poll_diff_contains(proc, ctx="the action's BSL procedure name must land in the .form on disk")
+    # The commands table surfaces the binding (the verification surface for the model state).
+    r3 = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_ok(r3, "read the form structure back")
+    assert_contains(r3.text, proc, "the commands table must show the bound action handler")
+    # A second Action on the same command is a clean duplicate error.
+    r4 = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Command.%s.Handler.Action" % cmd})
+    e = assert_error(r4, "duplicate Action handler")
+    assert_error_quality(e, suggests=["already exists"],
+                         ctx="a second Action on the same command must be rejected")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_command_action_default_procedure_is_command_name():
+    # Without a 'procedure' property the BSL handler name defaults to the COMMAND name (the EDT UI
+    # suggestion), never the literal 'Action'.
+    cmd = "ActDfltCmd"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Command.%s.Handler.Action" % cmd})
+    assert_ok(r2, "bind the Action handler with the default procedure name")
+    r3 = call("get_metadata_details", {
+        "projectName": PROJECT, "objectFqns": ["Catalog.Catalog.Form.ItemForm"]})
+    assert_ok(r3, "read the form structure back")
+    # The commands table row carries the handler name == the command name (twice in the row).
+    row = next((ln for ln in r3.text.splitlines() if ln.strip().startswith("| " + cmd)), None)
+    assert row is not None, "the commands table must list %s:\n%s" % (cmd, r3.text[:800])
+    assert row.count(cmd) >= 2, \
+        "the default handler name must equal the command name in the row: %r" % (row,)
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_command_action_wrong_event_lists_action():
+    cmd = "ActWrongCmd"
+    r1 = call("create_metadata", {
+        "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Command." + cmd})
+    assert_ok(r1, "seed form command")
+    wait_for_project_ready()
+    r2 = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Command.%s.Handler.OnChange" % cmd})
+    e = assert_error(r2, "a non-Action event on a command")
+    assert_error_quality(e, names=["OnChange"], suggests=["Available events", "Action"],
+                         ctx="a command handler accepts only Action and must say so")
+
+
+@e2e_test(tool="create_metadata", kind="write-metadata")
+def test_create_form_command_action_missing_command_is_error():
+    r = call("create_metadata", {
+        "projectName": PROJECT,
+        "fqn": "Catalog.Catalog.Form.ItemForm.Command.NoSuchCmd_zz.Handler.Action"})
+    e = assert_error(r, "Action handler on a missing command")
+    assert_error_quality(e, names=["NoSuchCmd_zz"], suggests=["Form command not found"],
+                         ctx="an Action handler on a missing command is a clean error")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

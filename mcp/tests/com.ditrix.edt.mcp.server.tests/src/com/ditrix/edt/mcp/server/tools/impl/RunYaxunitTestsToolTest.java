@@ -8,16 +8,11 @@ package com.ditrix.edt.mcp.server.tools.impl;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
@@ -31,18 +26,6 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool;
  */
 public class RunYaxunitTestsToolTest
 {
-    @Before
-    public void clearFinishedRuns()
-    {
-        RunYaxunitTestsTool.clearFinishedRunsForTest();
-    }
-
-    @After
-    public void clearFinishedRunsAfter()
-    {
-        RunYaxunitTestsTool.clearFinishedRunsForTest();
-    }
-
     @Test
     public void testToolName()
     {
@@ -167,17 +150,6 @@ public class RunYaxunitTestsToolTest
     }
 
     @Test
-    public void testSchemaDocumentsCacheBypassOnUpdateBeforeLaunch()
-    {
-        // The cache-bypass behaviour (updateBeforeLaunch=true bypasses the cached
-        // junit.xml so the run is always fresh) is surfaced in the updateBeforeLaunch
-        // doc so callers understand why a "fresh" run is forced.
-        String schema = new RunYaxunitTestsTool().getInputSchema();
-        assertTrue("updateBeforeLaunch doc must explain the cache bypass",
-            schema.toLowerCase().contains("bypass"));
-    }
-
-    @Test
     public void testGuideExplainsDebugMode()
     {
         String guide = new RunYaxunitTestsTool().getGuide();
@@ -194,92 +166,21 @@ public class RunYaxunitTestsToolTest
             RunYaxunitTestsTool.UPDATE_SCOPE_DESCRIPTION.contains("Unknown extension names"));
     }
 
-    // --- Finished-but-unfetched handoff (review fix B1) ----------------------
-    //
-    // When one of OUR launches terminates before the caller fetches the result,
-    // the launch listener / entry purge parks the report directory in a static
-    // FINISHED map keyed by the run key, and the next call with the SAME
-    // arguments returns the completed junit.xml exactly once instead of
-    // re-running the whole suite (the Pending message instructs exactly such a
-    // retry). These tests cover the runtime-free record/take/prune mechanics;
-    // the full execute() flow needs the Eclipse runtime.
-
     @Test
-    public void testFinishedRunHandoffIsConsumedExactlyOnce()
+    public void testGuideDocumentsOnceOnlyPendingDelivery()
     {
-        Path dir = Paths.get("some", "report", "dir");
-        RunYaxunitTestsTool.recordFinishedRun("key-1", dir, 1_000L);
-
-        assertEquals("the parked report dir must be handed back on the first take",
-            dir, RunYaxunitTestsTool.takeFinishedRun("key-1", 2_000L));
-        assertNull("a parked result must be returned exactly once",
-            RunYaxunitTestsTool.takeFinishedRun("key-1", 2_000L));
-    }
-
-    @Test
-    public void testFinishedRunHandoffIsPerRunKey()
-    {
-        RunYaxunitTestsTool.recordFinishedRun("key-a", Paths.get("dir-a"), 1_000L);
-        RunYaxunitTestsTool.recordFinishedRun("key-b", Paths.get("dir-b"), 1_000L);
-
-        assertEquals(Paths.get("dir-b"), RunYaxunitTestsTool.takeFinishedRun("key-b", 1_500L));
-        assertEquals("taking one key must not consume another",
-            Paths.get("dir-a"), RunYaxunitTestsTool.takeFinishedRun("key-a", 1_500L));
-    }
-
-    @Test
-    public void testFinishedRunExpiresAfterTtl()
-    {
-        RunYaxunitTestsTool.recordFinishedRun("key-ttl", Paths.get("dir"), 1_000L);
-
-        long afterTtl = 1_000L + RunYaxunitTestsTool.FINISHED_TTL_MS + 1L;
-        assertNull("an expired parked result must not be served",
-            RunYaxunitTestsTool.takeFinishedRun("key-ttl", afterTtl));
-        assertNull("an expired entry is consumed, not resurrected",
-            RunYaxunitTestsTool.takeFinishedRun("key-ttl", 1_500L));
-    }
-
-    @Test
-    public void testFinishedRunMapIsBoundedAndEvictsOldestFirst()
-    {
-        int overflow = RunYaxunitTestsTool.FINISHED_MAX_ENTRIES + 5;
-        for (int i = 0; i < overflow; i++)
-        {
-            RunYaxunitTestsTool.recordFinishedRun("key-" + i, Paths.get("dir-" + i), 1_000L + i);
-        }
-
-        assertTrue("the handoff map must stay bounded",
-            RunYaxunitTestsTool.finishedRunCountForTest() <= RunYaxunitTestsTool.FINISHED_MAX_ENTRIES);
-        long now = 1_000L + overflow;
-        assertNull("the oldest entry must have been evicted",
-            RunYaxunitTestsTool.takeFinishedRun("key-0", now));
-        assertEquals("the newest entry must survive the size bound",
-            Paths.get("dir-" + (overflow - 1)),
-            RunYaxunitTestsTool.takeFinishedRun("key-" + (overflow - 1), now));
-    }
-
-    @Test
-    public void testFinishedRunNullArgumentsAreSafe()
-    {
-        // Defensive no-throws: null key/dir record nothing; null-key take misses.
-        RunYaxunitTestsTool.recordFinishedRun(null, Paths.get("x"), 1L);
-        RunYaxunitTestsTool.recordFinishedRun("k", null, 1L);
-        assertNull(RunYaxunitTestsTool.takeFinishedRun(null, 1L));
-        assertNull("a record with a null dir must not have been parked",
-            RunYaxunitTestsTool.takeFinishedRun("k", 1L));
-        assertEquals(0, RunYaxunitTestsTool.finishedRunCountForTest());
-    }
-
-    @Test
-    public void testGuideDocumentsFinishedRunHandoff()
-    {
-        // The Pending contract ("call again with the same arguments") is only
-        // honest if the guide explains a finished-but-unfetched run is returned,
-        // not re-run.
+        // #136/#137: there is NO time-based result cache — a completed result is
+        // delivered to the matching identical call exactly once (the Pending
+        // re-call contract); every later identical call re-runs the tests. The
+        // guide pins the once-only delivery and the abandoned-Pending caveat so
+        // the contract can't silently drift back to a stale read cache.
         String guide = new RunYaxunitTestsTool().getGuide();
-        assertTrue("guide must document the finished-but-unfetched handoff",
-            guide.contains("finished-but-unfetched")
-                || guide.contains("finished BETWEEN your calls"));
+        assertTrue("guide must state there is no time-based result cache",
+            guide.contains("NO time-based result cache"));
+        assertTrue("guide must document the once-only delivery of a Pending result",
+            guide.contains("exactly once"));
+        assertTrue("guide must document the abandoned-Pending caveat",
+            guide.contains("abandoned Pending"));
     }
 
     @Test

@@ -17,6 +17,7 @@ import java.util.UUID;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.EMap;
+import org.eclipse.emf.common.util.Enumerator;
 import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EAttribute;
 import org.eclipse.emf.ecore.EClass;
@@ -56,16 +57,16 @@ import com.ditrix.edt.mcp.server.protocol.ToolResult;
  * Shared writer for the editable FORM CONTENT model ({@code com._1c.g5.v8.dt.form.model.Form}, a
  * separate top object reached from a {@code BasicForm} mdo via {@code getForm()}).
  *
- * <p>Form-MEMBER editing (adding a form attribute, command or visual item, and binding event
- * handlers) is performed REFLECTIVELY (by feature / classifier name) so those paths need no
- * compile-time dependency on the form model - the same technique the form-editing tools use. Form-
- * OBJECT creation ({@link #createForm}), in contrast, uses the typed {@code com._1c.g5.v8.dt.form.model}
- * API ({@code Form}, {@code AutoCommandBar}, {@code FormFactory}, ...) to build the renderable content
- * form with EDT's default structure.</p>
+ * <p>Form-MEMBER editing (adding a form attribute, command or visual item, binding event handlers,
+ * moving items) touches the whole form package REFLECTIVELY (by feature / classifier name) so those
+ * paths need no compile-time dependency on the form model - the same technique the form-editing
+ * tools use. Form-OBJECT creation ({@link #createForm}), in contrast, uses the typed
+ * {@code com._1c.g5.v8.dt.form.model} API ({@code Form}, {@code AutoCommandBar}, {@code FormFactory},
+ * ...) to build the renderable content form with EDT's default structure.</p>
  *
  * <p>This is the canonical home for the form-write logic that {@code create_metadata} (and, until
- * they are removed, the {@code add_form_*} tools) use. Mutation MUST run inside a BM write transaction
- * on the re-fetched content form; the shared scaffold ({@link #resolveForEdit} +
+ * they are removed, the {@code add_form_*} tools) use. Mutation MUST run inside a BM write
+ * transaction on the re-fetched content form; the shared scaffold ({@link #resolveForEdit} +
  * {@link #writeEditableForm} / {@link #readEditableForm}) owns the resolve -&gt; transact -&gt;
  * force-export pipeline, so tools only supply the per-call work.</p>
  */
@@ -82,6 +83,15 @@ public final class FormElementWriter
     private static final String FEATURE_ID = "id"; //$NON-NLS-1$
     private static final String FEATURE_NAME = "name"; //$NON-NLS-1$
     private static final String FEATURE_VISIBLE = "visible"; //$NON-NLS-1$
+    private static final String FEATURE_ENABLED = "enabled"; //$NON-NLS-1$
+    private static final String FEATURE_USER_VISIBLE = "userVisible"; //$NON-NLS-1$
+    private static final String FEATURE_AUTO_COMMAND_BAR = "autoCommandBar"; //$NON-NLS-1$
+    private static final String FEATURE_ACTION = "action"; //$NON-NLS-1$
+    private static final String FEATURE_HANDLER = "handler"; //$NON-NLS-1$
+    private static final String FEATURE_USE = "use"; //$NON-NLS-1$
+    private static final String FEATURE_COMMON = "common"; //$NON-NLS-1$
+    private static final String FEATURE_EXTENDED_TOOLTIP = "extendedTooltip"; //$NON-NLS-1$
+    private static final String FEATURE_CONTEXT_MENU = "contextMenu"; //$NON-NLS-1$
 
     // Concrete form-model classifier names (resolved on the form EPackage).
     private static final String ECLASS_FORM_GROUP = "FormGroup"; //$NON-NLS-1$
@@ -89,8 +99,28 @@ public final class FormElementWriter
     private static final String ECLASS_FORM_ITEM = "FormItem"; //$NON-NLS-1$
     private static final String ECLASS_USUAL_GROUP_EXT_INFO = "UsualGroupExtInfo"; //$NON-NLS-1$
     private static final String ECLASS_LABEL_DECORATION_EXT_INFO = "LabelDecorationExtInfo"; //$NON-NLS-1$
+    private static final String ECLASS_FORM_COMMAND = "FormCommand"; //$NON-NLS-1$
+    private static final String ECLASS_AUTO_COMMAND_BAR = "AutoCommandBar"; //$NON-NLS-1$
+    private static final String ECLASS_CONTEXT_MENU = "ContextMenu"; //$NON-NLS-1$
+    private static final String ECLASS_TABLE = "Table"; //$NON-NLS-1$
+    private static final String ECLASS_EXTENDED_TOOLTIP = "ExtendedTooltip"; //$NON-NLS-1$
+    private static final String ECLASS_FORM_COMMAND_HANDLER_CONTAINER = "FormCommandHandlerContainer"; //$NON-NLS-1$
+    private static final String ECLASS_COMMAND_HANDLER = "CommandHandler"; //$NON-NLS-1$
     private static final String TYPE_LITERAL_USUAL_GROUP = "UsualGroup"; //$NON-NLS-1$
     private static final String TYPE_LITERAL_LABEL = "Label"; //$NON-NLS-1$
+    /** Group {@code type} literals whose items are command-bar buttons (CommandBarButton). */
+    private static final String TYPE_LITERAL_COMMAND_BAR = "CommandBar"; //$NON-NLS-1$
+    private static final String TYPE_LITERAL_BUTTON_GROUP = "ButtonGroup"; //$NON-NLS-1$
+    private static final String TYPE_LITERAL_POPUP = "Popup"; //$NON-NLS-1$
+    private static final String TYPE_LITERAL_PAGES = "Pages"; //$NON-NLS-1$
+    private static final String TYPE_LITERAL_PAGE = "Page"; //$NON-NLS-1$
+    private static final String TYPE_LITERAL_COLUMN_GROUP = "ColumnGroup"; //$NON-NLS-1$
+    /** The single handler "event" of a form command (its FQN leaf: {@code Command.X.Handler.Action}). */
+    private static final String COMMAND_ACTION_EVENT = "Action"; //$NON-NLS-1$
+    /** The parent token addressing the form's auto command bar (its {@code ChildItems} in Designer XML). */
+    private static final String AUTO_COMMAND_BAR_TOKEN = "AutoCommandBar"; //$NON-NLS-1$
+    /** The Designer-XML child-collection token, tolerated (and ignored) at the end of a parent path. */
+    private static final String CHILD_ITEMS_TOKEN = "ChildItems"; //$NON-NLS-1$
 
     /** A supported form-element kind, resolved from a (bilingual) FQN kind token. */
     public enum Kind { ATTRIBUTE, COMMAND, GROUP, DECORATION, FIELD, BUTTON }
@@ -291,6 +321,16 @@ public final class FormElementWriter
     private static final String RU_FORM = cp(0x0444, 0x043e, 0x0440, 0x043c, 0x0430); // forma
     private static final String RU_FORMS = cp(0x0444, 0x043e, 0x0440, 0x043c, 0x044b); // formy
     private static final String RU_HANDLER = cp(0x043e, 0x0431, 0x0440, 0x0430, 0x0431, 0x043e, 0x0442, 0x0447, 0x0438, 0x043a); // obrabotchik
+    private static final String RU_ACTION = cp(0x0434, 0x0435, 0x0439, 0x0441, 0x0442, 0x0432, 0x0438, 0x0435); // dejstvie
+    // Auto-child name suffixes, localized by the configuration SCRIPT VARIANT the way the designer's
+    // FormObjectDefaultNameProvider localizes them (RasshirennayaPodskazka / KontekstnoeMenyu).
+    private static final String RU_SUFFIX_EXTENDED_TOOLTIP = cp(0x0420, 0x0430, 0x0441, 0x0448,
+        0x0438, 0x0440, 0x0435, 0x043d, 0x043d, 0x0430, 0x044f, 0x041f, 0x043e, 0x0434, 0x0441,
+        0x043a, 0x0430, 0x0437, 0x043a, 0x0430);
+    private static final String RU_SUFFIX_CONTEXT_MENU = cp(0x041a, 0x043e, 0x043d, 0x0442, 0x0435,
+        0x043a, 0x0441, 0x0442, 0x043d, 0x043e, 0x0435, 0x041c, 0x0435, 0x043d, 0x044e);
+    private static final String SUFFIX_EXTENDED_TOOLTIP = "ExtendedTooltip"; //$NON-NLS-1$
+    private static final String SUFFIX_CONTEXT_MENU = "ContextMenu"; //$NON-NLS-1$
 
     /** Whether a kind token addresses an event Handler (English or Russian, case-insensitive). */
     public static boolean isHandlerToken(String token)
@@ -597,14 +637,17 @@ public final class FormElementWriter
      * Creates a form member of {@code kind} named {@code name} on the editable {@code formModel}.
      * For a visual item (group / decoration) the optional {@code parentName} nests it under an
      * existing item (form root when {@code null}); {@code title} (with its language CODE) is applied
-     * when given. Runs INSIDE a BM write transaction on the re-fetched content form.
+     * when given. Visual items receive the designer's defaults including the auto-children
+     * (extended tooltip / context menu) whose name suffixes follow the configuration script variant
+     * ({@code russianAutoNames}). Runs INSIDE a BM write transaction on the re-fetched content form.
      *
      * @return {@code null} on success, or a human-readable error message (the caller wraps it in
      *     {@code ToolResult.error}); the created element's concrete EClass name is returned via
      *     {@code createdKind} when non-null.
      */
     public static String createMember(EObject formModel, Kind kind, String name, String parentName,
-        String bindTarget, String titleLanguage, String title, String[] createdKind)
+        String bindTarget, String titleLanguage, String title, boolean russianAutoNames,
+        String[] createdKind)
     {
         switch (kind)
         {
@@ -613,13 +656,17 @@ public final class FormElementWriter
             case COMMAND:
                 return createCommand(formModel, name, titleLanguage, title, createdKind);
             case FIELD:
-                return createField(formModel, name, parentName, bindTarget, titleLanguage, title, createdKind);
+                return createField(formModel, name, parentName, bindTarget, titleLanguage, title,
+                    russianAutoNames, createdKind);
             case BUTTON:
-                return createButton(formModel, name, parentName, bindTarget, titleLanguage, title, createdKind);
+                return createButton(formModel, name, parentName, bindTarget, titleLanguage, title,
+                    russianAutoNames, createdKind);
             case GROUP:
             case DECORATION:
             default:
-                return createItem(formModel, kind, name, parentName, titleLanguage, title, createdKind);
+                // For a GROUP the bind slot carries the optional explicit group type literal.
+                return createItem(formModel, kind, name, parentName, bindTarget, titleLanguage,
+                    title, russianAutoNames, createdKind);
         }
     }
 
@@ -883,6 +930,10 @@ public final class FormElementWriter
             return "Cannot create a form command for this form model."; //$NON-NLS-1$
         }
         setStringFeature(cmd, FEATURE_NAME, name);
+        // The platform factory's defaults: use=AdjustableBoolean(common) and currentRowUse=Auto -
+        // without them the exported command is unusable.
+        setAdjustableBooleanFeature(cmd, FEATURE_USE);
+        setEnumFeature(cmd, "currentRowUse", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
         applyTitle(cmd, titleLanguage, title);
         addToList(formModel, FEATURE_FORM_COMMANDS, cmd);
         recordKind(cmd, createdKind);
@@ -890,7 +941,8 @@ public final class FormElementWriter
     }
 
     private static String createItem(EObject formModel, Kind kind, String name, String parentName,
-        String titleLanguage, String title, String[] createdKind)
+        String groupTypeLiteral, String titleLanguage, String title, boolean russianAutoNames,
+        String[] createdKind)
     {
         if (findItem(formModel, name) != null)
         {
@@ -901,26 +953,425 @@ public final class FormElementWriter
         {
             return parentNotFound(parentName);
         }
+        String invalid = validatePlacement(kind, container, parentName);
+        if (invalid != null)
+        {
+            return invalid;
+        }
         String classifier = kind == Kind.GROUP ? ECLASS_FORM_GROUP : ECLASS_DECORATION;
         EObject item = createFromClassifier(formModel, classifier);
         if (item == null)
         {
             return "Cannot create a form " + classifier + " for this form model."; //$NON-NLS-1$ //$NON-NLS-2$
         }
+        // An explicit group type ({name:'type', value:'Popup'}) is validated against the model's
+        // ManagedFormGroupType literals (case-insensitive); the container default applies otherwise.
+        String requestedType = null;
+        if (kind == Kind.GROUP && groupTypeLiteral != null && !groupTypeLiteral.isEmpty())
+        {
+            requestedType = resolveEnumLiteral(item, FEATURE_TYPE, groupTypeLiteral);
+            if (requestedType == null)
+            {
+                return "Unknown group type '" + groupTypeLiteral + "'. Allowed group types: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + enumLiteralsOf(item, FEATURE_TYPE) + "."; //$NON-NLS-1$
+            }
+        }
         setStringFeature(item, FEATURE_NAME, name);
-        setBooleanFeature(item, FEATURE_VISIBLE, true);
+        applyVisibleDefaults(item);
         setIntFeature(item, FEATURE_ID, nextItemId(formModel));
-        initManagedItem(formModel, item, kind);
+        if (kind == Kind.DECORATION)
+        {
+            setBooleanFeature(item, "autoMaxWidth", true); //$NON-NLS-1$
+            setBooleanFeature(item, "autoMaxHeight", true); //$NON-NLS-1$
+        }
+        initManagedItem(formModel, item, kind, container, requestedType);
         applyTitle(item, titleLanguage, title);
         addToList(container, FEATURE_ITEMS, item);
+        // The designer's auto-children: a decoration carries a context menu + an extended tooltip,
+        // a group only the tooltip (FormObjectFactory.newDecoration / newFormGroup).
+        addAutoChildren(formModel, item, kind == Kind.DECORATION, russianAutoNames);
         recordKind(item, createdKind);
         return null;
+    }
+
+    // ---- move / reorder -------------------------------------------------------------------------
+
+    /** Position spec prefixes (the integer / {@code first} / {@code last} forms have no prefix). */
+    private static final String POS_FIRST = "first"; //$NON-NLS-1$
+    private static final String POS_LAST = "last"; //$NON-NLS-1$
+    private static final String POS_BEFORE = "before:"; //$NON-NLS-1$
+    private static final String POS_AFTER = "after:"; //$NON-NLS-1$
+
+    /**
+     * Moves an EXISTING visual form item under a new parent container (the form root for a blank
+     * {@code parentName}, the auto command bar for the {@code AutoCommandBar} token, a named item
+     * otherwise), appending it at the end - the position-less variant of
+     * {@link #moveItem(EObject, EObject, String, String, String)}.
+     *
+     * @return {@code null} on success, or a human-readable error message
+     */
+    public static String moveItem(EObject formModel, EObject item, String parentName)
+    {
+        return moveItem(formModel, item, parentName, null, null);
+    }
+
+    /**
+     * Moves an EXISTING visual form item under a new parent container and/or to a new position among
+     * the destination's children. The parent resolves like a create ({@code containerFor}): the form
+     * root for a blank {@code parentName} OR the form's own name ({@code formName}), the auto command
+     * bar for the {@code AutoCommandBar} token, a named container otherwise - with the same placement
+     * validation a create applies. A button's type is re-derived when it crosses a command-bar
+     * boundary (CommandBarButton &harr; UsualButton). The designer's auto-children (tooltips /
+     * context menus / command bars) are not movable. The {@code position} spec ({@code first} /
+     * {@code last} / {@code before:&lt;name&gt;} / {@code after:&lt;name&gt;} / a 0-based FINAL
+     * integer index, see {@link #resolveMovePosition}) picks the insertion index; {@code null}
+     * appends at the end. Must run inside a BM write transaction on the tx-bound form model.
+     *
+     * @return {@code null} on success, or a human-readable error message (a malformed position spec
+     *     THROWS a {@code RuntimeException} carrying the user-facing message instead)
+     */
+    public static String moveItem(EObject formModel, EObject item, String parentName, String position,
+        String formName)
+    {
+        boolean toRoot = parentName == null || parentName.isEmpty()
+            || (formName != null && parentName.equalsIgnoreCase(formName));
+        EObject container = toRoot ? formModel : containerFor(formModel, parentName);
+        if (container == null)
+        {
+            return parentNotFound(parentName);
+        }
+        return moveItemInto(formModel, item, container,
+            toRoot ? "the form root" : parentName, position); //$NON-NLS-1$
+    }
+
+    /**
+     * Resolves the moved item BY NAME - rejecting an AMBIGUOUS name (more than one match anywhere in
+     * the form-item tree) instead of silently moving the first match - then delegates to the
+     * container-resolving move. This is the {@code modify_metadata} entry point and implements its
+     * 'parent' contract: {@code null} keeps the CURRENT container (a pure reorder); blank or the
+     * form's own name means the form ROOT; anything else resolves like a create parent (a group /
+     * table / {@code AutoCommandBar} / ...).
+     *
+     * @param formModel the editable form content model (tx-bound)
+     * @param itemName the programmatic name of the item to move
+     * @param targetParent the destination container name; blank or equal to {@code formName} means
+     *     the form root; {@code null} keeps the item in its current container (reorder in place)
+     * @param position the destination position spec, or {@code null} to append at the end
+     * @param formName the MD-form Name (matching it as {@code targetParent} means the form root)
+     * @return a human-readable description of where the item ended up (e.g. {@code "group 'Main' at
+     *     index 1"})
+     * @throws RuntimeException with a user-facing message on any rejection (the calling write lambda
+     *     rolls back with no partial mutation)
+     */
+    public static String moveItem(EObject formModel, String itemName, String targetParent,
+        String position, String formName)
+    {
+        EObject item = findUniqueItem(formModel, itemName);
+        if (item == null)
+        {
+            throw new RuntimeException("Form item not found: '" + itemName //$NON-NLS-1$
+                + "'. Use get_metadata_details on the form to inspect its items."); //$NON-NLS-1$
+        }
+        String err;
+        if (targetParent == null)
+        {
+            // Reorder in place: the destination is the item's CURRENT container.
+            EObject container = item.eContainer();
+            if (container == null)
+            {
+                throw new RuntimeException("Form item '" + itemName //$NON-NLS-1$
+                    + "' has no parent container and cannot be moved."); //$NON-NLS-1$
+            }
+            err = moveItemInto(formModel, item, container, containerLabel(formModel, container),
+                position);
+        }
+        else
+        {
+            err = moveItem(formModel, item, targetParent, position, formName);
+        }
+        if (err != null)
+        {
+            throw new RuntimeException(err);
+        }
+        return destinationOf(formModel, item);
+    }
+
+    /**
+     * The shared move core: validates the item and the destination (the designer-parity guards a
+     * create applies), resolves the insertion index, performs the containment move and re-derives a
+     * button's type. ALL validation precedes the first mutation, so an error leaves the model
+     * untouched (and the surrounding BM transaction rolls back clean).
+     */
+    @SuppressWarnings("unchecked")
+    private static String moveItemInto(EObject formModel, EObject item, EObject container,
+        String parentLabel, String position)
+    {
+        EClassifier formItem = formModel.eClass().getEPackage().getEClassifier(ECLASS_FORM_ITEM);
+        if (!(formItem instanceof EClass) || !((EClass)formItem).isInstance(item))
+        {
+            return "Only a visual form item (field / button / group / decoration / table) can be " //$NON-NLS-1$
+                + "moved; '" + item.eClass().getName() //$NON-NLS-1$
+                + "' is not one. Attributes and commands have no visual parent."; //$NON-NLS-1$
+        }
+        if (item.eContainmentFeature() == null
+            || !FEATURE_ITEMS.equals(item.eContainmentFeature().getName()))
+        {
+            return "'" + stringFeature(item, FEATURE_NAME) + "' is a designer auto-child (" //$NON-NLS-1$ //$NON-NLS-2$
+                + item.eClass().getName() + ") and cannot be moved."; //$NON-NLS-1$
+        }
+        if (container == item)
+        {
+            return "An item cannot become its own parent."; //$NON-NLS-1$
+        }
+        for (EObject ancestor = container; ancestor != null; ancestor = ancestor.eContainer())
+        {
+            if (ancestor == item)
+            {
+                return "Cannot move '" + stringFeature(item, FEATURE_NAME) //$NON-NLS-1$
+                    + "' into its own contained item '" + parentLabel //$NON-NLS-1$
+                    + "': an item cannot be moved into itself or its own descendant."; //$NON-NLS-1$
+            }
+        }
+        Kind kind = kindForEClass(item.eClass().getName());
+        if (kind != null)
+        {
+            String invalid = validatePlacement(kind, container, parentLabel);
+            if (invalid != null)
+            {
+                return invalid;
+            }
+        }
+        EStructuralFeature itemsFeature = container.eClass().getEStructuralFeature(FEATURE_ITEMS);
+        if (!(itemsFeature instanceof EReference) || !itemsFeature.isMany())
+        {
+            return "The parent '" + parentLabel + "' (" + container.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + ") cannot hold nested items."; //$NON-NLS-1$
+        }
+        EList<EObject> destItems = (EList<EObject>)container.eGet(itemsFeature);
+        // Resolve the index BEFORE any mutation (a bad position spec throws and leaves the model
+        // untouched). The sibling names EXCLUDE the moved item, so the integer index is the desired
+        // FINAL 0-based position in both the reorder-in-place and the cross-container case.
+        List<String> destNames = new ArrayList<>(destItems.size());
+        for (EObject sibling : destItems)
+        {
+            if (sibling != item)
+            {
+                destNames.add(stringFeature(sibling, FEATURE_NAME));
+            }
+        }
+        int index = resolveMovePosition(position, destNames, stringFeature(item, FEATURE_NAME));
+        EList<EObject> sourceItems =
+            (EList<EObject>)item.eContainer().eGet(item.eContainmentFeature());
+        sourceItems.remove(item);
+        if (index < 0 || index > destItems.size())
+        {
+            index = destItems.size();
+        }
+        destItems.add(index, item);
+        if ("Button".equals(item.eClass().getName())) //$NON-NLS-1$
+        {
+            setEnumFeature(item, FEATURE_TYPE,
+                isCommandBarContext(container) ? "CommandBarButton" : "UsualButton"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return null;
+    }
+
+    /**
+     * Resolves a requested {@code position} into a 0-based insertion index in a destination list whose
+     * sibling names are {@code destNames} (already EXCLUDING the moved item). The {@code first} /
+     * {@code last} / {@code before:<name>} / {@code after:<name>} forms are name-relative; a plain
+     * integer is the desired FINAL index as-is. Pure (no model dependency) so it is unit-testable.
+     *
+     * @param position the position spec, or {@code null} / blank / {@code last} for the end
+     * @param destNames the destination sibling names in order (without the moved item)
+     * @param movedName the moved item's name (a {@code before:}/{@code after:} reference to it is rejected)
+     * @return the 0-based insertion index
+     * @throws RuntimeException with a user-facing message on a malformed spec or unknown sibling
+     */
+    public static int resolveMovePosition(String position, List<String> destNames, String movedName)
+    {
+        if (position == null || position.isEmpty() || POS_LAST.equalsIgnoreCase(position))
+        {
+            return destNames.size();
+        }
+        if (POS_FIRST.equalsIgnoreCase(position))
+        {
+            return 0;
+        }
+        String lower = position.toLowerCase(java.util.Locale.ROOT);
+        if (lower.startsWith(POS_BEFORE))
+        {
+            return indexOfSibling(destNames, position.substring(POS_BEFORE.length()).trim(), movedName);
+        }
+        if (lower.startsWith(POS_AFTER))
+        {
+            return indexOfSibling(destNames, position.substring(POS_AFTER.length()).trim(), movedName) + 1;
+        }
+        try
+        {
+            int idx = Integer.parseInt(position.trim());
+            if (idx < 0)
+            {
+                throw new RuntimeException("Invalid position index '" + position //$NON-NLS-1$
+                    + "': must be zero or positive."); //$NON-NLS-1$
+            }
+            return idx;
+        }
+        catch (NumberFormatException e)
+        {
+            throw new RuntimeException("Invalid position '" + position //$NON-NLS-1$
+                + "'. Expected an integer index, 'first', 'last', 'before:<name>' or 'after:<name>'."); //$NON-NLS-1$
+        }
+    }
+
+    /** The 0-based index of {@code sibling} in {@code destNames} (case-insensitive), or throws. */
+    private static int indexOfSibling(List<String> destNames, String sibling, String movedName)
+    {
+        if (sibling.isEmpty())
+        {
+            throw new RuntimeException("Position reference is missing a sibling name " //$NON-NLS-1$
+                + "(use 'before:<name>' or 'after:<name>')."); //$NON-NLS-1$
+        }
+        if (sibling.equalsIgnoreCase(movedName))
+        {
+            throw new RuntimeException("Position cannot reference the moved item itself: '" //$NON-NLS-1$
+                + sibling + "'."); //$NON-NLS-1$
+        }
+        for (int i = 0; i < destNames.size(); i++)
+        {
+            if (sibling.equalsIgnoreCase(destNames.get(i)))
+            {
+                return i;
+            }
+        }
+        throw new RuntimeException("Sibling '" + sibling //$NON-NLS-1$
+            + "' not found in the destination container."); //$NON-NLS-1$
+    }
+
+    /** Where the item now lives, for the move result: the container label + the final 0-based index. */
+    @SuppressWarnings("unchecked")
+    private static String destinationOf(EObject formModel, EObject item)
+    {
+        EObject container = item.eContainer();
+        int index = ((EList<EObject>)container.eGet(item.eContainmentFeature())).indexOf(item);
+        return containerLabel(formModel, container) + " at index " + index; //$NON-NLS-1$
+    }
+
+    /** "the form root" / "group 'X'" / "'X' (AutoCommandBar)" - the user-facing container label. */
+    private static String containerLabel(EObject formModel, EObject container)
+    {
+        if (container == formModel)
+        {
+            return "the form root"; //$NON-NLS-1$
+        }
+        if (ECLASS_FORM_GROUP.equals(container.eClass().getName()))
+        {
+            return "group '" + stringFeature(container, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return "'" + stringFeature(container, FEATURE_NAME) + "' (" + container.eClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + ")"; //$NON-NLS-1$
+    }
+
+    /**
+     * Finds a form item by name anywhere in the form-item tree (the same all-containment walk
+     * {@code findItem} uses: items, command bars, context menus, tooltips), REJECTING an ambiguous
+     * name (more than one match) with a clear error rather than silently picking the first match.
+     * Returns the unique match, or {@code null} when none exists.
+     */
+    private static EObject findUniqueItem(EObject formModel, String name)
+    {
+        EClassifier formItem = formModel.eClass().getEPackage().getEClassifier(ECLASS_FORM_ITEM);
+        if (!(formItem instanceof EClass))
+        {
+            return null;
+        }
+        List<EObject> matches = new ArrayList<>();
+        collectItemsByName(formModel, name, (EClass)formItem, matches);
+        if (matches.size() > 1)
+        {
+            throw new RuntimeException("Form item name '" + name //$NON-NLS-1$
+                + "' is ambiguous (it matches more than one item)."); //$NON-NLS-1$
+        }
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    /** Collects every {@code FormItem} in the tree whose name matches (case-insensitive). */
+    private static void collectItemsByName(EObject container, String name, EClass formItem,
+        List<EObject> out)
+    {
+        for (EObject child : container.eContents())
+        {
+            if (!formItem.isInstance(child))
+            {
+                continue;
+            }
+            if (name.equalsIgnoreCase(stringFeature(child, FEATURE_NAME)))
+            {
+                out.add(child);
+            }
+            collectItemsByName(child, name, formItem, out);
+        }
+    }
+
+    /** The placement-rule {@link Kind} for a concrete item EClass name, or {@code null} when none. */
+    private static Kind kindForEClass(String eClassName)
+    {
+        if ("Button".equals(eClassName)) //$NON-NLS-1$
+        {
+            return Kind.BUTTON;
+        }
+        if (ECLASS_DECORATION.equals(eClassName))
+        {
+            return Kind.DECORATION;
+        }
+        return null;
+    }
+
+    /** Resolves a requested EEnum literal case-insensitively to its canonical form, or {@code null}. */
+    private static String resolveEnumLiteral(EObject owner, String featureName, String requested)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (!(feature instanceof EAttribute)
+            || !(((EAttribute)feature).getEAttributeType() instanceof EEnum))
+        {
+            return null;
+        }
+        for (EEnumLiteral literal : ((EEnum)((EAttribute)feature).getEAttributeType()).getELiterals())
+        {
+            if (literal.getLiteral().equalsIgnoreCase(requested))
+            {
+                return literal.getLiteral();
+            }
+        }
+        return null;
+    }
+
+    /** A comma-separated list of an EEnum attribute's literals (for the unknown-literal advisory). */
+    private static String enumLiteralsOf(EObject owner, String featureName)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (!(feature instanceof EAttribute)
+            || !(((EAttribute)feature).getEAttributeType() instanceof EEnum))
+        {
+            return ""; //$NON-NLS-1$
+        }
+        StringBuilder sb = new StringBuilder();
+        for (EEnumLiteral literal : ((EEnum)((EAttribute)feature).getEAttributeType()).getELiterals())
+        {
+            if (sb.length() > 0)
+            {
+                sb.append(", "); //$NON-NLS-1$
+            }
+            sb.append(literal.getLiteral());
+        }
+        return sb.toString();
     }
 
     /** A FormField bound to a form attribute via its dataPath (a generic InputField the user can refine). */
     @SuppressWarnings("unchecked")
     private static String createField(EObject formModel, String name, String parentName,
-        String attrName, String titleLanguage, String title, String[] createdKind)
+        String attrName, String titleLanguage, String title, boolean russianAutoNames,
+        String[] createdKind)
     {
         if (attrName == null || attrName.isEmpty())
         {
@@ -947,7 +1398,7 @@ public final class FormElementWriter
             return "Cannot create a form field for this form model."; //$NON-NLS-1$
         }
         setStringFeature(item, FEATURE_NAME, name);
-        setBooleanFeature(item, FEATURE_VISIBLE, true);
+        applyVisibleDefaults(item);
         setIntFeature(item, FEATURE_ID, nextItemId(formModel));
         // dataPath: a contained DataPath with segments=[attrName] (objects is transient - left empty,
         // the form's derived data recomputes it).
@@ -966,15 +1417,36 @@ public final class FormElementWriter
         // own factory does before the value type is known.
         setEnumFeature(item, FEATURE_TYPE, "InputField"); //$NON-NLS-1$
         setExtInfoClassifier(formModel, item, "InputFieldExtInfo"); //$NON-NLS-1$
+        // The designer's new-field defaults (FormObjectFactory.newFormField / newInputFieldExtInfo);
+        // the booleans default to false in the model, so without them a created field renders with
+        // no table header/footer, no wrap and a read-only text box. 'Auto'-valued enums are the
+        // model defaults (literal 0) and stay unset, like the XMI omits them.
+        setBooleanFeature(item, "showInHeader", true); //$NON-NLS-1$
+        setBooleanFeature(item, "showInFooter", true); //$NON-NLS-1$
+        setEnumFeature(item, "headerHorizontalAlign", "Left"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "editMode", "Enter"); //$NON-NLS-1$ //$NON-NLS-2$
+        EObject extInfo = singleReference(item, FEATURE_EXT_INFO);
+        if (extInfo != null)
+        {
+            setBooleanFeature(extInfo, "autoMaxWidth", true); //$NON-NLS-1$
+            setBooleanFeature(extInfo, "autoMaxHeight", true); //$NON-NLS-1$
+            setBooleanFeature(extInfo, "wrap", true); //$NON-NLS-1$
+            setBooleanFeature(extInfo, "chooseType", true); //$NON-NLS-1$
+            setBooleanFeature(extInfo, "typeDomainEnabled", true); //$NON-NLS-1$
+            setBooleanFeature(extInfo, "textEdit", true); //$NON-NLS-1$
+        }
         applyTitle(item, titleLanguage, title);
         addToList(container, FEATURE_ITEMS, item);
+        // A field carries both designer auto-children (context menu + extended tooltip).
+        addAutoChildren(formModel, item, true, russianAutoNames);
         recordKind(item, createdKind);
         return null;
     }
 
     /** A Button bound to a form command (FormCommand is-a mcore Command, so the reference is direct). */
     private static String createButton(EObject formModel, String name, String parentName,
-        String cmdName, String titleLanguage, String title, String[] createdKind)
+        String cmdName, String titleLanguage, String title, boolean russianAutoNames,
+        String[] createdKind)
     {
         if (cmdName == null || cmdName.isEmpty())
         {
@@ -996,41 +1468,240 @@ public final class FormElementWriter
         {
             return parentNotFound(parentName);
         }
+        String invalid = validatePlacement(Kind.BUTTON, container, parentName);
+        if (invalid != null)
+        {
+            return invalid;
+        }
         EObject item = createFromClassifier(formModel, "Button"); //$NON-NLS-1$
         if (item == null)
         {
             return "Cannot create a form button for this form model."; //$NON-NLS-1$
         }
         setStringFeature(item, FEATURE_NAME, name);
-        setBooleanFeature(item, FEATURE_VISIBLE, true);
+        applyVisibleDefaults(item);
         setIntFeature(item, FEATURE_ID, nextItemId(formModel));
-        // A standalone button; buttons have no extInfo (unlike fields/groups/decorations).
-        setEnumFeature(item, FEATURE_TYPE, "UsualButton"); //$NON-NLS-1$
+        // The button type depends on the container (the platform allows ONLY CommandBarButton /
+        // CommandBarHyperlink inside a command bar, context menu, button group or popup) - mirror
+        // FormItemTypeInformationService.getDefaultButtonType. Buttons have no extInfo.
+        setEnumFeature(item, FEATURE_TYPE,
+            isCommandBarContext(container) ? "CommandBarButton" : "UsualButton"); //$NON-NLS-1$ //$NON-NLS-2$
         EStructuralFeature cmdFeat = item.eClass().getEStructuralFeature("commandName"); //$NON-NLS-1$
         if (cmdFeat instanceof EReference)
         {
             item.eSet(cmdFeat, command);
         }
+        // The platform factory's remaining new-button defaults (FormObjectFactory.newButton); without
+        // them the exported button diverges from a designer-created one (e.g. AutoMaxWidth=false).
+        setBooleanFeature(item, "autoMaxWidth", true); //$NON-NLS-1$
+        setBooleanFeature(item, "autoMaxHeight", true); //$NON-NLS-1$
+        setBooleanFeature(item, "commandUniqueness", true); //$NON-NLS-1$
+        setEnumFeature(item, "representation", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "shape", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "shapeRepresentation", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "pictureLocation", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "representationInContextMenu", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "locationInCommandBar", "Auto"); //$NON-NLS-1$ //$NON-NLS-2$
+        setEnumFeature(item, "placementArea", "UserCmds"); //$NON-NLS-1$ //$NON-NLS-2$
         applyTitle(item, titleLanguage, title);
         addToList(container, FEATURE_ITEMS, item);
+        // A button carries only the extended-tooltip auto-child (FormObjectFactory.newButton).
+        addAutoChildren(formModel, item, false, russianAutoNames);
         recordKind(item, createdKind);
         return null;
     }
 
-    /** The form root for a blank parent, the named item otherwise, or {@code null} if not found. */
+    /**
+     * Rejects an item-kind / parent-container combination the designer forbids, mirroring the
+     * platform's {@code FormItemTypeInformationService} predicates ({@code isNotSupportedButtonContext}
+     * / {@code isContextNotSupportDecoration}). Returns {@code null} when the placement is allowed.
+     */
+    private static String validatePlacement(Kind kind, EObject container, String parentName)
+    {
+        String containerClass = container.eClass().getName();
+        if (kind == Kind.BUTTON
+            && (ECLASS_TABLE.equals(containerClass)
+                || isGroupOfTypeLiteral(container, TYPE_LITERAL_PAGES, TYPE_LITERAL_COLUMN_GROUP)))
+        {
+            return "A button cannot be placed in '" + parentName + "' (" + containerClass //$NON-NLS-1$ //$NON-NLS-2$
+                + "): the platform does not allow buttons in tables, pages groups or column groups. " //$NON-NLS-1$
+                + "Use the form root, a usual/popup group, or 'AutoCommandBar'."; //$NON-NLS-1$
+        }
+        if (kind == Kind.DECORATION
+            && (ECLASS_TABLE.equals(containerClass) || ECLASS_AUTO_COMMAND_BAR.equals(containerClass)
+                || ECLASS_CONTEXT_MENU.equals(containerClass)
+                || isGroupOfTypeLiteral(container, TYPE_LITERAL_COMMAND_BAR, TYPE_LITERAL_POPUP,
+                    TYPE_LITERAL_PAGES, TYPE_LITERAL_BUTTON_GROUP, TYPE_LITERAL_COLUMN_GROUP)))
+        {
+            return "A decoration cannot be placed in '" + parentName + "' (" + containerClass //$NON-NLS-1$ //$NON-NLS-2$
+                + "): tables, command bars, context menus and popup/pages/button/column groups " //$NON-NLS-1$
+                + "cannot hold decorations. Use the form root or a usual group."; //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /** Whether {@code container} is a FormGroup whose {@code type} matches one of the literals. */
+    private static boolean isGroupOfTypeLiteral(EObject container, String... literals)
+    {
+        if (!ECLASS_FORM_GROUP.equals(container.eClass().getName()))
+        {
+            return false;
+        }
+        String groupType = enumLiteralOf(container, FEATURE_TYPE);
+        for (String literal : literals)
+        {
+            if (literal.equals(groupType))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Attaches the designer's auto-children to a freshly created (and already container-attached)
+     * visual item: an {@code ExtendedTooltip} (a Label-typed decoration) and - for fields and
+     * decorations - a {@code ContextMenu}. Their names are the item name + the script-variant
+     * localized suffix (unique-ified against the form-wide namespace) and their ids come from the
+     * same form-wide allocator, the way {@code FormObjectFactory}/{@code FormItemManagementService}
+     * build them. Best-effort: an absent feature/classifier is skipped.
+     */
+    private static void addAutoChildren(EObject formModel, EObject item, boolean withContextMenu,
+        boolean russianAutoNames)
+    {
+        String base = stringFeature(item, FEATURE_NAME);
+        if (base == null)
+        {
+            return;
+        }
+        if (withContextMenu)
+        {
+            EStructuralFeature menuFeat = item.eClass().getEStructuralFeature(FEATURE_CONTEXT_MENU);
+            EObject menu = createFromClassifier(formModel, ECLASS_CONTEXT_MENU);
+            if (menu != null && menuFeat instanceof EReference && !menuFeat.isMany())
+            {
+                setStringFeature(menu, FEATURE_NAME, uniqueChildName(formModel, base,
+                    russianAutoNames ? RU_SUFFIX_CONTEXT_MENU : SUFFIX_CONTEXT_MENU));
+                setBooleanFeature(menu, "autoFill", true); //$NON-NLS-1$
+                item.eSet(menuFeat, menu);
+                setIntFeature(menu, FEATURE_ID, nextItemId(formModel));
+            }
+        }
+        EStructuralFeature tooltipFeat = item.eClass().getEStructuralFeature(FEATURE_EXTENDED_TOOLTIP);
+        EObject tooltip = createFromClassifier(formModel, ECLASS_EXTENDED_TOOLTIP);
+        if (tooltip != null && tooltipFeat instanceof EReference && !tooltipFeat.isMany())
+        {
+            setStringFeature(tooltip, FEATURE_NAME, uniqueChildName(formModel, base,
+                russianAutoNames ? RU_SUFFIX_EXTENDED_TOOLTIP : SUFFIX_EXTENDED_TOOLTIP));
+            setEnumFeature(tooltip, FEATURE_TYPE, TYPE_LITERAL_LABEL);
+            setBooleanFeature(tooltip, "autoMaxWidth", true); //$NON-NLS-1$
+            setBooleanFeature(tooltip, "autoMaxHeight", true); //$NON-NLS-1$
+            setExtInfoClassifier(formModel, tooltip, ECLASS_LABEL_DECORATION_EXT_INFO);
+            EObject tooltipExtInfo = singleReference(tooltip, FEATURE_EXT_INFO);
+            if (tooltipExtInfo != null)
+            {
+                setEnumFeature(tooltipExtInfo, "horizontalAlign", "Left"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            item.eSet(tooltipFeat, tooltip);
+            setIntFeature(tooltip, FEATURE_ID, nextItemId(formModel));
+        }
+    }
+
+    /** {@code base + suffix}, unique-ified against the form-wide item namespace with a counter. */
+    private static String uniqueChildName(EObject formModel, String base, String suffix)
+    {
+        String candidate = base + suffix;
+        int counter = 1;
+        while (findItem(formModel, candidate) != null)
+        {
+            candidate = base + suffix + counter++;
+        }
+        return candidate;
+    }
+
+    /**
+     * Whether {@code container}'s child buttons are command-bar buttons: an auto command bar, a
+     * context menu, or a group typed CommandBar / ButtonGroup / Popup (the platform's
+     * {@code isCommandBarButtonSupport}).
+     */
+    private static boolean isCommandBarContext(EObject container)
+    {
+        String eClassName = container.eClass().getName();
+        if (ECLASS_AUTO_COMMAND_BAR.equals(eClassName) || ECLASS_CONTEXT_MENU.equals(eClassName))
+        {
+            return true;
+        }
+        if (ECLASS_FORM_GROUP.equals(eClassName))
+        {
+            String groupType = enumLiteralOf(container, FEATURE_TYPE);
+            return TYPE_LITERAL_COMMAND_BAR.equals(groupType)
+                || TYPE_LITERAL_BUTTON_GROUP.equals(groupType)
+                || TYPE_LITERAL_POPUP.equals(groupType);
+        }
+        return false;
+    }
+
+    /**
+     * Sets the new-item defaults every visual form item shares with the platform factory: visible AND
+     * enabled (the {@code enabled} EAttribute defaults to {@code false} in the model, so a created item
+     * would otherwise export as {@code <Enabled>false</Enabled>} and render disabled in the client),
+     * plus the {@code userVisible} AdjustableBoolean the model requires.
+     */
+    private static void applyVisibleDefaults(EObject item)
+    {
+        setBooleanFeature(item, FEATURE_VISIBLE, true);
+        setBooleanFeature(item, FEATURE_ENABLED, true);
+        setAdjustableBooleanFeature(item, FEATURE_USER_VISIBLE);
+    }
+
+    /**
+     * Resolves the parent container for a new visual item: the form root for a blank parent, the
+     * form's (or a named item's, e.g. a table's) auto command bar for the {@code AutoCommandBar}
+     * token, the named item otherwise, or {@code null} if not found. A dotted parent path
+     * ({@code Form.X.AutoCommandBar.ChildItems}) is tolerated: item names cannot contain dots, so only
+     * the trailing segments matter (the Designer-XML {@code ChildItems} collection token is ignored).
+     */
     private static EObject containerFor(EObject formModel, String parentName)
     {
         if (parentName == null || parentName.isEmpty())
         {
             return formModel;
         }
-        return findItem(formModel, parentName);
+        String[] segments = parentName.split("\\."); //$NON-NLS-1$
+        int last = segments.length - 1;
+        if (last > 0 && CHILD_ITEMS_TOKEN.equalsIgnoreCase(segments[last]))
+        {
+            last--;
+        }
+        String token = segments[last];
+        if (AUTO_COMMAND_BAR_TOKEN.equalsIgnoreCase(token))
+        {
+            // A path carrying a form token before the owner segment ('Form.X.AutoCommandBar',
+            // 'Catalog.O.Form.F.AutoCommandBar') ALWAYS addresses the FORM's bar - there the
+            // preceding segment is the form name, which may coincide with an item name. Only
+            // 'MyTable.AutoCommandBar' (no form token) probes the named item's own bar, falling
+            // back to the form's bar when the item has none.
+            boolean formPathPrefix = last > 1 && isFormToken(segments[last - 2]);
+            EObject owner = (last > 0 && !formPathPrefix)
+                ? findItem(formModel, segments[last - 1]) : null;
+            EObject bar = owner != null ? singleReference(owner, FEATURE_AUTO_COMMAND_BAR) : null;
+            if (bar == null)
+            {
+                bar = singleReference(formModel, FEATURE_AUTO_COMMAND_BAR);
+            }
+            if (bar != null)
+            {
+                return bar;
+            }
+        }
+        return findItem(formModel, token);
     }
 
     private static String parentNotFound(String parentName)
     {
         return "Parent form item not found: " + parentName //$NON-NLS-1$
-            + ". Create the parent group first, or omit 'parent' to add at the form root."; //$NON-NLS-1$
+            + ". Use an existing item's name (see the form structure via get_metadata_details), " //$NON-NLS-1$
+            + "'AutoCommandBar' for the form's command bar, or omit 'parent' to add at the form root."; //$NON-NLS-1$
     }
 
     /** Attaches a fresh extInfo of the named concrete classifier to an item (best-effort). */
@@ -1062,6 +1733,10 @@ public final class FormElementWriter
     public static String createHandler(EObject container, String eventName, String procName,
         Version version, String langCode, String[] createdKind)
     {
+        if (ECLASS_FORM_COMMAND.equals(container.eClass().getName()))
+        {
+            return createCommandAction(container, eventName, procName, createdKind);
+        }
         EStructuralFeature handlersFeat = container.eClass().getEStructuralFeature("handlers"); //$NON-NLS-1$
         if (!(handlersFeat instanceof EReference) || !handlersFeat.isMany())
         {
@@ -1128,6 +1803,75 @@ public final class FormElementWriter
         addToList(container, "handlers", handler); //$NON-NLS-1$
         recordKind(handler, createdKind);
         return null;
+    }
+
+    /**
+     * Binds the ACTION handler of a form command ({@code ...Command.X.Handler.Action}): a command has
+     * no platform events, only the single {@code action} containment, so the "event" leaf must be
+     * {@code Action} (or its Russian equivalent). Builds the same
+     * {@code FormCommandHandlerContainer}/{@code CommandHandler} pair the platform's
+     * {@code ModelUtils.setCommandHandler} builds; the BSL procedure name defaults to the COMMAND name
+     * (the EDT UI's suggestion), not the event name.
+     */
+    private static String createCommandAction(EObject command, String eventName, String procName,
+        String[] createdKind)
+    {
+        if (!isActionToken(eventName))
+        {
+            return "Event '" + eventName + "' is not valid for a form command" //$NON-NLS-1$ //$NON-NLS-2$
+                + ". Available events: " + COMMAND_ACTION_EVENT; //$NON-NLS-1$
+        }
+        EStructuralFeature actionFeat = command.eClass().getEStructuralFeature(FEATURE_ACTION);
+        if (!(actionFeat instanceof EReference))
+        {
+            return "This form model does not support a command action handler."; //$NON-NLS-1$
+        }
+        if (command.eGet(actionFeat) != null)
+        {
+            return "An event handler for '" + COMMAND_ACTION_EVENT //$NON-NLS-1$
+                + "' already exists on this command."; //$NON-NLS-1$
+        }
+        EObject container = createFromClassifier(command, ECLASS_FORM_COMMAND_HANDLER_CONTAINER);
+        EObject handler = createFromClassifier(command, ECLASS_COMMAND_HANDLER);
+        EStructuralFeature handlerFeat =
+            container != null ? container.eClass().getEStructuralFeature(FEATURE_HANDLER) : null;
+        if (handler == null || !(handlerFeat instanceof EReference))
+        {
+            return "Cannot create a command action handler for this form model."; //$NON-NLS-1$
+        }
+        String proc = (procName == null || procName.isEmpty())
+            ? stringFeature(command, FEATURE_NAME) : procName;
+        setStringFeature(handler, FEATURE_NAME, proc);
+        container.eSet(handlerFeat, handler);
+        command.eSet(actionFeat, container);
+        recordKind(handler, createdKind);
+        return null;
+    }
+
+    /** Whether the handler FQN leaf addresses a command's Action (English or Russian). */
+    private static boolean isActionToken(String eventName)
+    {
+        return COMMAND_ACTION_EVENT.equalsIgnoreCase(eventName)
+            || (eventName != null && RU_ACTION.equals(eventName.trim().toLowerCase()));
+    }
+
+    /**
+     * Resolves the element an ITEM-LEVEL handler FQN attaches to on the tx-bound form model: the named
+     * form COMMAND for a {@code Command} kind token ({@code ...Command.X.Handler.Action}), the named
+     * form ITEM otherwise; the form root for a form-level ref. Returns {@code null} when the named
+     * owner does not exist.
+     */
+    public static EObject resolveHandlerContainer(EObject formModel, FormMemberRef ref)
+    {
+        if (!ref.isItemLevel())
+        {
+            return formModel;
+        }
+        if (kindForToken(ref.itemKindToken) == Kind.COMMAND)
+        {
+            return findFormCommand(formModel, ref.itemName);
+        }
+        return findFormItem(formModel, ref.itemName);
     }
 
     /** The {@code event} EReference on the EventHandler EClass held by the {@code handlers} feature. */
@@ -1362,21 +2106,72 @@ public final class FormElementWriter
         attribute.eSet(feature, typeClass.getEPackage().getEFactoryInstance().create(typeClass));
     }
 
-    /** Sets the managed item's type enum + a default extInfo, the way FormObjectFactory does. */
-    private static void initManagedItem(EObject formModel, EObject item, Kind kind)
+    /**
+     * Sets the managed item's type enum + a default extInfo, the way FormObjectFactory does. A
+     * GROUP's type is the validated explicit {@code requestedGroupType} when given, otherwise it is
+     * derived from the container (the platform's {@code getDefaultGroupType}): a Popup submenu
+     * inside command bars / popups / button groups, a Page inside a Pages group, a ColumnGroup
+     * inside tables and column groups, a UsualGroup elsewhere.
+     */
+    private static void initManagedItem(EObject formModel, EObject item, Kind kind, EObject container,
+        String requestedGroupType)
     {
-        String typeLiteral = kind == Kind.GROUP ? TYPE_LITERAL_USUAL_GROUP : TYPE_LITERAL_LABEL;
-        String extInfoClassifier =
-            kind == Kind.GROUP ? ECLASS_USUAL_GROUP_EXT_INFO : ECLASS_LABEL_DECORATION_EXT_INFO;
+        String typeLiteral = kind == Kind.GROUP
+            ? (requestedGroupType != null ? requestedGroupType : defaultGroupTypeFor(container))
+            : TYPE_LITERAL_LABEL;
+        String extInfoClassifier = kind == Kind.GROUP
+            ? groupExtInfoClassifierFor(typeLiteral) : ECLASS_LABEL_DECORATION_EXT_INFO;
         setEnumFeature(item, FEATURE_TYPE, typeLiteral);
-        EStructuralFeature feature = item.eClass().getEStructuralFeature(FEATURE_EXT_INFO);
-        if (feature instanceof EReference)
+        setExtInfoClassifier(formModel, item, extInfoClassifier);
+        if (kind == Kind.DECORATION)
         {
-            EClass extInfoClass = formEClass(formModel, extInfoClassifier);
-            if (extInfoClass != null && extInfoClass.getEPackage() != null)
+            // The factory's label decoration default (newLabelDecorationExtInfo).
+            EObject extInfo = singleReference(item, FEATURE_EXT_INFO);
+            if (extInfo != null)
             {
-                item.eSet(feature, extInfoClass.getEPackage().getEFactoryInstance().create(extInfoClass));
+                setEnumFeature(extInfo, "horizontalAlign", "Left"); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+    }
+
+    /** The platform's default group type literal for a container ({@code getDefaultGroupType}). */
+    private static String defaultGroupTypeFor(EObject container)
+    {
+        if (isCommandBarContext(container))
+        {
+            return TYPE_LITERAL_POPUP;
+        }
+        if (isGroupOfTypeLiteral(container, TYPE_LITERAL_PAGES))
+        {
+            return TYPE_LITERAL_PAGE;
+        }
+        if (ECLASS_TABLE.equals(container.eClass().getName())
+            || isGroupOfTypeLiteral(container, TYPE_LITERAL_COLUMN_GROUP))
+        {
+            return TYPE_LITERAL_COLUMN_GROUP;
+        }
+        return TYPE_LITERAL_USUAL_GROUP;
+    }
+
+    /** The concrete extInfo EClass name matching a group type literal (FormObjectFactory's pairs). */
+    private static String groupExtInfoClassifierFor(String groupTypeLiteral)
+    {
+        switch (groupTypeLiteral)
+        {
+            case TYPE_LITERAL_POPUP:
+                return "PopupGroupExtInfo"; //$NON-NLS-1$
+            case TYPE_LITERAL_PAGE:
+                return "PageGroupExtInfo"; //$NON-NLS-1$
+            case TYPE_LITERAL_PAGES:
+                return "PagesGroupExtInfo"; //$NON-NLS-1$
+            case TYPE_LITERAL_COLUMN_GROUP:
+                return "ColumnGroupExtInfo"; //$NON-NLS-1$
+            case TYPE_LITERAL_COMMAND_BAR:
+                return "CommandBarExtInfo"; //$NON-NLS-1$
+            case TYPE_LITERAL_BUTTON_GROUP:
+                return "ButtonGroupExtInfo"; //$NON-NLS-1$
+            default:
+                return ECLASS_USUAL_GROUP_EXT_INFO;
         }
     }
 
@@ -1488,6 +2283,15 @@ public final class FormElementWriter
      */
     public static EObject findFormHandler(EObject container, String eventName)
     {
+        if (ECLASS_FORM_COMMAND.equals(container.eClass().getName()))
+        {
+            // A command's single handler slot: its contained action (removing it clears the binding).
+            if (!isActionToken(eventName))
+            {
+                return null;
+            }
+            return singleReference(container, FEATURE_ACTION);
+        }
         EStructuralFeature handlersFeat = container.eClass().getEStructuralFeature("handlers"); //$NON-NLS-1$
         if (!(handlersFeat instanceof EReference) || !handlersFeat.isMany())
         {
@@ -1511,20 +2315,48 @@ public final class FormElementWriter
     // ---- rebind (F3): change an EXISTING handler's procedure / a button's command ---------------
 
     /**
-     * Re-points an EXISTING event handler on {@code container} (the form root or a form item) to a
-     * different BSL procedure: finds the handler bound to {@code eventName} (English or Russian,
-     * case-insensitive) and overwrites its procedure {@code name}. Does NOT bind a new event (that is
+     * Re-points an EXISTING event handler on {@code container} (the form root, a form item or a form
+     * COMMAND) to a different BSL procedure. For an item / the form root it finds the handler bound
+     * to {@code eventName} (English or Russian, case-insensitive) and overwrites its procedure
+     * {@code name}; for a form command ({@code ...Command.X.Handler.Action}) the single Action's
+     * contained {@code CommandHandler} is renamed. Does NOT bind a new event (that is
      * {@code create_metadata} via {@link #createHandler}); a missing handler is reported so the caller
      * can steer the user to create it. Reflective, so no compile-time form-model dependency. Call on
      * the tx-bound form model.
      *
-     * @param container the form root or the owning form item (already resolved on the tx-bound model)
-     * @param eventName the event whose handler to rebind (e.g. {@code OnChange})
+     * @param container the form root, the owning form item or the form command (already resolved on
+     *     the tx-bound model, see {@link #resolveHandlerContainer})
+     * @param eventName the event whose handler to rebind (e.g. {@code OnChange}, or {@code Action}
+     *     for a command)
      * @param procName the new BSL handler procedure name (must be non-blank)
      * @return {@code null} on success, or a human-readable error message
      */
     public static String rebindHandler(EObject container, String eventName, String procName)
     {
+        if (ECLASS_FORM_COMMAND.equals(container.eClass().getName()))
+        {
+            // A command's single handler "event" is its Action: rename the CommandHandler inside the
+            // action containment (the pair createCommandAction builds).
+            if (procName == null || procName.isEmpty())
+            {
+                return "Provide the new handler procedure name in the 'procedure' property " //$NON-NLS-1$
+                    + "(e.g. {name:'procedure', value:'PriceOnChange'})."; //$NON-NLS-1$
+            }
+            if (!isActionToken(eventName))
+            {
+                return "Event '" + eventName + "' is not valid for a form command" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ". Available events: " + COMMAND_ACTION_EVENT; //$NON-NLS-1$
+            }
+            EObject action = singleReference(container, FEATURE_ACTION);
+            EObject handler = action != null ? singleReference(action, FEATURE_HANDLER) : null;
+            if (handler == null)
+            {
+                return "No event handler for '" + eventName + "' exists on this element to rebind. " //$NON-NLS-1$ //$NON-NLS-2$
+                    + "Use create_metadata on the handler FQN to bind it first."; //$NON-NLS-1$
+            }
+            setStringFeature(handler, FEATURE_NAME, procName);
+            return null;
+        }
         EStructuralFeature handlersFeat = container.eClass().getEStructuralFeature("handlers"); //$NON-NLS-1$
         if (!(handlersFeat instanceof EReference) || !handlersFeat.isMany())
         {
@@ -1548,11 +2380,11 @@ public final class FormElementWriter
 
     /**
      * Re-points an EXISTING button at a different (existing) form command: validates that
-     * {@code button} carries a {@code commandName} reference and that a {@link
-     * com._1c.g5.v8.dt.form.model.FormCommand} named {@code commandName} exists on {@code formModel},
-     * then sets the reference. A button's {@code commandName} targets a FormCommand (a form-model
-     * object, not an mdclass object), so it is not introspector-assignable and is rebound here.
-     * Reflective, so no compile-time form-model dependency. Call on the tx-bound form model.
+     * {@code button} carries a {@code commandName} reference and that a {@code FormCommand} named
+     * {@code commandName} exists on {@code formModel}, then sets the reference. A button's
+     * {@code commandName} targets a FormCommand (a form-model object, not an mdclass object), so it
+     * is not introspector-assignable and is rebound here. Reflective, so no compile-time form-model
+     * dependency. Call on the tx-bound form model.
      *
      * @param formModel the editable form content model (tx-bound)
      * @param button the button form item (already resolved on the tx-bound model)
@@ -1582,272 +2414,36 @@ public final class FormElementWriter
         return null;
     }
 
-    // ---- move / reorder (F2) --------------------------------------------------------------------
-
-    /** Position spec prefixes (the integer / {@code first} / {@code last} forms have no prefix). */
-    private static final String POS_FIRST = "first"; //$NON-NLS-1$
-    private static final String POS_LAST = "last"; //$NON-NLS-1$
-    private static final String POS_BEFORE = "before:"; //$NON-NLS-1$
-    private static final String POS_AFTER = "after:"; //$NON-NLS-1$
-
     /**
-     * Moves / reorders a form ITEM (a field, group, decoration, button or table - anything in the
-     * {@code items} containment tree) on the tx-bound {@code formModel}. The item is re-parented into
-     * {@code targetParent} (a group name, or the FORM name / blank for the form root) and/or reordered
-     * to {@code position} among the destination's children. The destination's {@code items} list is the
-     * SAME list the source is removed from when reordering in place, so the integer index is the desired
-     * FINAL 0-based position "as you see it" (see {@link #resolveMovePosition}). Reuses the reflective
-     * {@code items}-tree access the rest of this writer uses - no compile-time form-model dependency.
-     *
-     * <p>Rejections (thrown as a {@link RuntimeException} with a user-facing message, so the calling
-     * write lambda rolls back with no partial mutation): an item / target-group name that is missing or
-     * AMBIGUOUS (matches more than one element), a {@code targetParent} that is not a group, and moving a
-     * group INTO ITSELF OR ITS OWN DESCENDANT (a containment cycle).</p>
-     *
-     * @param formModel the editable form content model (tx-bound)
-     * @param itemName the programmatic name of the item to move
-     * @param targetParent the destination group name; blank or equal to {@code formName} means the form
-     *     root; {@code null} keeps the item in its current container (reorder in place)
-     * @param position the destination position spec ({@code first} / {@code last} / {@code before:<n>} /
-     *     {@code after:<n>} / a 0-based integer index), or {@code null} to append at the end
-     * @param formName the MD-form Name (matching it as {@code targetParent} means the form root)
-     * @return a human-readable description of where the item ended up (e.g. {@code "group 'Main' at index 1"})
+     * Depth-first search of ALL contained {@code FormItem}s for an item by its (form-wide unique)
+     * programmatic name. Walks every containment that holds form items - the {@code items} tree, the
+     * auto command bars (form- and table-level), context menus, extended tooltips - not just
+     * {@code items}, by filtering {@code eContents()} to {@code FormItem} instances (the same filter
+     * {@code nextItemId} uses).
      */
-    public static String moveItem(EObject formModel, String itemName, String targetParent,
-        String position, String formName)
+    private static EObject findItem(EObject root, String name)
     {
-        EObject item = findUniqueItem(formModel, itemName);
-        if (item == null)
+        EClassifier formItem = root.eClass().getEPackage().getEClassifier(ECLASS_FORM_ITEM);
+        if (!(formItem instanceof EClass))
         {
-            throw new RuntimeException("Form item not found: '" + itemName //$NON-NLS-1$
-                + "'. Use get_metadata_details on the form to inspect its items."); //$NON-NLS-1$
+            return null;
         }
-        EObject sourceContainer = item.eContainer();
-        if (sourceContainer == null || sourceContainer.eClass().getEStructuralFeature(FEATURE_ITEMS) == null)
-        {
-            throw new RuntimeException("Form item '" + itemName //$NON-NLS-1$
-                + "' has no parent container and cannot be moved."); //$NON-NLS-1$
-        }
-
-        // Resolve the destination container. A non-null targetParent is a RE-PARENT: blank or the
-        // form name means the form root (per the contract above); only null keeps the current
-        // container (reorder in place).
-        EObject destContainer;
-        String destLabel;
-        boolean reparent = targetParent != null;
-        boolean toRoot = reparent && (targetParent.isEmpty() || targetParent.equalsIgnoreCase(formName));
-        if (reparent && !toRoot)
-        {
-            EObject group = findUniqueGroup(formModel, targetParent);
-            if (group == null)
-            {
-                throw new RuntimeException("Target group not found: '" + targetParent //$NON-NLS-1$
-                    + "'. The parent must be an existing group (or the form name for the form root)."); //$NON-NLS-1$
-            }
-            if (group == item || isDescendant(item, group))
-            {
-                throw new RuntimeException("Cannot move group '" + itemName //$NON-NLS-1$
-                    + "' into itself or one of its own descendants."); //$NON-NLS-1$
-            }
-            destContainer = group;
-            destLabel = "group '" + stringFeature(group, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        else if (reparent)
-        {
-            // targetParent is blank or equals the form name -> the form root.
-            destContainer = formModel;
-            destLabel = "the form root"; //$NON-NLS-1$
-        }
-        else
-        {
-            // No targetParent (null) -> reorder within the current container.
-            destContainer = sourceContainer;
-            destLabel = (sourceContainer == formModel) ? "the form root" //$NON-NLS-1$
-                : "group '" + stringFeature(sourceContainer, FEATURE_NAME) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        @SuppressWarnings("unchecked")
-        EList<EObject> sourceItems = (EList<EObject>)sourceContainer
-            .eGet(sourceContainer.eClass().getEStructuralFeature(FEATURE_ITEMS));
-        @SuppressWarnings("unchecked")
-        EList<EObject> destItems = (EList<EObject>)destContainer
-            .eGet(destContainer.eClass().getEStructuralFeature(FEATURE_ITEMS));
-
-        // Remove from the source first (it may BE the destination list when reordering in place). The
-        // requested integer position is the desired FINAL 0-based index in the resulting list ("as you
-        // see it"): inserting at that index into the POST-removal list lands the item at exactly that
-        // index in both directions, so no off-by-one compensation is applied.
-        sourceItems.remove(item);
-        int index = resolveMovePosition(position, namesOf(destItems), itemName);
-        if (index < 0 || index > destItems.size())
-        {
-            index = destItems.size();
-        }
-        destItems.add(index, item);
-        return destLabel + " at index " + index; //$NON-NLS-1$
+        return findItemIn(root, name, (EClass)formItem);
     }
 
-    /**
-     * Resolves a requested {@code position} into a 0-based insertion index in a destination list whose
-     * sibling names are {@code destNames} (already EXCLUDING the moved item). The {@code first} /
-     * {@code last} / {@code before:<name>} / {@code after:<name>} forms are name-relative; a plain
-     * integer is the desired FINAL index as-is. Pure (no model dependency) so it is unit-testable.
-     *
-     * @param position the position spec, or {@code null} / blank / {@code last} for the end
-     * @param destNames the destination sibling names in order (without the moved item)
-     * @param movedName the moved item's name (a {@code before:}/{@code after:} reference to it is rejected)
-     * @return the 0-based insertion index
-     * @throws RuntimeException with a user-facing message on a malformed spec or unknown sibling
-     */
-    public static int resolveMovePosition(String position, List<String> destNames, String movedName)
+    private static EObject findItemIn(EObject container, String name, EClass formItem)
     {
-        if (position == null || position.isEmpty() || POS_LAST.equalsIgnoreCase(position))
+        for (EObject child : container.eContents())
         {
-            return destNames.size();
-        }
-        if (POS_FIRST.equalsIgnoreCase(position))
-        {
-            return 0;
-        }
-        String lower = position.toLowerCase(java.util.Locale.ROOT);
-        if (lower.startsWith(POS_BEFORE))
-        {
-            return indexOfSibling(destNames, position.substring(POS_BEFORE.length()).trim(), movedName);
-        }
-        if (lower.startsWith(POS_AFTER))
-        {
-            return indexOfSibling(destNames, position.substring(POS_AFTER.length()).trim(), movedName) + 1;
-        }
-        try
-        {
-            int idx = Integer.parseInt(position.trim());
-            if (idx < 0)
+            if (!formItem.isInstance(child))
             {
-                throw new RuntimeException("Invalid position index '" + position //$NON-NLS-1$
-                    + "': must be zero or positive."); //$NON-NLS-1$
+                continue;
             }
-            return idx;
-        }
-        catch (NumberFormatException e)
-        {
-            throw new RuntimeException("Invalid position '" + position //$NON-NLS-1$
-                + "'. Expected an integer index, 'first', 'last', 'before:<name>' or 'after:<name>'."); //$NON-NLS-1$
-        }
-    }
-
-    /** The 0-based index of {@code sibling} in {@code destNames} (case-insensitive), or throws. */
-    private static int indexOfSibling(List<String> destNames, String sibling, String movedName)
-    {
-        if (sibling.isEmpty())
-        {
-            throw new RuntimeException("Position reference is missing a sibling name " //$NON-NLS-1$
-                + "(use 'before:<name>' or 'after:<name>')."); //$NON-NLS-1$
-        }
-        if (sibling.equalsIgnoreCase(movedName))
-        {
-            throw new RuntimeException("Position cannot reference the moved item itself: '" //$NON-NLS-1$
-                + sibling + "'."); //$NON-NLS-1$
-        }
-        for (int i = 0; i < destNames.size(); i++)
-        {
-            if (sibling.equalsIgnoreCase(destNames.get(i)))
+            if (name.equalsIgnoreCase(stringFeature(child, FEATURE_NAME)))
             {
-                return i;
+                return child;
             }
-        }
-        throw new RuntimeException("Sibling '" + sibling //$NON-NLS-1$
-            + "' not found in the destination container."); //$NON-NLS-1$
-    }
-
-    /** The programmatic names of the items in {@code list}, in order (for position resolution). */
-    private static List<String> namesOf(EList<EObject> list)
-    {
-        List<String> names = new ArrayList<>(list.size());
-        for (EObject item : list)
-        {
-            names.add(stringFeature(item, FEATURE_NAME));
-        }
-        return names;
-    }
-
-    /**
-     * Finds a form item by name anywhere in the {@code items} tree, rejecting an AMBIGUOUS name (more
-     * than one match) with a clear error rather than silently moving the first match. Returns the unique
-     * match, or {@code null} when none exists.
-     */
-    private static EObject findUniqueItem(EObject formModel, String name)
-    {
-        List<EObject> matches = new ArrayList<>();
-        collectItemsByName(formModel, name, matches);
-        if (matches.size() > 1)
-        {
-            throw new RuntimeException("Form item name '" + name //$NON-NLS-1$
-                + "' is ambiguous (it matches more than one item)."); //$NON-NLS-1$
-        }
-        return matches.isEmpty() ? null : matches.get(0);
-    }
-
-    /**
-     * Finds a form GROUP (a {@code FormGroup}) by name anywhere in the {@code items} tree, rejecting an
-     * ambiguous name. Returns the unique matching group, or {@code null} when no group has that name (a
-     * non-group item with the name is treated as "no group", matching the v1 semantics).
-     */
-    private static EObject findUniqueGroup(EObject formModel, String name)
-    {
-        List<EObject> matches = new ArrayList<>();
-        collectItemsByName(formModel, name, matches);
-        EObject group = null;
-        for (EObject match : matches)
-        {
-            if (ECLASS_FORM_GROUP.equals(match.eClass().getName()))
-            {
-                if (group != null)
-                {
-                    throw new RuntimeException("Target group name '" + name //$NON-NLS-1$
-                        + "' is ambiguous (it matches more than one group)."); //$NON-NLS-1$
-                }
-                group = match;
-            }
-        }
-        return group;
-    }
-
-    /** Collects every item in the {@code items} tree whose name matches (case-insensitive). */
-    private static void collectItemsByName(EObject container, String name, List<EObject> out)
-    {
-        for (EObject item : referenceList(container, FEATURE_ITEMS))
-        {
-            if (name.equalsIgnoreCase(stringFeature(item, FEATURE_NAME)))
-            {
-                out.add(item);
-            }
-            collectItemsByName(item, name, out);
-        }
-    }
-
-    /** Whether {@code candidate} is {@code ancestor} itself or nested anywhere inside it (cycle guard). */
-    private static boolean isDescendant(EObject ancestor, EObject candidate)
-    {
-        for (EObject parent = candidate.eContainer(); parent != null; parent = parent.eContainer())
-        {
-            if (parent == ancestor)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Depth-first search of the whole {@code items} tree for an item by programmatic name. */
-    private static EObject findItem(EObject container, String name)
-    {
-        for (EObject item : referenceList(container, FEATURE_ITEMS))
-        {
-            if (name.equalsIgnoreCase(stringFeature(item, FEATURE_NAME)))
-            {
-                return item;
-            }
-            EObject nested = findItem(item, name);
+            EObject nested = findItemIn(child, name, formItem);
             if (nested != null)
             {
                 return nested;
@@ -1866,6 +2462,57 @@ public final class FormElementWriter
             }
         }
         return null;
+    }
+
+    /** The value of a single-valued EReference, or {@code null} when absent/unset/not a reference. */
+    private static EObject singleReference(EObject owner, String featureName)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (!(feature instanceof EReference) || feature.isMany())
+        {
+            return null;
+        }
+        Object value = owner.eGet(feature);
+        return value instanceof EObject ? (EObject)value : null;
+    }
+
+    /** The literal of a set EEnum attribute (e.g. a group's {@code type}), or {@code null}. */
+    private static String enumLiteralOf(EObject owner, String featureName)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (!(feature instanceof EAttribute)
+            || !(((EAttribute)feature).getEAttributeType() instanceof EEnum))
+        {
+            return null;
+        }
+        Object value = owner.eGet(feature);
+        if (value instanceof Enumerator)
+        {
+            return ((Enumerator)value).getLiteral();
+        }
+        return value != null ? value.toString() : null;
+    }
+
+    /**
+     * Fills a contained {@code AdjustableBoolean} feature ({@code userVisible} on a visual item,
+     * {@code use} on a command) with a fresh instance whose {@code common} flag is set - what the
+     * platform factory's {@code newAdjustableBoolean} produces. A no-op when the feature is absent.
+     */
+    private static void setAdjustableBooleanFeature(EObject owner, String featureName)
+    {
+        EStructuralFeature feature = owner.eClass().getEStructuralFeature(featureName);
+        if (!(feature instanceof EReference) || feature.isMany())
+        {
+            return;
+        }
+        EClass type = ((EReference)feature).getEReferenceType();
+        if (type == null || type.getEPackage() == null || type.isAbstract())
+        {
+            return;
+        }
+        EObject adjustable = type.getEPackage().getEFactoryInstance().create(type);
+        setBooleanFeature(adjustable, FEATURE_COMMON, true);
+        owner.eSet(feature, adjustable);
     }
 
     @SuppressWarnings("unchecked")

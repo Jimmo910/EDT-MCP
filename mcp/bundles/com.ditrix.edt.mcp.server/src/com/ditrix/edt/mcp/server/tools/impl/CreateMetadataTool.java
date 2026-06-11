@@ -30,6 +30,7 @@ import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.metadata.mdclass.ReturnValuesReuse;
+import com._1c.g5.v8.dt.metadata.mdclass.ScriptVariant;
 import com._1c.g5.v8.dt.metadata.mdclass.TemplateType;
 import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -513,8 +514,9 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 + "or underscore and contain only letters, digits and underscores.").toJson(); //$NON-NLS-1$
         }
 
-        // Form-member properties: title (+ language), parent (nest a visual item), and the binding
-        // target for a Field (dataPath/attribute -> the form attribute) or a Button (command).
+        // Form-member properties: title (+ language), parent (nest a visual item), the binding
+        // target for a Field (dataPath/attribute -> the form attribute) or a Button (command), and
+        // a Group's explicit type (Popup/Pages/Page/CommandBar/ButtonGroup/ColumnGroup/UsualGroup).
         String titleVal = null;
         String titleLang = null;
         String parentName = null;
@@ -535,6 +537,15 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 case "parent": //$NON-NLS-1$
                     parentName = asString(prop.get("value")); //$NON-NLS-1$
                     break;
+                case "type": //$NON-NLS-1$
+                    if (kind != FormElementWriter.Kind.GROUP)
+                    {
+                        return ToolResult.error("Property 'type' is supported at creation only for " //$NON-NLS-1$
+                            + "a form Group (the group kind, e.g. Popup or Pages). Set other " //$NON-NLS-1$
+                            + "elements' types via modify_metadata.").toJson(); //$NON-NLS-1$
+                    }
+                    bindTarget = asString(prop.get("value")); //$NON-NLS-1$
+                    break;
                 case "datapath": //$NON-NLS-1$
                 case "attribute": //$NON-NLS-1$
                 case "command": //$NON-NLS-1$
@@ -544,8 +555,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                     return ToolResult.error("Property '" + pName + "' is not supported for a form " //$NON-NLS-1$ //$NON-NLS-2$
                         + "element. This version applies: title (with optional language), parent " //$NON-NLS-1$
                         + "(nest a visual item), dataPath/attribute (a Field's bound attribute), " //$NON-NLS-1$
-                        + "command (a Button's bound command). Set other properties via " //$NON-NLS-1$
-                        + "modify_metadata.").toJson(); //$NON-NLS-1$
+                        + "command (a Button's bound command), type (a Group's kind). Set other " //$NON-NLS-1$
+                        + "properties via modify_metadata.").toJson(); //$NON-NLS-1$
             }
         }
 
@@ -561,6 +572,9 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         final String parent = parentName;
         final String bind = bindTarget;
         final String titleText = titleVal;
+        // The designer's auto-children (extended tooltip / context menu) get script-variant
+        // localized name suffixes, like FormObjectDefaultNameProvider.
+        final boolean russianAutoNames = config.getScriptVariant() == ScriptVariant.RUSSIAN;
         final String[] createdKind = new String[1];
 
         final boolean persisted;
@@ -590,7 +604,7 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 (formModel, tx) ->
                 {
                     String err = FormElementWriter.createMember(formModel, fKind, ref.name, parent,
-                        bind, titleLanguage, titleText, createdKind);
+                        bind, titleLanguage, titleText, russianAutoNames, createdKind);
                     if (err != null)
                     {
                         throw new RuntimeException(err);
@@ -770,8 +784,10 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
      * Binds an event handler to a form root or to a form ITEM (the leaf is the EVENT name; the BSL
      * procedure name comes from a {@code procedure} property, defaulting to the event name). For an
      * item-level FQN ({@code ...Form.F.Field.Item.Handler.Event}) the handler attaches to the named
-     * item. An unknown event is rejected with the list of AVAILABLE events (the union of the element's
-     * base type and its extInfo sub-type) localized to the configuration language.
+     * item; a COMMAND-level FQN ({@code ...Command.C.Handler.Action}) binds the command's single
+     * Action (its procedure defaults to the COMMAND name). An unknown event is rejected with the
+     * list of AVAILABLE events (the union of the element's base type and its extInfo sub-type)
+     * localized to the configuration language.
      */
     private String createFormHandler(String projectName, String normFqn,
         FormElementWriter.FormMemberRef ref, List<JsonObject> properties)
@@ -817,7 +833,8 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
 
         final String eventName = ref.name;
         final String fProc = procName;
-        final String fItemName = ref.isItemLevel() ? ref.itemName : null;
+        final boolean commandOwner =
+            FormElementWriter.kindForToken(ref.itemKindToken) == FormElementWriter.Kind.COMMAND;
         final String[] createdKind = new String[1];
 
         final boolean persisted;
@@ -830,16 +847,17 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 (formModel, tx) ->
                 {
                     // Form-level handlers attach to the form root; item-level handlers
-                    // (Type.Object.Form.F.Field.Item.Handler.Event) attach to the named item.
-                    EObject container = formModel;
-                    if (fItemName != null)
+                    // (Type.Object.Form.F.Field.Item.Handler.Event) attach to the named item; a
+                    // COMMAND ref (Type.Object.Form.F.Command.C.Handler.Action) attaches to the
+                    // form command.
+                    EObject container = FormElementWriter.resolveHandlerContainer(formModel, ref);
+                    if (container == null)
                     {
-                        container = FormElementWriter.findFormItem(formModel, fItemName);
-                        if (container == null)
-                        {
-                            throw new RuntimeException("Form item not found: " + fItemName //$NON-NLS-1$
+                        throw new RuntimeException(commandOwner
+                            ? "Form command not found: " + ref.itemName //$NON-NLS-1$
+                                + ". Create the command first, then add the handler." //$NON-NLS-1$
+                            : "Form item not found: " + ref.itemName //$NON-NLS-1$
                                 + ". Create the item first, then add the handler."); //$NON-NLS-1$
-                        }
                     }
                     String err = FormElementWriter.createHandler(container, eventName, fProc, version,
                         langCode, createdKind);

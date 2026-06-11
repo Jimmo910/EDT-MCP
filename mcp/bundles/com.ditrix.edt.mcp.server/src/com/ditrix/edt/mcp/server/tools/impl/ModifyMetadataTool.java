@@ -75,8 +75,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             + "attribute / command) addressed by a 1C full-name FQN, as " //$NON-NLS-1$
             + "properties=[{name, value, language?}]. Each property is validated (it must be " //$NON-NLS-1$
             + "assignable, and an enum value must be one of the allowed literals) with an actionable " //$NON-NLS-1$
-            + "error. Move/reorder a FORM ITEM with the 'parent' (a group name, or the form name for " //$NON-NLS-1$
-            + "the form root) and/or 'position' ('first'/'last'/'before:<name>'/'after:<name>'/index) " //$NON-NLS-1$
+            + "error. Move/reorder a FORM ITEM with the 'parent' (a group name, 'AutoCommandBar' for " //$NON-NLS-1$
+            + "the form's command bar, or the form name for the form root) and/or 'position' " //$NON-NLS-1$
+            + "('first'/'last'/'before:<name>'/'after:<name>'/index) " //$NON-NLS-1$
             + "properties. REBIND a form event handler's procedure with a 'procedure' property on a " //$NON-NLS-1$
             + "Handler FQN, or re-point a Button at a different form command with a 'command' property. " //$NON-NLS-1$
             + "Set a StyleItem's value with a 'value' property: a Color " //$NON-NLS-1$
@@ -431,7 +432,8 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
 
     /**
      * The move property names (the structural re-parent / reorder of a form item): {@code parent}
-     * (the destination group, or the form name / blank for the form root) and {@code position}
+     * (the destination container - a group, the {@code AutoCommandBar} token, a table - or the form
+     * name / blank for the form root) and {@code position}
      * (the destination order: {@code first} / {@code last} / {@code before:<name>} / {@code after:<name>}
      * / a 0-based integer index). They are bilingual: ru {@code roditel} / ru {@code poziciya}.
      */
@@ -531,8 +533,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
      * Moves / reorders a form ITEM addressed by {@code ref} (a field / group / decoration / button /
      * table), expressed as the {@code parent} and/or {@code position} move properties. Resolves the
      * MD-form, opens ONE BM write transaction on the re-fetched content form, re-parents / reorders the
-     * item via {@link FormElementWriter#moveItem} (which rejects an ambiguous / missing item, a
-     * non-group parent and a group-into-its-own-descendant cycle, rolling the tx back), then
+     * item via {@link FormElementWriter#moveItem} (which rejects an ambiguous / missing item, an
+     * unknown parent - the error advertises the {@code AutoCommandBar} token - a placement the
+     * designer forbids and a containment cycle, rolling the tx back), then
      * force-exports the CONTENT form to its {@code Form.form} on disk - the same persistence path the
      * property-modify branch uses. Position semantics match the dedicated move primitive exactly (the
      * integer index is the desired FINAL 0-based position).
@@ -632,8 +635,10 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     /**
      * REBINDS an existing event handler (addressed by a handler FQN, {@code ...Handler.Event} at form
      * or item level) to a different BSL procedure {@code procName}. Resolves the MD-form, opens ONE BM
-     * write transaction on the re-fetched content form, resolves the handler's CONTAINER (the form root,
-     * or the named item for an item-level FQN), re-points the existing handler via {@link
+     * write transaction on the re-fetched content form, resolves the handler's CONTAINER via
+     * {@link FormElementWriter#resolveHandlerContainer} (the form root, the named item, or the form
+     * COMMAND for a {@code ...Command.C.Handler.Action} FQN - so a command's Action procedure is
+     * rebindable too), re-points the existing handler via {@link
      * FormElementWriter#rebindHandler} (which fails clearly when no handler for the event exists, so the
      * tx rolls back), then force-exports the CONTENT form to its {@code Form.form} on disk - the same
      * persistence path the property-modify branch uses. Does NOT bind a NEW event (that is
@@ -643,7 +648,8 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         FormElementWriter.FormMemberRef ref, String procName)
     {
         final String eventName = ref.name;
-        final String itemName = ref.isItemLevel() ? ref.itemName : null;
+        final boolean commandOwner = ref.isItemLevel()
+            && FormElementWriter.kindForToken(ref.itemKindToken) == FormElementWriter.Kind.COMMAND;
         final boolean persisted;
         try
         {
@@ -655,17 +661,15 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             persisted = FormElementWriter.writeEditableForm(fctx, "RebindFormHandler", //$NON-NLS-1$
                 (formModel, tx) ->
                 {
-                    // Form-level handlers live on the form root; item-level handlers on the named item.
-                    EObject container = formModel;
-                    if (itemName != null)
+                    // Form-level handlers live on the form root; item-level handlers on the named
+                    // item; a COMMAND ref (...Command.C.Handler.Action) on the form command - the
+                    // same resolution create_metadata / delete_metadata use.
+                    EObject container = FormElementWriter.resolveHandlerContainer(formModel, ref);
+                    if (container == null)
                     {
-                        container = FormElementWriter.findFormItem(formModel, itemName);
-                        if (container == null)
-                        {
-                            throw new FormValidationException(ToolResult.error("Form item not found: " //$NON-NLS-1$
-                                + itemName + ". Use get_metadata_details to inspect the form items.") //$NON-NLS-1$
-                                .toJson());
-                        }
+                        throw new FormValidationException(ToolResult.error((commandOwner
+                            ? "Form command not found: " : "Form item not found: ") + ref.itemName //$NON-NLS-1$ //$NON-NLS-2$
+                            + ". Use get_metadata_details to inspect the form items.").toJson()); //$NON-NLS-1$
                     }
                     String err = FormElementWriter.rebindHandler(container, eventName, procName);
                     if (err != null)
