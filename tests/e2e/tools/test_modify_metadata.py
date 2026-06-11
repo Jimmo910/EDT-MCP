@@ -26,7 +26,9 @@ from harness import (
     assert_contains,
     assert_not_contains,
     assert_no_diff,
+    assert_tree_unchanged,
     poll_diff_contains,
+    tree_snapshot,
     wait_for_project_ready,
     diff,
     e2e_test,
@@ -593,7 +595,7 @@ def test_rebind_form_level_handler_procedure_when_absent_is_error():
     })
     # Either there is already a handler (then this succeeds) or there is none (then a clean error). Both
     # outcomes are acceptable here; the dedicated round-trip test below seeds then rebinds deterministically.
-    if not r.ok:
+    if r.is_error:
         e = assert_error(r, "rebind a non-existent handler")
         assert_error_quality(e, names=["OnOpen"], suggests=["create_metadata"],
                              ctx="rebinding an absent handler steers to create_metadata")
@@ -737,7 +739,7 @@ def test_move_field_back_to_form_root():
         "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
         "properties": [{"name": "dataPath", "value": "BackAttr"}, {"name": "parent", "value": "BackGrp"}]})
     # create_metadata may not accept 'parent' at creation; if not, fall back to creating then moving in.
-    if not cr.ok:
+    if cr.is_error:
         cr = call("create_metadata", {
             "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.BackFld",
             "properties": [{"name": "dataPath", "value": "BackAttr"}]})
@@ -764,7 +766,7 @@ def test_move_group_into_own_descendant_rejected():
     inner = call("create_metadata", {
         "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.InnerGrp",
         "properties": [{"name": "parent", "value": "OuterGrp"}]})
-    if not inner.ok:
+    if inner.is_error:
         inner = call("create_metadata", {
             "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Group.InnerGrp"})
         assert_ok(inner, "seed inner group")
@@ -811,6 +813,11 @@ def test_move_missing_target_group_is_error():
 def test_move_cannot_be_mixed_with_other_properties():
     # A structural move must not be combined with an ordinary property change in one call.
     _seed_form_field("MixAttr", "MixFld")
+    # The SEEDING legitimately dirties the tree (create_metadata force-exports the .form), so a
+    # plain assert_no_diff would flag the setup, not the rejected call. Snapshot after seeding
+    # and assert the rejected mixed call added NOTHING on top (verified live: the mix rejection
+    # happens before any BM mutation, so the diff is byte-identical before/after the call).
+    before = tree_snapshot()
     r = call("modify_metadata", {
         "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Field.MixFld",
         "properties": [{"name": "position", "value": "first"},
@@ -819,7 +826,7 @@ def test_move_cannot_be_mixed_with_other_properties():
     e = assert_error(r, "move mixed with a property change")
     assert_error_quality(e, suggests=["cannot be combined", "separate call"],
                          ctx="a move cannot be mixed with a property change")
-    assert_no_diff("a rejected mixed move must change nothing")
+    assert_tree_unchanged(before, "a rejected mixed move must change nothing")
 
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
@@ -936,6 +943,10 @@ def test_rebind_button_to_missing_command_is_error():
 def test_rebind_button_command_mixed_with_other_property_rejected():
     # A 'command' rebind cannot be combined with an ordinary property change in one call.
     _seed_button_and_command("RbMixBtn", "RbMixCmd")
+    # The SEEDING dirties the tree (the .form is force-exported), so snapshot after it and
+    # assert the rejected mixed call changed NOTHING on top (same rationale as the mixed-move
+    # test above: the rebind branch rejects the mix before any BM mutation).
+    before = tree_snapshot()
     r = call("modify_metadata", {
         "projectName": PROJECT, "fqn": "Catalog.Catalog.Form.ItemForm.Button.RbMixBtn",
         "properties": [{"name": "command", "value": "RbMixCmd"},
@@ -944,4 +955,4 @@ def test_rebind_button_command_mixed_with_other_property_rejected():
     e = assert_error(r, "command rebind mixed with a property change")
     assert_error_quality(e, suggests=["cannot be combined", "separate call"],
                          ctx="a button command rebind cannot be mixed with a property change")
-    assert_no_diff("a rejected mixed rebind must change nothing")
+    assert_tree_unchanged(before, "a rejected mixed rebind must change nothing")

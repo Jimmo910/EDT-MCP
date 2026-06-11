@@ -30,8 +30,10 @@ from harness import (
     assert_contains,
     assert_not_contains,
     assert_no_diff,
+    assert_tree_unchanged,
     poll_disk_path_gone,
     poll_disk_lacks,
+    tree_snapshot,
     wait_for_project_ready,
     e2e_test,
     PROJECT,
@@ -463,6 +465,11 @@ def test_confirm_without_force_is_blocked_by_incoming_reference():
     # The referenced catalog cannot be deleted while an attribute Type still points at it.
     cat, ref_attr = "E2EBlockedCat", "E2ERefAttr"
     _seed_referenced_catalog(cat, ref_attr)
+    # The seeding itself dirties the tree (new catalog dir + Catalog.mdo/Configuration.mdo edits
+    # are force-exported), so a plain assert_no_diff would flag the setup. Snapshot after the
+    # seeding and assert the BLOCKED delete added NOTHING on top (verified live: status, tracked
+    # diff and untracked-file hashes are byte-identical before/after a blocked delete).
+    before = tree_snapshot()
 
     r = call("delete_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat, "confirm": True})
     e = assert_error(r, "delete a still-referenced catalog without force must be blocked")
@@ -477,7 +484,7 @@ def test_confirm_without_force_is_blocked_by_incoming_reference():
     # The object must SURVIVE and nothing must be written.
     assert_contains(_list_catalogs(), "| " + cat + " ",
                     "a blocked delete must NOT remove the still-referenced catalog")
-    assert_no_diff("a blocked delete must not touch the project on disk")
+    assert_tree_unchanged(before, "a blocked delete must not touch the project on disk")
 
 
 @e2e_test(tool="delete_metadata", kind="write-metadata")
@@ -508,6 +515,8 @@ def test_preview_flags_blocking_reference_without_mutating():
     # would block, and must NOT mutate the project.
     cat, ref_attr = "E2EPreviewBlockCat", "E2EPreviewRefAttr"
     _seed_referenced_catalog(cat, ref_attr)
+    # Snapshot after the (legitimately dirtying) seeding — the preview must add nothing on top.
+    before = tree_snapshot()
 
     r = call("delete_metadata", {"projectName": PROJECT, "fqn": "Catalog." + cat})
     assert_ok(r, "preview a still-referenced catalog delete")
@@ -517,7 +526,7 @@ def test_preview_flags_blocking_reference_without_mutating():
     assert (r.structured.get("blockingReferencesCount") or 0) >= 1, \
         "the preview must list the blocking reference: %r" % (r.structured,)
     assert_contains(_list_catalogs(), "| " + cat + " ", "a preview must NOT delete the catalog")
-    assert_no_diff("a preview must not touch the project on disk")
+    assert_tree_unchanged(before, "a preview must not touch the project on disk")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

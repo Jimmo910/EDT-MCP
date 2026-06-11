@@ -246,10 +246,13 @@ public class GetFormScreenshotTool implements IMcpTool
             }
             if (formRequested && !rendered)
             {
+                // Keep the documented render-unavailable sentinel "Form image data is not available"
+                // CONTIGUOUS — callers (and the upstream e2e suite) match it as a substring; the
+                // E1/F5 wait-budget context is carried around it, not inside it.
                 return CaptureResult.error(ToolResult.error(
                     "Could not render the requested form '" + formPath //$NON-NLS-1$
-                    + "' in time, so no screenshot was taken. Its WYSIWYG representation produced no " //$NON-NLS-1$
-                    + "image (formImageData is empty) within the wait budget. " //$NON-NLS-1$
+                    + "' in time, so no screenshot was taken. Form image data is not available: its " //$NON-NLS-1$
+                    + "WYSIWYG representation produced no image within the wait budget. " //$NON-NLS-1$
                     + "Ensure EDT runs with buffered native render " //$NON-NLS-1$
                     + "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson()); //$NON-NLS-1$
             }
@@ -271,8 +274,11 @@ public class GetFormScreenshotTool implements IMcpTool
             {
                 if (!rendered)
                 {
+                    // Same contiguous-sentinel rule as above: lead with the documented
+                    // "Form image data is not available" phrase, then the wait-budget context.
                     return CaptureResult.error(ToolResult.error(
-                        "Form did not finish rendering in time, so no image could be captured. " + //$NON-NLS-1$
+                        "Form image data is not available: the form did not finish rendering " + //$NON-NLS-1$
+                        "in time, so no image could be captured. " + //$NON-NLS-1$
                         "Ensure EDT runs with buffered native render " + //$NON-NLS-1$
                         "(VM option -DnativeFormBufferedLayoutRender=true) and try again.").toJson()); //$NON-NLS-1$
                 }

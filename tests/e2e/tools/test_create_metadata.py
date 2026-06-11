@@ -38,11 +38,11 @@ from harness import (
     assert_error_quality,
     assert_contains,
     assert_not_contains,
+    assert_diff_contains,
     assert_no_diff,
     diff,
     poll_diff_contains,
     wait_for_project_ready,
-    diff,
     e2e_test,
     PROJECT,
 )
@@ -909,7 +909,9 @@ def test_create_normalizes_yo_in_name_and_synonym_by_default():
     poll_diff_contains("<name>%s</name>" % name_ye,
                        ctx="the normalized (е-form) Name must land in the new object's .mdo")
     assert_not_contains(diff(), name_yo, "the ё-form Name must NOT appear on disk under default normalize")
-    assert_contains(diff(), syn_ye, "the synonym must be stored in its normalized (е-form) on disk")
+    # The synonym lands in the NEW object's own .mdo, which is an UNTRACKED file — plain
+    # diff() covers tracked modifications only, so use the untracked-aware helper.
+    assert_diff_contains(syn_ye, "the synonym must be stored in its normalized (е-form) on disk")
 
 
 @e2e_test(tool="create_metadata", kind="write-metadata")
@@ -1031,8 +1033,12 @@ def test_create_xdto_package_with_target_namespace():
     assert r.structured.get("action") == "created", "must report created: %r" % (r.structured,)
     assert r.structured.get("targetNamespace") == ns, \
         "the create must echo the written XDTO namespace: %r" % (r.structured,)
-    assert_contains(_objects_text("xDTOPackages"), name,
-                    "the new XDTO package must appear in the model read-back")
+    # Model read-back via get_metadata_details: get_metadata_objects has no 'xDTOPackages'
+    # type filter (its supported-type list is the common-object subset), so read the created
+    # package back by its FQN instead — same model-visibility proof, supported channel.
+    d = call("get_metadata_details", {"projectName": PROJECT, "objectFqns": ["XDTOPackage." + name]})
+    assert_ok(d, "get_metadata_details read-back (XDTOPackage.%s)" % name)
+    assert_contains(d.text, name, "the new XDTO package must appear in the model read-back")
     poll_diff_contains(ns, ctx="the targetNamespace must land in the XDTOPackage .mdo on disk")
 
 

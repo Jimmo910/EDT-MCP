@@ -715,7 +715,11 @@ public class TerminateLaunchTool implements IMcpTool
             sb.append("**includeAttach:** false\n"); //$NON-NLS-1$
         }
         sb.append('\n');
-        sb.append("No live (or lingering already-terminated) EDT launch matched the request. " //$NON-NLS-1$
+        // Keep the canonical sentinel "No live EDT launch matched the request" CONTIGUOUS —
+        // callers (and the upstream e2e suite) match it as a substring; the F1 stale-entry
+        // clarification lives in the trailing parenthetical instead of splitting the phrase.
+        sb.append("No live EDT launch matched the request " //$NON-NLS-1$
+            + "(no lingering already-terminated entries matched either). " //$NON-NLS-1$
             + "Use `list_configurations` to see what is currently running " //$NON-NLS-1$
             + "(look for entries with `running: true`)."); //$NON-NLS-1$
         return sb.toString();
