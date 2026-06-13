@@ -11,7 +11,7 @@ FILE infobases only. SERVER and WEB infobases are out of scope for v1 and are re
 
 1. Resolves and validates the project and the `mode`.
 2. For `create`: probes for an available 1C platform runtime (fails fast when absent) and creates the target directory if it does not exist. For `register`: verifies the directory already contains a file infobase.
-3. Runs `IInfobaseCreationOperation.perform(...)` in a **background Eclipse Job** (up to 120 s) — `createNew=true` for `create` (shells out to `1cv8`), `createNew=false` for `register` (registration only). Never on the UI thread.
+3. For `create`: runs `IInfobaseCreationOperation.perform(...)` in a **background Eclipse Job** (up to 120 s) — it shells out to `1cv8`, never on the UI thread. For `register`: adds the reference directly via `IInfobaseManager.add(...)` (no platform launch, no Job).
 4. Associates the infobase with the project via `IInfobaseAssociationManager.associate(...)`. After this step `get_applications` returns the application.
 5. Returns the resulting application id so you can chain directly into `update_database`.
 
