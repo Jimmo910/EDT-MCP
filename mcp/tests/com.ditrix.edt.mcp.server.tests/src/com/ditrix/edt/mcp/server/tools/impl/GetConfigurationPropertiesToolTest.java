@@ -19,9 +19,11 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
  * <p>
  * {@code projectName} is optional (when absent the tool falls back to the first
  * configuration project), so there is no argument-validation branch that returns
- * before live access — {@code execute()} goes straight to the UI thread / DT
- * project manager. The headless surface is therefore the static contract (name,
- * response type, schema); the properties payload is covered by the E2E suite.
+ * before live access — {@code execute()} goes STRAIGHT to {@code Display.getDefault()}
+ * (the SWT UI thread) and the DT project manager, so it is NOT unit-testable here.
+ * The headless surface is therefore the static contract (name, response type, the
+ * YAML result-file agreement, schema, guide); the properties payload is covered by
+ * the E2E suite.
  */
 public class GetConfigurationPropertiesToolTest
 {
@@ -78,5 +80,40 @@ public class GetConfigurationPropertiesToolTest
         String schema = new GetConfigurationPropertiesTool().getInputSchema();
         assertNotNull(schema);
         assertTrue(schema.contains("\"projectName\"")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testProjectNameIsOptional()
+    {
+        // projectName is optional: absent => first configuration project. The schema
+        // must therefore declare NO required array (or one without projectName).
+        String schema = new GetConfigurationPropertiesTool().getInputSchema();
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        if (requiredIdx >= 0)
+        {
+            String tail = schema.substring(requiredIdx);
+            assertTrue("projectName must NOT be required", !tail.contains("\"projectName\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    @Test
+    public void testResultFileNameIsStableAcrossParams()
+    {
+        // getResultFileName ignores its params (constant file name), so the same
+        // .yaml name comes back regardless of what is passed.
+        GetConfigurationPropertiesTool tool = new GetConfigurationPropertiesTool();
+        java.util.Map<String, String> withName = new java.util.HashMap<>();
+        withName.put("projectName", "AnyProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("configuration-properties.yaml", tool.getResultFileName(withName)); //$NON-NLS-1$
+        assertEquals(tool.getResultFileName(new java.util.HashMap<>()),
+            tool.getResultFileName(withName));
+    }
+
+    @Test
+    public void testGuideNotEmpty()
+    {
+        String guide = new GetConfigurationPropertiesTool().getGuide();
+        assertNotNull(guide);
+        assertTrue(guide.length() > 0);
     }
 }

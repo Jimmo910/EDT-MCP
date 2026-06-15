@@ -180,6 +180,68 @@ public class BslModuleUtilsTest
         assertNull(BslModuleUtils.extractDocCommentText(null, 5));
     }
 
+    @Test
+    public void testExtractTextDeclarationAtLineOneIsNull()
+    {
+        // declarationLine1Based <= 1 → findDocCommentStartLine returns the line
+        // itself, so there is no preceding comment block to extract
+        List<String> lines = List.of(
+            "// Doc above nothing",          // 1 //$NON-NLS-1$
+            "Procedure A() EndProcedure");   // 2 //$NON-NLS-1$
+        assertNull(BslModuleUtils.extractDocCommentText(lines, 1));
+    }
+
+    @Test
+    public void testExtractTextTrailingSlashesAreKeptAfterFirstTwo()
+    {
+        // only the first "//" is stripped; an inner "//" stays in the text
+        List<String> lines = List.of(
+            "// see http://example",         // 1 //$NON-NLS-1$
+            "Procedure A() EndProcedure");   // 2 //$NON-NLS-1$
+        assertEquals("see http://example", BslModuleUtils.extractDocCommentText(lines, 2)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testExtractTextEmptyCommentLineYieldsEmptyToken()
+    {
+        // a bare "//" with nothing after it contributes an empty token joined by space
+        List<String> lines = List.of(
+            "// First",                      // 1 //$NON-NLS-1$
+            "//",                            // 2 (empty comment body) //$NON-NLS-1$
+            "// Third",                      // 3 //$NON-NLS-1$
+            "Procedure A() EndProcedure");   // 4 //$NON-NLS-1$
+        assertEquals("First  Third", BslModuleUtils.extractDocCommentText(lines, 4)); //$NON-NLS-1$
+    }
+
+    // ========== findDocCommentStartLine — boundary branches ==========
+
+    @Test
+    public void testStartLineDeclarationLineZeroReturnedAsIs()
+    {
+        // declarationLine1Based <= 1 short-circuits and returns the input unchanged
+        List<String> lines = List.of(
+            "// Doc line",                  // 1 //$NON-NLS-1$
+            "Procedure A() EndProcedure");  // 2 //$NON-NLS-1$
+        assertEquals(0, BslModuleUtils.findDocCommentStartLine(lines, 0));
+    }
+
+    @Test
+    public void testStartLineNegativeDeclarationLineReturnedAsIs()
+    {
+        assertEquals(-3, BslModuleUtils.findDocCommentStartLine(null, -3));
+    }
+
+    @Test
+    public void testStartLineNonCommentLineImmediatelyAboveExcluded()
+    {
+        // the line above the declaration is code, not a comment → block is empty
+        List<String> lines = List.of(
+            "// distant doc",               // 1 //$NON-NLS-1$
+            "Var Counter;",                 // 2 (code, breaks adjacency) //$NON-NLS-1$
+            "Procedure A() EndProcedure");  // 3 //$NON-NLS-1$
+        assertEquals(3, BslModuleUtils.findDocCommentStartLine(lines, 3));
+    }
+
     // ========== findMethodViaText / buildTextMethodNotFoundResponse ==========
 
     @Test
@@ -253,6 +315,70 @@ public class BslModuleUtilsTest
     }
 
     @Test
+    public void testFindMethodViaTextRussianKeywordsAndExportFunction()
+    {
+        // exercises the Cyrillic Функция/КонецФункции alternations and the Export flag
+        List<String> lines = List.of(
+            "Функция Сумма(А, Б) Экспорт", // Функция Сумма(А, Б) Экспорт //$NON-NLS-1$
+            "  Возврат А + Б;", // Возврат А + Б; //$NON-NLS-1$
+            "КонецФункции"); // КонецФункции //$NON-NLS-1$
+        BslModuleUtils.TextMethod tm = BslModuleUtils.findMethodViaText(lines, "Сумма"); // Сумма //$NON-NLS-1$
+        assertTrue(tm.found);
+        assertTrue(tm.isFunction);
+        assertEquals("Сумма", tm.matchedName); // Сумма //$NON-NLS-1$
+        assertEquals(0, tm.startLine);
+        assertEquals(2, tm.endLine);
+    }
+
+    @Test
+    public void testFindMethodViaTextMatchesSecondMethodNotFirst()
+    {
+        // the requested method is the second declaration: startLine must point at it,
+        // not at the first method, and only its own End* terminates the block
+        List<String> lines = List.of(
+            "Procedure Alpha()",            // 0 //$NON-NLS-1$
+            "EndProcedure",                 // 1 //$NON-NLS-1$
+            "Function Beta() Export",       // 2 //$NON-NLS-1$
+            "  Return 1;",                  // 3 //$NON-NLS-1$
+            "EndFunction");                 // 4 //$NON-NLS-1$
+        BslModuleUtils.TextMethod tm = BslModuleUtils.findMethodViaText(lines, "Beta"); //$NON-NLS-1$
+        assertTrue(tm.found);
+        assertTrue(tm.isFunction);
+        assertEquals(2, tm.startLine);
+        assertEquals(4, tm.endLine);
+        assertEquals(2, tm.allMethodNames.size());
+    }
+
+    @Test
+    public void testFindMethodViaTextMultiContiguousDocCommentIncluded()
+    {
+        // a multi-line, blank-separated doc block: only the contiguous part is included
+        List<String> lines = List.of(
+            "// stray header",              // 0 //$NON-NLS-1$
+            "",                             // 1 (blank breaks adjacency) //$NON-NLS-1$
+            "// near one",                  // 2 //$NON-NLS-1$
+            "// near two",                  // 3 //$NON-NLS-1$
+            "Procedure Gamma()",            // 4 //$NON-NLS-1$
+            "EndProcedure");                // 5 //$NON-NLS-1$
+        BslModuleUtils.TextMethod tm = BslModuleUtils.findMethodViaText(lines, "Gamma"); //$NON-NLS-1$
+        assertTrue(tm.found);
+        assertFalse(tm.isFunction);
+        assertEquals(2, tm.startLine); // contiguous doc block begins at line index 2
+        assertEquals(5, tm.endLine);
+    }
+
+    @Test
+    public void testFindMethodViaTextEmptyInputNotFoundEmptyNames()
+    {
+        BslModuleUtils.TextMethod tm = BslModuleUtils.findMethodViaText(List.of(), "Whatever"); //$NON-NLS-1$
+        assertFalse(tm.found);
+        assertEquals(-1, tm.startLine);
+        assertEquals(-1, tm.endLine);
+        assertNull(tm.matchedName);
+        assertTrue(tm.allMethodNames.isEmpty());
+    }
+
+    @Test
     public void testBuildTextMethodNotFoundResponse()
     {
         String r = BslModuleUtils.buildTextMethodNotFoundResponse(
@@ -261,6 +387,17 @@ public class BslModuleUtilsTest
         assertTrue(r.contains("**Available methods** (2)")); //$NON-NLS-1$
         assertTrue(r.contains("- Alpha")); //$NON-NLS-1$
         assertTrue(r.contains("- Beta")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testBuildTextMethodNotFoundResponseEmptyListReportsZero()
+    {
+        String r = BslModuleUtils.buildTextMethodNotFoundResponse(
+            "Foo", "CommonModules/X/Module.bsl", List.of()); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue(r.contains("Method 'Foo' not found in CommonModules/X/Module.bsl")); //$NON-NLS-1$
+        assertTrue(r.contains("**Available methods** (0)")); //$NON-NLS-1$
+        // no method bullets when the list is empty
+        assertFalse(r.contains("\n- ")); //$NON-NLS-1$
     }
 
     // ========== resolveModuleFile source-folder resolution (A27) ==========
@@ -317,6 +454,47 @@ public class BslModuleUtilsTest
         assertSame("must return the conventional src/ handle when nothing matches", srcFile, result); //$NON-NLS-1$
     }
 
+    @Test
+    public void testResolveModuleFileNullModulePathIsNull()
+    {
+        // the empty/null modulePath guard returns before the project is dereferenced
+        assertNull(BslModuleUtils.resolveModuleFile(null, null));
+    }
+
+    @Test
+    public void testResolveModuleFileEmptyModulePathIsNull()
+    {
+        assertNull(BslModuleUtils.resolveModuleFile(null, "")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testResolveModuleFileAbsolutePathNotInWorkspaceIsNull()
+    {
+        // an absolute path takes the workspace-lookup branch; a path that maps to no
+        // workspace file yields an empty result array → null (no project access needed)
+        IFile result = BslModuleUtils.resolveModuleFile(
+            null, "C:\\nonexistent\\path\\does\\not\\exist\\Module.bsl"); //$NON-NLS-1$
+        assertNull(result);
+    }
+
+    @Test
+    public void testResolveModuleFileAbsolutePathWithNullProjectIsNull()
+    {
+        // the absolute-path branch is taken BEFORE the project null-check, so a null
+        // project is tolerated when the path is absolute
+        IFile result = BslModuleUtils.resolveModuleFile(
+            null, "/var/tmp/missing/Module.bsl"); //$NON-NLS-1$
+        assertNull(result);
+    }
+
+    @Test
+    public void testResolveModuleFileNullProjectRelativePathIsNull()
+    {
+        // a relative path with a null project: the absolute heuristic fails, then the
+        // project null-guard returns null
+        assertNull(BslModuleUtils.resolveModuleFile(null, "CommonModules/Foo/Module.bsl")); //$NON-NLS-1$
+    }
+
     // ========== looksLikeAbsolutePath ==========
 
     @Test
@@ -367,6 +545,20 @@ public class BslModuleUtilsTest
     {
         // the heuristic only inspects the second char for a colon (drive-like)
         assertTrue(BslModuleUtils.looksLikeAbsolutePath("z:")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testLooksLikeAbsolutePathLeadingBackslashIsTrue()
+    {
+        // a single leading backslash is enough (not only the UNC double form)
+        assertTrue(BslModuleUtils.looksLikeAbsolutePath("\\relative\\Module.bsl")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testLooksLikeAbsolutePathTwoCharNonColonIsFalse()
+    {
+        // length >= 2 but the second char is not a colon → not drive-like
+        assertFalse(BslModuleUtils.looksLikeAbsolutePath("ab")); //$NON-NLS-1$
     }
 
     // ========== extractModulePath ==========
@@ -481,5 +673,46 @@ public class BslModuleUtilsTest
             "  #КонецОбласти"); // 3 #КонецОбласти //$NON-NLS-1$
         assertEquals("ПрограммныйИнтерфейс", //$NON-NLS-1$
             BslModuleUtils.findRegionForLine(lines, 2));
+    }
+
+    @Test
+    public void testFindRegionTargetBeyondAllLinesIsNull()
+    {
+        // no line satisfies lineNum >= targetLine → the loop exits and returns null
+        List<String> lines = List.of(
+            "#Region Public",               // 1 //$NON-NLS-1$
+            "#EndRegion");                  // 2 //$NON-NLS-1$
+        assertNull(BslModuleUtils.findRegionForLine(lines, 99));
+    }
+
+    @Test
+    public void testFindRegionTargetOnEndRegionLineReturnsClosingRegion()
+    {
+        // when the target lands on the #EndRegion line, the still-open region is reported
+        List<String> lines = List.of(
+            "#Region Public",               // 1 //$NON-NLS-1$
+            "Code();",                      // 2 //$NON-NLS-1$
+            "#EndRegion");                  // 3 (target) //$NON-NLS-1$
+        assertEquals("Public", BslModuleUtils.findRegionForLine(lines, 3)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testFindRegionStrayEndRegionWithEmptyStackBeforeTarget()
+    {
+        // a stray #EndRegion with an empty stack must not pop anything; a later code
+        // line inside a real region still resolves correctly
+        List<String> lines = List.of(
+            "#EndRegion",                   // 1 (stray, empty stack) //$NON-NLS-1$
+            "#Region Public",               // 2 //$NON-NLS-1$
+            "Code();",                      // 3 (target) //$NON-NLS-1$
+            "#EndRegion");                  // 4 //$NON-NLS-1$
+        assertEquals("Public", BslModuleUtils.findRegionForLine(lines, 3)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testFindRegionEmptyLinesIsNull()
+    {
+        // empty source: the loop never runs and the method returns null
+        assertNull(BslModuleUtils.findRegionForLine(List.of(), 1));
     }
 }

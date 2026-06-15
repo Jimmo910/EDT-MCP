@@ -8,13 +8,25 @@ package com.ditrix.edt.mcp.server.tools.impl;
 
 import static org.junit.Assert.*;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 
 /**
- * Lightweight tests for {@link ExportConfigurationToXmlTool} that exercise
- * tool metadata and JSON schema without needing the Eclipse runtime.
+ * Lightweight tests for {@link ExportConfigurationToXmlTool} that exercise tool
+ * metadata, JSON schema, and the argument/path-validation guards that fire BEFORE
+ * any EDT CLI access — so they run headless.
+ * <p>
+ * {@code execute()} requires {@code projectName} + {@code outputPath} up front, then
+ * does a filesystem check ("outputPath exists but is not a directory") that touches
+ * only {@code java.nio.file}, not EDT. The real export needs a live workspace and is
+ * covered by the E2E suite.
  */
 public class ExportConfigurationToXmlToolTest
 {
@@ -59,5 +71,57 @@ public class ExportConfigurationToXmlToolTest
         String tail = schema.substring(requiredIdx);
         assertTrue("projectName must be required", tail.contains("\"projectName\"")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("outputPath must be required", tail.contains("\"outputPath\"")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testGuideNotEmpty()
+    {
+        String guide = new ExportConfigurationToXmlTool().getGuide();
+        assertNotNull(guide);
+        assertFalse(guide.isEmpty());
+    }
+
+    // ==================== Argument & path validation (returns before any EDT access) ===========
+
+    @Test
+    public void testExecuteMissingProjectNameIsError()
+    {
+        Map<String, String> params = new HashMap<>();
+        params.put("outputPath", "C:/tmp/out"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new ExportConfigurationToXmlTool().execute(params);
+        assertTrue("missing projectName must produce 'projectName is required'", //$NON-NLS-1$
+            result.contains("projectName is required")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testExecuteMissingOutputPathIsError()
+    {
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "MyConfig"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new ExportConfigurationToXmlTool().execute(params);
+        assertTrue("missing outputPath must produce 'outputPath is required'", //$NON-NLS-1$
+            result.contains("outputPath is required")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testExecuteOutputPathIsAFileIsError() throws IOException
+    {
+        // The "exists but is not a directory" guard runs purely on java.nio.file,
+        // before any EDT CLI lookup — so it is reachable headless.
+        Path tempFile = Files.createTempFile("export-cfg-not-a-dir", ".tmp"); //$NON-NLS-1$ //$NON-NLS-2$
+        try
+        {
+            Map<String, String> params = new HashMap<>();
+            params.put("projectName", "MyConfig"); //$NON-NLS-1$ //$NON-NLS-2$
+            params.put("outputPath", tempFile.toString()); //$NON-NLS-1$
+            String result = new ExportConfigurationToXmlTool().execute(params);
+            assertTrue("a file outputPath must be rejected as not a directory", //$NON-NLS-1$
+                result.contains("is not a directory")); //$NON-NLS-1$
+            assertTrue("error payload must be JSON", result.trim().startsWith("{")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            Files.deleteIfExists(tempFile);
+        }
     }
 }
