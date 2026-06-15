@@ -26,6 +26,8 @@ import org.w3c.dom.NodeList;
  */
 public final class JUnitXmlParser
 {
+    private static final String MESSAGE = "message"; //$NON-NLS-1$
+
     private JUnitXmlParser()
     {
         // utility class
@@ -119,7 +121,7 @@ public final class JUnitXmlParser
                 nodeFailures++;
                 Element failure = (Element) failureNodes.item(0);
                 results.addFailure(new JUnitTestResults.TestCase(fullName,
-                        failure.getAttribute("message"), //$NON-NLS-1$
+                        failure.getAttribute(MESSAGE),
                         failure.getTextContent()));
             }
 
@@ -129,7 +131,7 @@ public final class JUnitXmlParser
                 nodeErrors++;
                 Element error = (Element) errorNodes.item(0);
                 results.addError(new JUnitTestResults.TestCase(fullName,
-                        error.getAttribute("message"), //$NON-NLS-1$
+                        error.getAttribute(MESSAGE),
                         error.getTextContent()));
             }
 
@@ -139,7 +141,7 @@ public final class JUnitXmlParser
                 nodeSkipped++;
                 Element skip = (Element) skippedNodes.item(0);
                 results.addSkipped(new JUnitTestResults.TestCase(fullName,
-                        skip.getAttribute("message"), //$NON-NLS-1$
+                        skip.getAttribute(MESSAGE),
                         null));
             }
         }
