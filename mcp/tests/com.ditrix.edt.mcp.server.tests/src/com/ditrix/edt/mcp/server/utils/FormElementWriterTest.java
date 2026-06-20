@@ -13,6 +13,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -67,6 +68,7 @@ public class FormElementWriterTest
         assertEquals(Kind.DECORATION, FormElementWriter.kindForToken("Decoration")); //$NON-NLS-1$
         assertEquals(Kind.FIELD, FormElementWriter.kindForToken("Field")); //$NON-NLS-1$
         assertEquals(Kind.BUTTON, FormElementWriter.kindForToken("Button")); //$NON-NLS-1$
+        assertEquals(Kind.TABLE, FormElementWriter.kindForToken("Table")); //$NON-NLS-1$
     }
 
     @Test
@@ -89,13 +91,92 @@ public class FormElementWriterTest
         // knopka -> BUTTON
         assertEquals(Kind.BUTTON, FormElementWriter.kindForToken(
             fromCp(0x043a, 0x043d, 0x043e, 0x043f, 0x043a, 0x0430)));
+        // tablica -> TABLE
+        assertEquals(Kind.TABLE, FormElementWriter.kindForToken(
+            fromCp(0x0442, 0x0430, 0x0431, 0x043b, 0x0438, 0x0446, 0x0430)));
+    }
+
+    @Test
+    public void testCreateTableWithColumns()
+    {
+        EObject form = newForm();
+        assertNull(FormElementWriter.createTable(form, "Goods", null, "Object.Goods", //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Arrays.asList("Product", "Quantity"), null, null, false, new String[1])); //$NON-NLS-1$ //$NON-NLS-2$
+        EObject table = FormElementWriter.findFormItem(form, "Goods"); //$NON-NLS-1$
+        assertNotNull(table);
+        assertEquals("Table", table.eClass().getName()); //$NON-NLS-1$
+        // The table carries its OWN command bar (a normal item, not the form-root -1 sentinel).
+        EObject bar = (EObject)table.eGet(feature(table, "autoCommandBar")); //$NON-NLS-1$
+        assertNotNull(bar);
+        assertEquals("GoodsCommandBar", bar.eGet(feature(bar, "name"))); //$NON-NLS-1$ //$NON-NLS-2$
+        // Columns: the standard LineNumber label column FIRST, then one input column per attribute.
+        List<?> columns = (List<?>)table.eGet(feature(table, "items")); //$NON-NLS-1$
+        assertEquals(3, columns.size());
+        EObject lineNo = (EObject)columns.get(0);
+        assertEquals("GoodsLineNumber", lineNo.eGet(feature(lineNo, "name"))); //$NON-NLS-1$ //$NON-NLS-2$
+        assertEquals("InputField", literalOf(lineNo, "type")); //$NON-NLS-1$ //$NON-NLS-2$
+        EObject productCol = FormElementWriter.findFormItem(form, "GoodsProduct"); //$NON-NLS-1$
+        assertNotNull(productCol);
+        assertEquals("InputField", literalOf(productCol, "type")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNotNull(FormElementWriter.findFormItem(form, "GoodsQuantity")); //$NON-NLS-1$
+        // Each column carries the designer auto-children with an allocated (nonzero) id.
+        EObject menu = (EObject)productCol.eGet(feature(productCol, "contextMenu")); //$NON-NLS-1$
+        assertNotNull(menu);
+        assertTrue(((Integer)menu.eGet(feature(menu, "id"))).intValue() > 0); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCreateTableAdditionsAreEnabled()
+    {
+        // The table's search-string / view-status / search-control additions are Visible items whose
+        // 'enabled' model default is FALSE (see testCreateButtonAtRootIsEnabledUsualButton). If they are
+        // left un-enabled the open form editor renders them grey/read-only - the exact symptom that a
+        // designer-created table never shows. They must be created enabled, like the table and its columns.
+        EObject form = newForm();
+        assertNull(FormElementWriter.createTable(form, "Goods", null, "Object.Goods", //$NON-NLS-1$ //$NON-NLS-2$
+            java.util.Arrays.asList("Product", "Quantity"), null, null, false, new String[1])); //$NON-NLS-1$ //$NON-NLS-2$
+        EObject table = FormElementWriter.findFormItem(form, "Goods"); //$NON-NLS-1$
+        assertNotNull(table);
+        // The table additions are only modeled when the full EDT form metamodel is registered; in the
+        // headless in-memory EMF model the Table EClass may not expose them, so skip there.
+        assumeTrue("Table additions not modeled in this form metamodel", //$NON-NLS-1$
+            feature(table, "searchStringAddition") != null); //$NON-NLS-1$
+        for (String additionFeature : new String[] {"searchStringAddition", "viewStatusAddition", //$NON-NLS-1$ //$NON-NLS-2$
+            "searchControlAddition"}) //$NON-NLS-1$
+        {
+            EObject addition = (EObject)table.eGet(feature(table, additionFeature));
+            assertNotNull(additionFeature + " was not created", addition); //$NON-NLS-1$
+            assertEquals(additionFeature + " must be enabled", //$NON-NLS-1$
+                Boolean.TRUE, addition.eGet(feature(addition, "enabled"))); //$NON-NLS-1$
+        }
+    }
+
+    @Test
+    public void testCreateTableRequiresDataPath()
+    {
+        EObject form = newForm();
+        String err = FormElementWriter.createTable(form, "T", null, null, //$NON-NLS-1$
+            java.util.Collections.emptyList(), null, null, false, new String[1]);
+        assertNotNull(err);
+        assertTrue(err.contains("dataPath")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testCreateTableViaCreateMemberIsColumnLess()
+    {
+        // Through createMember (no metadata) a table gets only the standard LineNumber column.
+        EObject form = newForm();
+        assertNull(FormElementWriter.createMember(form, Kind.TABLE, "Lines", null, //$NON-NLS-1$
+            "Object.Lines", null, null, false, new String[1])); //$NON-NLS-1$
+        EObject table = FormElementWriter.findFormItem(form, "Lines"); //$NON-NLS-1$
+        assertNotNull(table);
+        assertEquals(1, ((List<?>)table.eGet(feature(table, "items"))).size()); //$NON-NLS-1$
     }
 
     @Test
     public void testKindForUnknownAndNull()
     {
         assertNull(FormElementWriter.kindForToken("Nonsense")); //$NON-NLS-1$
-        assertNull(FormElementWriter.kindForToken("Table")); // not a supported form kind yet //$NON-NLS-1$
         assertNull(FormElementWriter.kindForToken(null));
     }
 
