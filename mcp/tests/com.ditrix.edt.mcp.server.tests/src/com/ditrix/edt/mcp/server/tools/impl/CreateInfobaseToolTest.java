@@ -109,6 +109,31 @@ public class CreateInfobaseToolTest
     }
 
     @Test
+    public void testInputSchemaDeclaresCredentialParameters()
+    {
+        // #194: optional connection credentials so a registered infobase with a user list can
+        // authenticate the update agent. All optional (back-compat: a bare create stores none).
+        String schema = new CreateInfobaseTool().getInputSchema();
+        assertNotNull(schema);
+        assertTrue("schema must declare user", schema.contains("\"user\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema must declare password", schema.contains("\"password\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("schema must declare access", schema.contains("\"access\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        int requiredIdx = schema.indexOf("\"required\""); //$NON-NLS-1$
+        if (requiredIdx >= 0)
+        {
+            int open = schema.indexOf('[', requiredIdx);
+            int close = schema.indexOf(']', open);
+            if (open >= 0 && close > open)
+            {
+                String requiredBlock = schema.substring(open, close + 1);
+                assertTrue("user must NOT be required", !requiredBlock.contains("\"user\"")); //$NON-NLS-1$ //$NON-NLS-2$
+                assertTrue("password must NOT be required", //$NON-NLS-1$
+                    !requiredBlock.contains("\"password\"")); //$NON-NLS-1$
+            }
+        }
+    }
+
+    @Test
     public void testInvalidApplicationKindIsError()
     {
         // An unknown applicationKind value is rejected before any service lookup (headless-safe),
@@ -230,5 +255,40 @@ public class CreateInfobaseToolTest
         assertTrue("error must name the bad value", result.contains("import")); //$NON-NLS-1$ //$NON-NLS-2$
         assertTrue("error must list allowed modes", //$NON-NLS-1$
             result.contains("create") && result.contains("register")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testInvalidAccessIsError()
+    {
+        // An out-of-enum credential access value is rejected early (headless-safe), naming the
+        // bad value and the allowed kinds.
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "AnyProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("infobaseFile", "C:/infobases/Any"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("access", "OOPS"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new CreateInfobaseTool().execute(params);
+        assertNotNull(result);
+        assertTrue("invalid access must be an error", result.contains("\"success\":false")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("error must name the bad value", result.contains("OOPS")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("error must list allowed kinds", //$NON-NLS-1$
+            result.contains("INFOBASE") && result.contains("OS")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testStandaloneServerWithCredentialsIsError()
+    {
+        // Credentials apply only to a file infobase; pairing them with standaloneServer is rejected
+        // (not silently dropped). Validated before any platform/service lookup (headless-safe).
+        Map<String, String> params = new HashMap<>();
+        params.put("projectName", "AnyProject"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("infobaseFile", "C:/infobases/Any"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("applicationKind", "standaloneServer"); //$NON-NLS-1$ //$NON-NLS-2$
+        params.put("user", "Admin"); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = new CreateInfobaseTool().execute(params);
+        assertNotNull(result);
+        assertTrue("credentials with standaloneServer must be an error", //$NON-NLS-1$
+            result.contains("\"success\":false")); //$NON-NLS-1$
+        assertTrue("error must steer to applicationKind='infobase'", //$NON-NLS-1$
+            result.contains("infobase")); //$NON-NLS-1$
     }
 }
