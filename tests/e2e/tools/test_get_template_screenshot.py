@@ -41,6 +41,9 @@ KNOWN UNTESTED BRANCHES (live-only; no fixture exercises them)
     a tall multi-page template would be needed. The single-page path IS covered above.
 """
 
+import base64
+import struct
+
 from harness import (
     call,
     assert_error,
@@ -51,17 +54,12 @@ from harness import (
 )
 
 
-# The PNG signature, base64-encoded, always begins with "iVBOR".
-_PNG_B64_PREFIX = "iVBOR"
-
-# Documented CLEAN sentinels for a render-unavailable outcome (cold editor, headless
-# control that never realizes). EXPECTED, not failures — the happy path accepts them as
-# the valid alternative to a real image.
-_RENDER_UNAVAILABLE_SENTINELS = (
-    "did not finish initializing",
-    "Template image is not available",
-    "has no content to render",
-)
+# The ONLY error tolerated by the happy path: the cold-editor sentinel, when the template
+# editor's spreadsheet control never realizes (e.g. a headless/cold workbench). Unlike forms,
+# templates render off-screen with NO JVM-flag dependency, so on a live workbench a real,
+# non-empty PNG is the expected outcome - any content/resolution/not-spreadsheet error for a
+# template that genuinely exists and has content is a BUG, not a tolerated sentinel.
+_COLD_EDITOR_SENTINEL = "did not finish initializing"
 
 
 def _blob(result):
@@ -77,19 +75,38 @@ def _blob(result):
     return None
 
 
+def _png_dimensions(blob_b64):
+    """Decode a base64 PNG blob and return (width, height) from its IHDR chunk, or None if the
+    bytes are not a valid PNG. A real PNG starts with the 8-byte signature; its first chunk is
+    IHDR, carrying width and height as big-endian uint32 at byte offsets 16 and 20. This is what
+    proves the screenshot is a genuine, NON-EMPTY image rather than an empty/stub blob."""
+    try:
+        data = base64.b64decode(blob_b64)
+    except Exception:
+        return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24 or data[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", data[16:24])
+    return (width, height)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # HAPPY PATH (render-dependent — assert the REAL observed contract)
 # ──────────────────────────────────────────────────────────────────────────────
 @e2e_test(tool="get_template_screenshot", kind="read")
-def test_capture_commontemplate_real_image_or_clean_render_sentinel():
-    """Open + capture the real fixture CommonTemplate.PrintForm. BOTH are a VALID,
-    healthy contract:
+def test_capture_commontemplate_returns_nonempty_png():
+    """Render the real fixture CommonTemplate.PrintForm and VALIDATE a NON-EMPTY PNG is
+    produced - the core contract of this tool.
 
-      (a) a genuine PNG blob (base64 starting with the PNG signature), is_error False; OR
-      (b) a CLEAN, documented render-unavailable sentinel on the error channel.
+    Templates render off-screen with NO JVM-flag dependency (unlike forms), so on a live
+    workbench the success channel MUST carry a genuine, non-empty PNG: the returned blob
+    decodes to a valid PNG (8-byte signature + IHDR chunk) whose width AND height are > 0.
+    A success with no blob, a blob that is not a real PNG, or a 0-sized image all FAIL here.
 
-    NOT acceptable (and what this FAILS on): a crash/stacktrace, an opaque error that
-    carries no documented sentinel, OR a success channel with no real PNG blob.
+    The ONLY tolerated error is the cold-editor sentinel ("did not finish initializing"),
+    for a headless/cold workbench where the editor's spreadsheet control never realizes.
+    ANY other error (Template file not found / Cannot resolve / not a SpreadsheetDocument /
+    has no content) for this existing, content-bearing template would be a real bug.
     """
     r = call("get_template_screenshot", {
         "projectName": PROJECT,
@@ -97,14 +114,11 @@ def test_capture_commontemplate_real_image_or_clean_render_sentinel():
     })
 
     if r.is_error:
-        # A render-unavailable outcome MUST be one of the clean, documented sentinels.
-        # Any resolution failure here (e.g. "Template file not found", "Cannot resolve")
-        # would mean the tool mis-resolved a template that genuinely exists -> a real bug.
         err = r.error_text()
-        assert any(s in err for s in _RENDER_UNAVAILABLE_SENTINELS), (
-            "for an existing CommonTemplate.PrintForm, an error MUST be a documented "
-            "render-unavailable sentinel %r, not a resolution failure; got: %r"
-            % (list(_RENDER_UNAVAILABLE_SENTINELS), err[:300])
+        assert _COLD_EDITOR_SENTINEL in err, (
+            "for the existing, content-bearing CommonTemplate.PrintForm the only acceptable "
+            "error is the cold-editor %r sentinel; got: %r"
+            % (_COLD_EDITOR_SENTINEL, err[:300])
         )
     else:
         blob = _blob(r)
@@ -112,9 +126,15 @@ def test_capture_commontemplate_real_image_or_clean_render_sentinel():
             "success channel for get_template_screenshot must carry an image blob at "
             "content[0].resource.blob; got none (raw: %r)" % (str(r.raw)[:300])
         )
-        assert blob.startswith(_PNG_B64_PREFIX), (
-            "the image blob must be a real PNG (base64 must start with the PNG "
-            "signature %r); got prefix %r" % (_PNG_B64_PREFIX, blob[:16])
+        dims = _png_dimensions(blob)
+        assert dims is not None, (
+            "the image blob must decode to a valid PNG (signature + IHDR); got prefix %r"
+            % (blob[:16])
+        )
+        width, height = dims
+        assert width > 0 and height > 0, (
+            "the screenshot must be a NON-EMPTY PNG (IHDR width and height > 0); got %dx%d"
+            % (width, height)
         )
 
     assert_no_diff("a template screenshot read must not touch the project on disk")
