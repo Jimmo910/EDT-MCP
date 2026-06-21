@@ -120,6 +120,13 @@ def test_set_main_table_and_output_column():
     assert col.structured.get("action") == "created", \
         "the column field must be created: %r" % (col.structured,)
 
+    # prove the dotted data path is VALID (not just created): no form-data-path error on this form.
+    wait_for_project_ready()
+    errs = call("get_project_errors", {"projectName": PROJECT})
+    assert_ok(errs, "read project errors")
+    bad = [ln for ln in errs.text.splitlines() if "form-data-path" in ln and "ListForm" in ln]
+    assert not bad, "the dynamic-list column must resolve (no form-data-path):\n%s" % "\n".join(bad)
+
 
 @e2e_test(tool="modify_metadata", kind="write-metadata")
 def test_unresolvable_main_table_is_error():

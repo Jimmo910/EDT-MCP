@@ -1194,6 +1194,10 @@ public final class FormElementWriter
      * @param queryText the custom query text, or {@code null} to leave it unchanged
      * @param customQuery the explicit custom-query flag, or {@code null} to default it from
      *            {@code queryText}
+     * @param mainTableFqn the FQN of the object whose main table the list reads from (its
+     *            {@code DbViewDef} is set as the list's {@code mainTable}), or {@code null} to leave it
+     *            unchanged
+     * @param config the configuration, to resolve {@code mainTableFqn}
      * @param version the platform version (to build the {@code DynamicList} value type)
      * @return the feature names actually set (for the success payload), in apply order
      */
@@ -1789,7 +1793,6 @@ public final class FormElementWriter
     }
 
     /** A FormField bound to a form attribute via its dataPath (a generic InputField the user can refine). */
-    @SuppressWarnings("unchecked")
     private static String createField(EObject formModel, String name, String parentName, // NOSONAR signature is inherent / public-or-test-contract; a parameter-object would not improve clarity
         String attrName, String titleLanguage, String title, boolean russianAutoNames,
         String[] createdKind)
@@ -1834,19 +1837,12 @@ public final class FormElementWriter
         setStringFeature(item, FEATURE_NAME, name);
         applyVisibleDefaults(item);
         setIntFeature(item, FEATURE_ID, nextItemId(formModel));
-        // dataPath: a contained DataPath with segments=[attrName] (objects is transient - left empty,
-        // the form's derived data recomputes it).
-        EStructuralFeature dpFeat = item.eClass().getEStructuralFeature("dataPath"); //$NON-NLS-1$
-        EObject dataPath = createFromClassifier(formModel, "DataPath"); //$NON-NLS-1$
-        if (dpFeat instanceof EReference && dataPath != null)
-        {
-            EStructuralFeature segFeat = dataPath.eClass().getEStructuralFeature("segments"); //$NON-NLS-1$
-            if (segFeat != null && dataPath.eGet(segFeat) instanceof EList<?>)
-            {
-                ((EList<String>)dataPath.eGet(segFeat)).add(attrName);
-            }
-            item.eSet(dpFeat, dataPath);
-        }
+        // dataPath: a contained DataPath whose segments are the DOT-SPLIT parts of attrName, so the
+        // validator resolves it segment by segment - a plain attribute ("Price" -> ["Price"]) and a
+        // dynamic-list column ("List.Number" -> ["List", "Number"]) alike. A single dotted segment
+        // would be read as one object name and flagged form-data-path. (objects is transient - the
+        // form's derived data recomputes it.)
+        buildDataPath(formModel, item, attrName);
         // Pure-model default field type (InputField + a fresh InputFieldExtInfo), as the platform's
         // own factory does before the value type is known.
         setEnumFeature(item, FEATURE_TYPE, "InputField"); //$NON-NLS-1$
