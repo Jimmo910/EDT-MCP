@@ -10,6 +10,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -116,6 +118,16 @@ public class BuildExternalObjectsTool implements IMcpTool
 
     /** Timeout (ms) for the background build Job (compile + dump of all objects). */
     private static final long BUILD_TIMEOUT_MS = 300_000L;
+
+    /**
+     * Prefix written into each built object's Comment so the deliverable .epf/.erf records when it was
+     * built (the maintainer's "version bump"). The label is real 1C object-comment DATA, so the
+     * Cyrillic is justified here (same as the type tokens in {@code MetadataTypeUtils}).
+     */
+    private static final String STAMP_PREFIX = "Время сборки: "; //$NON-NLS-1$
+
+    /** Build-stamp timestamp format (local, human-readable — to see which build was the latest). */
+    private static final DateTimeFormatter STAMP_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"); //$NON-NLS-1$
 
     @Override
     public String getName()
@@ -388,7 +400,8 @@ public class BuildExternalObjectsTool implements IMcpTool
                     // the BM id so the Job can re-resolve the object inside its own read transaction.
                     String fileName = ExternalObjectDumpSupport.outputFileName(name,
                         ExternalObjectDumpSupport.extensionForObject(object));
-                    matched.add(new Target(((IBmObject)object).bmGetId(), name, fileName));
+                    matched.add(new Target(((IBmObject)object).bmGetId(),
+                        ((IBmObject)object).bmGetFqn(), name, fileName));
                 }
             }
             if (matched.isEmpty())
@@ -429,6 +442,8 @@ public class BuildExternalObjectsTool implements IMcpTool
         // Synchronized: the Job thread appends while the calling thread may snapshot it on timeout.
         final List<Map<String, Object>> results = Collections.synchronizedList(new ArrayList<>());
         final Throwable[] fatalHolder = new Throwable[1];
+        // One timestamp per build run: every object stamped in this call shares the same build time.
+        final String buildStamp = STAMP_PREFIX + LocalDateTime.now().format(STAMP_FMT);
 
         Job buildJob = new Job(NAME + ": " + bc.projectName) //$NON-NLS-1$
         {
@@ -439,7 +454,7 @@ public class BuildExternalObjectsTool implements IMcpTool
                 {
                     for (Target target : bc.targets)
                     {
-                        results.add(dumpOne(bc, target, monitor));
+                        results.add(dumpOne(bc, target, buildStamp, monitor));
                     }
                 }
                 catch (Throwable t) // NOSONAR a dump failure must be captured, never crash the Job
@@ -520,7 +535,8 @@ public class BuildExternalObjectsTool implements IMcpTool
      * @param monitor the Job progress monitor
      * @return a result map for this object
      */
-    private static Map<String, Object> dumpOne(BuildContext bc, Target target, IProgressMonitor monitor)
+    private static Map<String, Object> dumpOne(BuildContext bc, Target target, String buildStamp,
+            IProgressMonitor monitor)
     {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put(RES_NAME, target.name);
@@ -533,6 +549,19 @@ public class BuildExternalObjectsTool implements IMcpTool
             // a clean write; a deletion failure surfaces as an honest per-object error, not a silent stale
             // file.
             Files.deleteIfExists(targetPath);
+            // Stamp the build time into the object's Comment (overwrite), then flush the .mdo to disk so
+            // the compiled .epf/.erf records when it was built (the maintainer's "version bump"). The
+            // mutation runs in a WRITE boundary; forceExportToDisk persists the .mdo OUTSIDE it.
+            BmTransactions.write(bc.bmModel, "BuildExternalObjects.stampBuildTime", (tx, pm) -> //$NON-NLS-1$
+            {
+                Object mo = tx.getObjectById(target.bmId);
+                if (mo instanceof MdObject)
+                {
+                    ((MdObject)mo).setComment(buildStamp);
+                }
+                return Boolean.TRUE;
+            });
+            BmTransactions.forceExportToDisk(bc.project, target.fqn);
             // Re-resolve the object handle inside a SHORT read transaction (a BM-model lookup must run in
             // a transaction), then close it and hand the handle to dump() OUTSIDE the transaction so no
             // read lock is held across the long external compile. getObjectById may return null if the
@@ -713,12 +742,14 @@ public class BuildExternalObjectsTool implements IMcpTool
     private static final class Target
     {
         final long bmId;
+        final String fqn;
         final String name;
         final String fileName;
 
-        Target(long bmId, String name, String fileName)
+        Target(long bmId, String fqn, String name, String fileName)
         {
             this.bmId = bmId;
+            this.fqn = fqn;
             this.name = name;
             this.fileName = fileName;
         }

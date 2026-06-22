@@ -30,6 +30,7 @@ A JSON result:
 - **Unattended-safe:** the compile/dump runs in a background job off the JSON-RPC thread, with a bounded timeout; the "Configure Infobase access Settings" and "Application update"/"Restructure data" modals are auto-handled so the call never blocks.
 - A build failure that looks like a connection/authentication problem is annotated with a hint pointing at `create_infobase` / `set_infobase_credentials`.
 - **Stale output is deleted before each build:** the target `.epf`/`.erf` is removed before the object is dumped, because EDT can cache the compiled artifact and leave an old version in place; deleting it first forces a clean, current build. If the file cannot be deleted, that object is reported as a failure rather than silently shipping a stale file.
+- **Each object's Comment is stamped with the build time:** before dumping, the object's Comment property is overwritten with a build-time stamp (`Время сборки: <yyyy-MM-dd HH:mm:ss>`) — one timestamp per build run, shared by all objects — and persisted to its `.mdo` on disk, so both the source and the built `.epf`/`.erf` record when it was built. Note this **mutates the object's source on every build**.
 - This **writes to the filesystem at the path you give** - double-check `outputDir`.
 
 ## Maintainer note
