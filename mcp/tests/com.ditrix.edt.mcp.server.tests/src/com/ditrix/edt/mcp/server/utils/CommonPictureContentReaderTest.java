@@ -97,28 +97,34 @@ public class CommonPictureContentReaderTest
         assertNull(CommonPictureContentReader.selectVariantName(names, "svg")); //$NON-NLS-1$
     }
 
-    // --- selectVariantName: best -----------------------------------------
+    // --- pickDensest (the real "best" density ranking selectBestRasterName runs) ----------
 
     @Test
-    public void selectBestReturnsDensestRasterSkippingSvg()
+    public void pickDensestReturnsHighestDensityRank()
     {
-        // Entries are enumerated in ascending density order; "best" is the last raster.
-        List<String> names = Arrays.asList("mdpi.png", "hdpi.png", "vector.svg"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        assertEquals("hdpi.png", CommonPictureContentReader.selectVariantName(names, "best")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Highest screen-density rank wins, independent of candidate order.
+        List<CommonPictureContentReader.RasterCandidate> candidates = Arrays.asList(
+            new CommonPictureContentReader.RasterCandidate("mdpi.png", 0, 100L), //$NON-NLS-1$
+            new CommonPictureContentReader.RasterCandidate("hdpi.png", 2, 100L), //$NON-NLS-1$
+            new CommonPictureContentReader.RasterCandidate("ldpi.png", 1, 100L)); //$NON-NLS-1$
+        assertEquals("hdpi.png", CommonPictureContentReader.pickDensest(candidates)); //$NON-NLS-1$
     }
 
     @Test
-    public void selectBestFallsBackToFirstWhenOnlySvg()
+    public void pickDensestTieBreaksOnLargerSize()
     {
-        List<String> names = Arrays.asList("vector.svg"); //$NON-NLS-1$
-        assertEquals("vector.svg", CommonPictureContentReader.selectVariantName(names, "best")); //$NON-NLS-1$ //$NON-NLS-2$
+        // Same density rank -> the larger raw size wins (not first-seen / entry order).
+        List<CommonPictureContentReader.RasterCandidate> candidates = Arrays.asList(
+            new CommonPictureContentReader.RasterCandidate("a.png", 3, 100L), //$NON-NLS-1$
+            new CommonPictureContentReader.RasterCandidate("b.png", 3, 500L), //$NON-NLS-1$
+            new CommonPictureContentReader.RasterCandidate("c.png", 3, 200L)); //$NON-NLS-1$
+        assertEquals("b.png", CommonPictureContentReader.pickDensest(candidates)); //$NON-NLS-1$
     }
 
     @Test
-    public void selectBestIsCaseInsensitive()
+    public void pickDensestReturnsNullForEmpty()
     {
-        List<String> names = Arrays.asList("mdpi.png", "xdpi.png"); //$NON-NLS-1$ //$NON-NLS-2$
-        assertEquals("xdpi.png", CommonPictureContentReader.selectVariantName(names, "BEST")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertNull(CommonPictureContentReader.pickDensest(new ArrayList<>()));
     }
 
     // --- selectVariantName: exact ----------------------------------------

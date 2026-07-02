@@ -224,9 +224,7 @@ public final class CommonPictureContentReader
      */
     private static String selectBestRasterName(IZipPictureContent content)
     {
-        String bestName = null;
-        int bestRank = Integer.MIN_VALUE;
-        long bestSize = -1L;
+        List<RasterCandidate> candidates = new ArrayList<>();
         for (IZipPictureManifestEntry entry : content.getPictureEntries())
         {
             if (entry == null)
@@ -240,15 +238,55 @@ public final class CommonPictureContentReader
             }
             PictureVariantScreenDensity density = entry.getScreenDensity();
             int rank = density != null ? density.ordinal() : -1;
-            long size = sizeOf(content, name);
-            if (rank > bestRank || (rank == bestRank && size > bestSize))
+            candidates.add(new RasterCandidate(name, rank, sizeOf(content, name)));
+        }
+        return pickDensest(candidates);
+    }
+
+    /**
+     * Picks the densest raster candidate: the highest density rank wins, ties break on the larger
+     * raw size then first-seen. Returns {@code null} for an empty list. Pure (no model access) so it
+     * is unit-testable in isolation; {@link #selectBestRasterName} builds the candidates from the zip
+     * content (skipping SVG/manifest entries) — this is the ONLY {@code "best"} selection logic the
+     * tool runs.
+     *
+     * @param candidates the raster candidates (already SVG/manifest-filtered)
+     * @return the densest candidate's name, or {@code null} when the list is empty
+     */
+    static String pickDensest(List<RasterCandidate> candidates)
+    {
+        String bestName = null;
+        int bestRank = Integer.MIN_VALUE;
+        long bestSize = -1L;
+        for (RasterCandidate c : candidates)
+        {
+            if (c.densityRank > bestRank || (c.densityRank == bestRank && c.size > bestSize))
             {
-                bestRank = rank;
-                bestSize = size;
-                bestName = name;
+                bestRank = c.densityRank;
+                bestSize = c.size;
+                bestName = c.name;
             }
         }
         return bestName;
+    }
+
+    /**
+     * One raster candidate for the {@code "best"} density ranking: the entry name plus its screen-
+     * density rank ({@link PictureVariantScreenDensity} ordinal, or {@code -1} when unset) and raw
+     * byte size (the tie-breaker). A small value holder so {@link #pickDensest} stays pure/testable.
+     */
+    static final class RasterCandidate
+    {
+        final String name;
+        final int densityRank;
+        final long size;
+
+        RasterCandidate(String name, int densityRank, long size)
+        {
+            this.name = name;
+            this.densityRank = densityRank;
+            this.size = size;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -491,18 +529,17 @@ public final class CommonPictureContentReader
      * <ul>
      * <li>{@code "svg"} → the first SVG entry (or {@code null} when the picture has
      * no vector variant);</li>
-     * <li>{@code "best"} → the last non-SVG entry, i.e. the densest raster (entries
-     * are enumerated in ascending density order); falls back to the first entry when
-     * every entry is SVG;</li>
      * <li>any other value → that value when it is an exact entry name, else
      * {@code null}.</li>
      * </ul>
-     * The selector is compared case-insensitively for the {@code svg}/{@code best}
-     * keywords; exact entry names must match exactly. Returns {@code null} for a
-     * {@code null}/blank selector or an empty entry list.
+     * The {@code svg} keyword is compared case-insensitively; exact entry names must match
+     * exactly. Returns {@code null} for a {@code null}/blank selector or an empty entry list.
+     * <p>
+     * The {@code "best"} selector is NOT handled here — {@link #exportPng} routes it to the
+     * density-ranked {@link #selectBestRasterName}; this method covers only {@code svg}/exact.
      *
      * @param names the available (non-manifest) entry names
-     * @param variant the selector: {@code "svg"}, {@code "best"} or an exact name
+     * @param variant the selector: {@code "svg"} or an exact name
      * @return the resolved entry name, or {@code null}
      */
     static String selectVariantName(List<String> names, String variant)
@@ -522,18 +559,6 @@ public final class CommonPictureContentReader
                 }
             }
             return null;
-        }
-        if (VARIANT_BEST.equalsIgnoreCase(selector))
-        {
-            String best = null;
-            for (String name : names)
-            {
-                if (!isSvgName(name))
-                {
-                    best = name;
-                }
-            }
-            return best != null ? best : names.get(0);
         }
         for (String name : names)
         {

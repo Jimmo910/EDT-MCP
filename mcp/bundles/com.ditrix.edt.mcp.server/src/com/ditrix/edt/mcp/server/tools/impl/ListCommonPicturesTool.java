@@ -184,7 +184,7 @@ public class ListCommonPicturesTool implements IMcpTool
         // pictures and read each one's variants there. The reader touches the picture content API;
         // the resolved model object is handed to it already inside this transaction.
         List<PictureInfo> pictures = BmTransactions.read(bmModel, "ListCommonPictures", (tx, monitor) -> //$NON-NLS-1$
-            collectPictures(config, effectiveLanguage));
+            collectPictures(config, effectiveLanguage, limit));
         return formatOutput(projectName, pictures, limit);
     }
 
@@ -205,11 +205,18 @@ public class ListCommonPicturesTool implements IMcpTool
      * keeps them out of the {@code BmTransactions.read} lambda (whose functional signature does not
      * declare {@code throws}).
      *
+     * <p>
+     * Reading a picture's variants opens and decompresses its {@code Picture.zip} (an input stream
+     * per entry). Since {@code formatOutput} renders only the first {@code limit} pictures, variants
+     * are read ONLY for those; pictures beyond {@code limit} contribute a name-only {@link PictureInfo}
+     * to the {@code Total} count and are never decompressed.
+     *
      * @param config the resolved configuration
      * @param language the resolved synonym language code (may be {@code null})
+     * @param limit the max number of pictures that will be rendered (variants are read only for these)
      * @return one {@link PictureInfo} per common picture, in configuration order
      */
-    private static List<PictureInfo> collectPictures(Configuration config, String language)
+    private static List<PictureInfo> collectPictures(Configuration config, String language, int limit)
     {
         CommonPictureContentReader reader;
         try
@@ -223,12 +230,15 @@ public class ListCommonPicturesTool implements IMcpTool
         }
 
         List<PictureInfo> pictures = new ArrayList<>();
+        int index = 0;
         for (CommonPicture picture : config.getCommonPictures())
         {
             PictureInfo info = new PictureInfo();
             info.name = picture.getName();
             info.synonym = synonymForLanguage(picture, language);
-            if (reader != null)
+            // Read (decompress) variants ONLY for the pictures formatOutput will actually render;
+            // pictures beyond `limit` count toward the Total but are not decompressed.
+            if (reader != null && index < limit)
             {
                 try
                 {
@@ -244,6 +254,7 @@ public class ListCommonPicturesTool implements IMcpTool
                 }
             }
             pictures.add(info);
+            index++;
         }
         return pictures;
     }

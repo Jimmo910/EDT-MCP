@@ -20,6 +20,7 @@ import com.ditrix.edt.mcp.server.protocol.JsonSchemaBuilder;
 import com.ditrix.edt.mcp.server.protocol.JsonUtils;
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
 import com.ditrix.edt.mcp.server.protocol.ToolResult;
+import com.ditrix.edt.mcp.server.protocol.jsonrpc.ToolAnnotations;
 import com.ditrix.edt.mcp.server.tools.IMcpTool;
 import com.ditrix.edt.mcp.server.utils.BmTransactions;
 import com.ditrix.edt.mcp.server.utils.CommonPictureContentReader;
@@ -91,6 +92,16 @@ public class ExportCommonPictureTool implements IMcpTool
     public ResponseType getResponseType()
     {
         return ResponseType.JSON;
+    }
+
+    @Override
+    public ToolAnnotations getAnnotations()
+    {
+        // Pure read tool: reads picture content inside a BM read transaction and never mutates the
+        // model. Advertise readOnly + idempotent so MCP clients don't gate it behind write-confirmation
+        // — the 'export_' name prefix would otherwise classify it as a non-destructive write (that prefix
+        // is shared with the file-writing export_configuration_to_xml).
+        return new ToolAnnotations(null, Boolean.TRUE, null, Boolean.TRUE, Boolean.FALSE);
     }
 
     @Override
