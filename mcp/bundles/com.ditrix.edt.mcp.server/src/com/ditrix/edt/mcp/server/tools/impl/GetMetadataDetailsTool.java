@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.PlatformUI;
@@ -243,13 +244,35 @@ public class GetMetadataDetailsTool implements IMcpTool
         // resolver and render its assignable-property table - what modify_metadata can set.
         if (ctx.assignable)
         {
+            String normFqn = MetadataTypeUtils.normalizeFqn(fqn);
+            // A form-member FQN (a group / field / table / decoration inside a form's editable content
+            // model) is NOT part of the mdclass tree, so MetadataNodeResolver cannot see it and the
+            // assignable view used to fail with "Object not found". Route it - BEFORE the mdclass
+            // resolver - through the SAME form resolver modify_metadata uses, and render the element's
+            // own features UNION its extInfo's layout props (the general reflective extInfo path,
+            // issue #235). A plain mdclass FQN yields no FormMemberRef, so its path is unchanged.
+            FormElementWriter.FormMemberRef memberRef = FormElementWriter.parse(normFqn);
+            if (memberRef != null)
+            {
+                String memberAssignable =
+                    renderFormMemberAssignable(ctx.config, ctx.bmModel, normFqn, memberRef);
+                if (memberAssignable == null)
+                {
+                    failures.add(new String[] { fqn, "the form member could not be resolved (the form " //$NON-NLS-1$
+                        + "may have no editable content model, or the element does not exist)" }); //$NON-NLS-1$
+                    return;
+                }
+                sb.append(memberAssignable);
+                sb.append(SECTION_SEPARATOR);
+                return;
+            }
             MetadataNodeResolver.MetadataNode node = MetadataNodeResolver.resolveExisting(ctx.config, fqn);
             if (node == null || node.object == null)
             {
                 failures.add(new String[] { fqn, describeResolutionFailure(fqn) });
                 return;
             }
-            sb.append(formatAssignable(MetadataTypeUtils.normalizeFqn(fqn), node.object));
+            sb.append(formatAssignable(normFqn, node.object));
             sb.append(SECTION_SEPARATOR);
             return;
         }
@@ -348,19 +371,45 @@ public class GetMetadataDetailsTool implements IMcpTool
      * current value, and (for an enum) the allowed values. This is the discovery view for
      * modify_metadata - it lists exactly what can be set and the valid enum literals. The shared
      * {@link MarkdownUtils} builder escapes every cell.
+     * <p>
+     * Widened to any {@link EObject} so it also serves a FORM MEMBER: for a form element the table is
+     * the element's own assignable features UNION its {@code extInfo}'s layout properties (the general
+     * reflective extInfo path, issue #235). A plain mdclass object has no {@code extInfo}
+     * ({@link FormElementWriter#resolveExtInfoEClass} returns {@code null}), so it takes the
+     * single-argument introspection and its output is byte-identical - the mdclass assignable view is
+     * unchanged.
      *
      * @param fqn the (normalized) FQN, for the section heading
-     * @param obj the resolved node (top object or member)
+     * @param obj the resolved node (a top object, an mdclass member, or a form member)
      * @return the Markdown section
      */
-    private static String formatAssignable(String fqn, MdObject obj)
+    static String formatAssignable(String fqn, EObject obj)
     {
         StringBuilder sb = new StringBuilder();
         sb.append("## Assignable properties: ").append(fqn).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         sb.append("Set these with `modify_metadata`. For an ENUM property the value must be one of " //$NON-NLS-1$
             + "the listed Allowed values.\n\n"); //$NON-NLS-1$
         sb.append(MarkdownUtils.tableHeader("Property", "Kind", "Current", "Allowed values")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        for (MetadataPropertyIntrospector.PropertyInfo p : MetadataPropertyIntrospector.introspect(obj))
+        // A form element additionally exposes the assignable properties nested in its <extInfo> (e.g. a
+        // UsualGroup's group / united layout props). When it carries a LIVE extInfo instance (the common
+        // designer-authored case) render those props off that instance, so their Current column shows the
+        // SET values just like the direct features do; fall back to the EClass-only listing (kind +
+        // allowed values, no Current) when the <extInfo> slot is empty, and to the single-arg
+        // introspection for a plain mdclass object (no extInfo - byte-identical, mdclass view unchanged).
+        EObject liveExtInfo = FormElementWriter.extInfoInstance(obj);
+        Iterable<MetadataPropertyIntrospector.PropertyInfo> props;
+        if (liveExtInfo != null)
+        {
+            props = MetadataPropertyIntrospector.introspect(obj, liveExtInfo);
+        }
+        else
+        {
+            EClass extInfoEClass = FormElementWriter.resolveExtInfoEClass(obj);
+            props = extInfoEClass == null
+                ? MetadataPropertyIntrospector.introspect(obj)
+                : MetadataPropertyIntrospector.introspect(obj, extInfoEClass);
+        }
+        for (MetadataPropertyIntrospector.PropertyInfo p : props)
         {
             String allowed = p.allowedValues.isEmpty() ? null : String.join(", ", p.allowedValues); //$NON-NLS-1$
             sb.append(MarkdownUtils.tableRow(p.name, p.valueKind.toString(), p.currentValue, allowed));
@@ -408,6 +457,57 @@ public class GetMetadataDetailsTool implements IMcpTool
                 return null;
             }
             return FormStructureReader.render(normalized, formModel, language);
+        });
+    }
+
+    /**
+     * Renders the ASSIGNABLE-property table for a FORM MEMBER (a group / field / table / decoration /
+     * attribute / command inside a form's editable content model). A form member is NOT in the mdclass
+     * tree, so {@link MetadataNodeResolver} cannot see it; this reuses modify_metadata's proven form
+     * resolver instead - the SAME BM-read hop {@link #renderFormStructure} uses. It resolves the
+     * {@code BasicForm} from {@code ref.formPath}, then INSIDE a BM READ transaction hops to the
+     * editable content form, resolves the member and renders its assignable table (the element's own
+     * features UNION its {@code extInfo}'s layout properties, issue #235). The member EObject must not
+     * escape the read task, so the whole render runs inside it.
+     *
+     * @param config the resolved configuration
+     * @param bmModel the (best-effort) BM model; {@code null} yields {@code null}
+     * @param normFqn the normalized member FQN, for the section heading
+     * @param ref the parsed form-member reference (see {@link FormElementWriter#parse})
+     * @return the Markdown assignable table, or {@code null} when the BM model is unavailable, the form
+     *     has no editable content model, or the member does not exist
+     */
+    private static String renderFormMemberAssignable(Configuration config, IBmModel bmModel,
+        String normFqn, FormElementWriter.FormMemberRef ref)
+    {
+        if (bmModel == null)
+        {
+            return null;
+        }
+        MdObject mdForm = FormStructureReader.resolveMdForm(config, ref.formPath);
+        if (!(mdForm instanceof IBmObject))
+        {
+            return null;
+        }
+        final long mdFormBmId = ((IBmObject)mdForm).bmGetId();
+        return BmTransactions.read(bmModel, "GetMetadataDetailsFormMember", (tx, monitor) -> //$NON-NLS-1$
+        {
+            EObject txMdForm = tx.getObjectById(mdFormBmId);
+            if (txMdForm == null)
+            {
+                return null;
+            }
+            EObject formModel = FormElementWriter.getEditableForm(txMdForm);
+            if (formModel == null)
+            {
+                return null;
+            }
+            EObject member = FormElementWriter.resolveFormMember(formModel, ref);
+            if (member == null)
+            {
+                return null;
+            }
+            return formatAssignable(normFqn, member);
         });
     }
 

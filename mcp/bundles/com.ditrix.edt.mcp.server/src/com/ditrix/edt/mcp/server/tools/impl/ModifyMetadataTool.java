@@ -1016,7 +1016,9 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     {
         for (JsonObject prop : properties)
         {
-            String pErr = prepare(config, version, target, prop, changes, normReport);
+            // The mdclass path has no <extInfo> (extInfo == null): findFeature then classifies only the
+            // object's own features, so this stays byte-identical to the pre-extInfo behaviour.
+            String pErr = prepare(config, version, target, null, prop, changes, normReport);
             if (pErr != null)
             {
                 return pErr;
@@ -1145,12 +1147,17 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
                             + ref.name + " (kind '" + ref.kindToken + "') on " + ref.formPath //$NON-NLS-1$ //$NON-NLS-2$
                             + ". Use get_metadata_details to list the members.").toJson()); //$NON-NLS-1$
                     }
-                    List<PreparedChange> changes =
+                    List<HolderChange> changes =
                         prepareFormMemberChanges(config, version, member, properties, normReport);
-                    for (PreparedChange change : changes)
+                    for (HolderChange hc : changes)
                     {
-                        change.applyTo(member, tx);
-                        applied.add(change.featureName());
+                        // A direct feature lands on the member; a property on the nested <extInfo> lands
+                        // on the extInfo holder, created (or reused) here now that every property has
+                        // validated. Mixing both in one call routes each change to its correct receiver.
+                        EObject holder = hc.onExtInfo
+                            ? FormElementWriter.ensureExtInfo(formModel, member) : member;
+                        hc.change.applyTo(holder, tx);
+                        applied.add(hc.change.featureName());
                     }
                 });
         }
@@ -1479,17 +1486,28 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
 
     /**
      * Validates every property of a form-member modify against the introspected schema and builds the
-     * ordered list of {@link PreparedChange}s to apply. Runs inside the BM write transaction (called
-     * from the {@code writeEditableForm} callback) but performs NO model mutation itself - it only
-     * reads {@code member}'s schema and constructs the changes; a structural-property guard or an
-     * invalid value throws {@link FormValidationException} BEFORE any {@code eSet}, exactly as the
-     * inline loop did, so the transaction rolls back with no partial mutation. The returned changes are
-     * applied by the caller.
+     * ordered list of {@link HolderChange}s to apply - each pairing a {@link PreparedChange} with the
+     * receiver it targets: the member itself for a direct feature, or the member's nested
+     * {@code <extInfo>} holder for a layout / kind-specific property (a UsualGroup's grouping / united /
+     * ... live under {@code <extInfo>}, not on the group element). Runs inside the BM write transaction
+     * (called from the {@code writeEditableForm} callback) but performs NO model mutation itself - it
+     * only reads {@code member}'s (and its extInfo's) schema and constructs the changes; a
+     * structural-property guard or an invalid value throws {@link FormValidationException} BEFORE any
+     * {@code eSet}, so the transaction rolls back with no partial mutation. The extInfo holder is
+     * created (when absent) only at APPLY time by the caller, once every property has validated.
      */
-    private List<PreparedChange> prepareFormMemberChanges(Configuration config, Version version,
+    private List<HolderChange> prepareFormMemberChanges(Configuration config, Version version,
         EObject member, List<JsonObject> properties, MdNameNormalizer.Report normReport)
     {
-        List<PreparedChange> changes = new ArrayList<>();
+        // Reject a classifier `type` change batched with a nested-extInfo layout prop BEFORE building any
+        // change: the extInfo props are validated against the pre-change type's extInfo EClass, so
+        // applying both in one tx is order-dependent and unsafe (see formTypeExtInfoComboError).
+        String comboErr = formTypeExtInfoComboError(member, properties);
+        if (comboErr != null)
+        {
+            throw new FormValidationException(comboErr);
+        }
+        List<HolderChange> changes = new ArrayList<>();
         for (JsonObject prop : properties)
         {
             String guard = guardFormProperty(prop);
@@ -1497,14 +1515,133 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             {
                 throw new FormValidationException(guard);
             }
-            String pErr = prepare(config, version, member,
-                normalizeFormProperty(member, prop), changes, normReport);
-            if (pErr != null)
-            {
-                throw new FormValidationException(pErr);
-            }
+            changes.add(prepareFormMemberChange(config, version, member, prop, normReport));
         }
         return changes;
+    }
+
+    /**
+     * Rejects a form-member modify that UNSAFELY combines a classifier {@code type} change (a group's /
+     * field's / decoration's {@code type} decides which concrete {@code <extInfo>} EClass applies) with a
+     * property that lives on that nested {@code <extInfo>}, in the SAME call. The extInfo props are
+     * classified / validated against the PRE-change type's extInfo EClass (in {@link #resolveFormHolder}),
+     * so applying both in one transaction is order-dependent and unsafe:
+     * <ul>
+     * <li>{@code type} first &rarr; {@link FormElementWriter#ensureExtInfo} creates the NEW type's extInfo
+     * EClass and the extInfo {@code eSet} throws {@link IllegalArgumentException} on a feature the new
+     * EClass lacks (surfaced as an opaque "Failed to modify form member");</li>
+     * <li>the extInfo prop first &rarr; a stale-typed extInfo is force-exported onto a now-differently
+     * typed element (a silent inconsistency EDT serialization rejects).</li>
+     * </ul>
+     * The {@code type} change must be a SEPARATE call so the extInfo is re-resolved against the new type.
+     * Detection is fully reflective (the direct-vs-extInfo routing from {@link #resolveFormHolder} plus the
+     * normalized property name) - a form attribute's {@code type} is normalized to {@code valueType} and so
+     * never counts here, and an mdclass object has no extInfo so this is a no-op. Package-visible so it is
+     * unit-testable headlessly. Returns a ready JSON error to reject, or {@code null} when the batch is safe.
+     */
+    static String formTypeExtInfoComboError(EObject member, List<JsonObject> properties)
+    {
+        boolean hasDirectTypeChange = false;
+        boolean hasExtInfoChange = false;
+        for (JsonObject prop : properties)
+        {
+            String name = asString(normalizeFormProperty(member, prop).get("name")); //$NON-NLS-1$
+            if (name == null || name.isEmpty())
+            {
+                continue;
+            }
+            if (resolveFormHolder(member, name).onExtInfo)
+            {
+                hasExtInfoChange = true;
+            }
+            else if ("type".equalsIgnoreCase(name)) //$NON-NLS-1$
+            {
+                hasDirectTypeChange = true;
+            }
+        }
+        if (hasDirectTypeChange && hasExtInfoChange)
+        {
+            return ToolResult.error("Changing a form group's 'type' cannot be combined with a layout " //$NON-NLS-1$
+                + "property that lives on its <extInfo> (e.g. 'group' / 'united' / 'showLeftMargin' / " //$NON-NLS-1$
+                + "'throughAlign' / 'currentRowUse' / 'representation') in the same call, because the " //$NON-NLS-1$
+                + "'type' decides which extInfo applies. Change the 'type' first, then set the layout " //$NON-NLS-1$
+                + "properties in a separate call.").toJson(); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * Validates ONE form-member property and pairs the resulting {@link PreparedChange} with the
+     * receiver it must be applied to. The receiver is decided reflectively: a DIRECT feature of the
+     * member stays on the member; a property that lives on the member's nested {@code <extInfo>} (a
+     * layout / kind-specific sub-object) is flagged {@code onExtInfo} so the caller routes the
+     * {@code eSet} to the extInfo holder. The change is BUILT against the same extInfo the receiver was
+     * chosen from (so the enum / boolean / ... value is coerced to the correct feature); an invalid
+     * value throws {@link FormValidationException} BEFORE any mutation.
+     */
+    private HolderChange prepareFormMemberChange(Configuration config, Version version, EObject member,
+        JsonObject prop, MdNameNormalizer.Report normReport)
+    {
+        JsonObject normProp = normalizeFormProperty(member, prop);
+        FormHolder holder = resolveFormHolder(member, asString(normProp.get("name"))); //$NON-NLS-1$
+        List<PreparedChange> built = new ArrayList<>();
+        String pErr = prepare(config, version, member, holder.classifyExtInfo, normProp, built, normReport);
+        if (pErr != null)
+        {
+            throw new FormValidationException(pErr);
+        }
+        // prepare() appends exactly one change on success.
+        return new HolderChange(holder.onExtInfo, built.get(0));
+    }
+
+    /**
+     * Resolves the write receiver for a form-member property named {@code propName}: whether it lives
+     * on the member directly or on the member's nested {@code <extInfo>}, plus the extInfo instance the
+     * property is classified against. A DIRECT feature wins (mirroring {@link
+     * MetadataPropertyIntrospector#findFeature(EObject, EObject, String)}). When the element carries no
+     * extInfo instance yet but CAN (a form group's layout props live under an as-yet-uncreated
+     * {@code <extInfo>}), the property is classified against a THROWAWAY (unattached) instance of the
+     * element's concrete extInfo EClass, so an extInfo property is visible WITHOUT mutating the model
+     * during validation - the real extInfo holder is created (and reused) at apply time via
+     * {@link FormElementWriter#ensureExtInfo}. Fully reflective; a no-op for an element with no extInfo.
+     */
+    static FormHolder resolveFormHolder(EObject member, String propName)
+    {
+        EObject extInfo = extInfoOf(member);
+        PropertyInfo info = MetadataPropertyIntrospector.findFeature(member, extInfo, propName);
+        if (info == null && extInfo == null && propName != null && !propName.isEmpty())
+        {
+            EClass extInfoEClass = FormElementWriter.resolveExtInfoEClass(member);
+            if (extInfoEClass != null && !extInfoEClass.isAbstract() && extInfoEClass.getEPackage() != null)
+            {
+                EObject probe = extInfoEClass.getEPackage().getEFactoryInstance().create(extInfoEClass);
+                PropertyInfo onProbe = MetadataPropertyIntrospector.findFeature(member, probe, propName);
+                if (onProbe != null && onProbe.onExtInfo)
+                {
+                    return new FormHolder(true, probe);
+                }
+            }
+        }
+        return new FormHolder(info != null && info.onExtInfo, extInfo);
+    }
+
+    /**
+     * The element's nested {@code <extInfo>} EObject, read reflectively from the single-valued
+     * {@code extInfo} containment reference, or {@code null} when the element has no such feature (an
+     * mdclass object) or the slot is empty. Self-contained (no form-model import).
+     */
+    private static EObject extInfoOf(EObject element)
+    {
+        EStructuralFeature feature = element.eClass().getEStructuralFeature("extInfo"); //$NON-NLS-1$
+        if (feature instanceof EReference && !feature.isMany())
+        {
+            Object value = element.eGet(feature);
+            if (value instanceof EObject)
+            {
+                return (EObject)value;
+            }
+        }
+        return null;
     }
 
     /**
@@ -1920,9 +2057,16 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
      * {@link PreparedChange}. Returns a JSON error string on failure, or {@code null} on success.
      * Accepts any {@link EObject} so it serves both mdclass nodes and form members (the introspector
      * and the prepared change are EClass-driven, not mdclass-specific).
+     *
+     * <p>{@code extInfo} is the element's nested {@code <extInfo>} EObject (a form element's layout /
+     * kind-specific sub-object, e.g. a UsualGroup's {@code UsualGroupExtInfo}) when the property may
+     * live there, or {@code null} on the mdclass path (an mdclass object has no extInfo, so the
+     * extInfo traversal is a no-op and this behaves exactly as before). A property found on the
+     * extInfo carries {@code info.onExtInfo == true}; the {@link PreparedChange} is built against the
+     * extInfo's feature, and the caller routes the {@code eSet} to the extInfo holder.</p>
      */
-    private String prepare(Configuration config, Version version, EObject target, JsonObject prop,
-        List<PreparedChange> out, MdNameNormalizer.Report normReport)
+    private String prepare(Configuration config, Version version, EObject target, EObject extInfo,
+        JsonObject prop, List<PreparedChange> out, MdNameNormalizer.Report normReport)
     {
         String name = asString(prop.get("name")); //$NON-NLS-1$
         if (name == null || name.isEmpty())
@@ -1940,12 +2084,19 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         // findFeature classifies ONLY the matched feature and skips the current-value rendering
         // (eGet + proxy + type rendering) that the full introspect() performs for EVERY assignable
         // feature - prepare() never reads currentValue, and this runs on the UI thread per property.
-        PropertyInfo info = MetadataPropertyIntrospector.findFeature(target, name);
+        // A direct feature of `target` wins; only when it has none does a matching feature on the
+        // element's `extInfo` win (info.onExtInfo). On the mdclass path extInfo is null - a no-op.
+        PropertyInfo info = MetadataPropertyIntrospector.findFeature(target, extInfo, name);
         if (info == null)
         {
+            // The "available properties" hint covers the extInfo layout props too (the now-extended
+            // assignable set): its EClass comes from the live extInfo instance, or - when the slot is
+            // empty - is derived reflectively; null on the mdclass path (member-only, unchanged).
+            EClass extInfoEClass = extInfo != null ? extInfo.eClass()
+                : FormElementWriter.resolveExtInfoEClass(target);
             return ToolResult.error("Property '" + name + "' is not assignable on " //$NON-NLS-1$ //$NON-NLS-2$
                 + target.eClass().getName() + ". Assignable properties: " //$NON-NLS-1$
-                + String.join(", ", MetadataPropertyIntrospector.assignableNames(target)) //$NON-NLS-1$
+                + String.join(", ", MetadataPropertyIntrospector.assignableNames(target, extInfoEClass)) //$NON-NLS-1$
                 + ". Use get_metadata_details with assignable:true for kinds + allowed values.").toJson(); //$NON-NLS-1$
         }
 
@@ -2202,6 +2353,45 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
     }
 
     // ---- helpers --------------------------------------------------------------------------------
+
+    /**
+     * A {@link PreparedChange} paired with WHERE it must be applied: {@code onExtInfo == false} targets
+     * the form member itself (a direct feature); {@code onExtInfo == true} targets the member's nested
+     * {@code <extInfo>} holder (a layout / kind-specific property - a UsualGroup's grouping / united /
+     * ... live under {@code <extInfo>}). Threading the receiver per property lets a mixed direct +
+     * extInfo batch apply each change to the correct EObject inside the one form write transaction.
+     */
+    private static final class HolderChange
+    {
+        private final boolean onExtInfo;
+        private final PreparedChange change;
+
+        HolderChange(boolean onExtInfo, PreparedChange change)
+        {
+            this.onExtInfo = onExtInfo;
+            this.change = change;
+        }
+    }
+
+    /**
+     * The resolved receiver for a form-member property: {@code onExtInfo} tells the caller whether the
+     * write goes to the member's nested {@code <extInfo>} holder (vs the member itself), and
+     * {@code classifyExtInfo} is the extInfo instance the property was classified against (a live
+     * instance, a throwaway probe for an as-yet-uncreated extInfo, or {@code null} for a pure-direct
+     * member) - passed to {@link #prepare} so the value is coerced to the correct feature. Carries no
+     * behaviour. Package-visible so {@link #resolveFormHolder} is unit-testable.
+     */
+    static final class FormHolder
+    {
+        final boolean onExtInfo;
+        final EObject classifyExtInfo;
+
+        FormHolder(boolean onExtInfo, EObject classifyExtInfo)
+        {
+            this.onExtInfo = onExtInfo;
+            this.classifyExtInfo = classifyExtInfo;
+        }
+    }
 
     /**
      * The STYLE_VALUE-only binding of a {@link PreparedChange}: the sibling {@code type} feature

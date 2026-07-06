@@ -16,9 +16,19 @@ import static org.junit.Assert.assertTrue;
 import java.util.Arrays;
 import java.util.Collections;
 
+import org.eclipse.emf.ecore.EAttribute;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EEnum;
+import org.eclipse.emf.ecore.EEnumLiteral;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EPackage;
+import org.eclipse.emf.ecore.EReference;
+import org.eclipse.emf.ecore.EcoreFactory;
+import org.eclipse.emf.ecore.EcorePackage;
 import org.junit.Test;
 
 import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
+import com.ditrix.edt.mcp.server.tools.impl.ModifyMetadataTool.FormHolder;
 import com.ditrix.edt.mcp.server.utils.MdNameNormalizer;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
@@ -506,5 +516,214 @@ public class ModifyMetadataToolTest
         String guide = new ModifyMetadataTool().getGuide();
         assertTrue("the no-mixing-with-properties policy must be documented", //$NON-NLS-1$
             guide.contains("CANNOT be combined with a generic")); //$NON-NLS-1$
+    }
+
+    // ===== form-member extInfo routing (#235: a UsualGroup's layout props live under <extInfo>) =====
+    //
+    // A form group's grouping (`group`) + united / layout flags do NOT live on the group element but on
+    // its nested extInfo. resolveFormHolder is the ONE general reflective decision that routes each
+    // property to the correct receiver: a DIRECT feature stays on the member, an extInfo feature is
+    // flagged onExtInfo so the write goes to the extInfo holder. Tested headlessly against a synthetic
+    // form-like EMF model (no live workbench / BM needed for the classification decision).
+
+    /**
+     * A synthetic EMF package shaped like a form group: a {@code FormGroup} EClass with a DIRECT
+     * {@code visible} boolean and a containment {@code extInfo} reference to a {@code UsualGroupExtInfo}
+     * EClass that carries the layout props ({@code group} enum + {@code united} boolean). Mirrors the
+     * real 1C form metamodel closely enough to exercise the reflective extInfo routing without importing
+     * (the forbidden) {@code com._1c.g5.v8.dt.form.model}.
+     */
+    private static EPackage buildFormLikePackage()
+    {
+        EcoreFactory f = EcoreFactory.eINSTANCE;
+        EPackage pkg = f.createEPackage();
+        pkg.setName("formlike"); //$NON-NLS-1$
+        pkg.setNsPrefix("formlike"); //$NON-NLS-1$
+        pkg.setNsURI("http://ditrix.test/formlike/235"); //$NON-NLS-1$
+
+        EEnum grouping = f.createEEnum();
+        grouping.setName("Grouping"); //$NON-NLS-1$
+        EEnumLiteral vertical = f.createEEnumLiteral();
+        vertical.setName("Vertical"); //$NON-NLS-1$
+        vertical.setValue(0);
+        EEnumLiteral horizontal = f.createEEnumLiteral();
+        horizontal.setName("Horizontal"); //$NON-NLS-1$
+        horizontal.setValue(1);
+        grouping.getELiterals().add(vertical);
+        grouping.getELiterals().add(horizontal);
+        pkg.getEClassifiers().add(grouping);
+
+        EClass extInfo = f.createEClass();
+        extInfo.setName("UsualGroupExtInfo"); //$NON-NLS-1$
+        EAttribute group = f.createEAttribute();
+        group.setName("group"); //$NON-NLS-1$
+        group.setEType(grouping);
+        EAttribute united = f.createEAttribute();
+        united.setName("united"); //$NON-NLS-1$
+        united.setEType(EcorePackage.Literals.EBOOLEAN);
+        extInfo.getEStructuralFeatures().add(group);
+        extInfo.getEStructuralFeatures().add(united);
+        pkg.getEClassifiers().add(extInfo);
+
+        EClass formGroup = f.createEClass();
+        formGroup.setName("FormGroup"); //$NON-NLS-1$
+        EAttribute visible = f.createEAttribute();
+        visible.setName("visible"); //$NON-NLS-1$
+        visible.setEType(EcorePackage.Literals.EBOOLEAN);
+        EReference extInfoRef = f.createEReference();
+        extInfoRef.setName("extInfo"); //$NON-NLS-1$
+        extInfoRef.setEType(extInfo);
+        extInfoRef.setContainment(true);
+        formGroup.getEStructuralFeatures().add(visible);
+        formGroup.getEStructuralFeatures().add(extInfoRef);
+        pkg.getEClassifiers().add(formGroup);
+
+        return pkg;
+    }
+
+    /** A synthetic FormGroup instance with its extInfo instance already attached (the common case). */
+    private static EObject newGroupWithExtInfo(EPackage pkg, EObject[] outExtInfo)
+    {
+        EClass formGroupClass = (EClass)pkg.getEClassifier("FormGroup"); //$NON-NLS-1$
+        EClass extInfoClass = (EClass)pkg.getEClassifier("UsualGroupExtInfo"); //$NON-NLS-1$
+        EObject group = pkg.getEFactoryInstance().create(formGroupClass);
+        EObject extInfo = pkg.getEFactoryInstance().create(extInfoClass);
+        group.eSet(formGroupClass.getEStructuralFeature("extInfo"), extInfo); //$NON-NLS-1$
+        outExtInfo[0] = extInfo;
+        return group;
+    }
+
+    @Test
+    public void testResolveFormHolderRoutesExtInfoLayoutPropsToExtInfo()
+    {
+        // `group` + `united` live on the UsualGroupExtInfo, so they must route to the extInfo holder
+        // (onExtInfo == true) and be classified against the extInfo instance.
+        EPackage pkg = buildFormLikePackage();
+        EObject[] extInfoOut = new EObject[1];
+        EObject group = newGroupWithExtInfo(pkg, extInfoOut);
+        EObject extInfo = extInfoOut[0];
+
+        FormHolder g = ModifyMetadataTool.resolveFormHolder(group, "group"); //$NON-NLS-1$
+        assertTrue("the grouping enum lives under <extInfo> -> onExtInfo", g.onExtInfo); //$NON-NLS-1$
+        assertSame("the group prop must be classified against the extInfo instance", //$NON-NLS-1$
+            extInfo, g.classifyExtInfo);
+
+        FormHolder u = ModifyMetadataTool.resolveFormHolder(group, "united"); //$NON-NLS-1$
+        assertTrue("the united flag lives under <extInfo> -> onExtInfo", u.onExtInfo); //$NON-NLS-1$
+
+        // Case-insensitive, mirroring findFeature.
+        assertTrue("routing must be case-insensitive", //$NON-NLS-1$
+            ModifyMetadataTool.resolveFormHolder(group, "GROUP").onExtInfo); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testResolveFormHolderKeepsDirectFeatureOnMember()
+    {
+        // `visible` is a DIRECT feature of the group element, so it stays on the member (onExtInfo ==
+        // false) even though the element also carries an extInfo - direct-precedence.
+        EPackage pkg = buildFormLikePackage();
+        EObject[] extInfoOut = new EObject[1];
+        EObject group = newGroupWithExtInfo(pkg, extInfoOut);
+
+        FormHolder v = ModifyMetadataTool.resolveFormHolder(group, "visible"); //$NON-NLS-1$
+        assertFalse("a direct feature must stay on the member (not the extInfo)", v.onExtInfo); //$NON-NLS-1$
+        assertSame("the extInfo is still threaded for classification", //$NON-NLS-1$
+            extInfoOut[0], v.classifyExtInfo);
+    }
+
+    @Test
+    public void testResolveFormHolderUnknownPropertyStaysOnMember()
+    {
+        // A property that is on NEITHER the member nor its extInfo is not routed to the extInfo (the
+        // holder defaults to the member; prepare() then rejects it with the extended assignable set).
+        EPackage pkg = buildFormLikePackage();
+        EObject[] extInfoOut = new EObject[1];
+        EObject group = newGroupWithExtInfo(pkg, extInfoOut);
+
+        FormHolder n = ModifyMetadataTool.resolveFormHolder(group, "noSuchProp_zz235"); //$NON-NLS-1$
+        assertFalse("an unknown property must not be routed to the extInfo", n.onExtInfo); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testResolveFormHolderNoExtInfoFeatureIsDirectNoOp()
+    {
+        // An element with NO extInfo feature (the mdclass-like no-op case) always routes a direct feature
+        // to the element itself, and threads a null classification extInfo.
+        EPackage pkg = buildFormLikePackage();
+        EClass extInfoClass = (EClass)pkg.getEClassifier("UsualGroupExtInfo"); //$NON-NLS-1$
+        // A UsualGroupExtInfo has a direct `united` but NO nested `extInfo` feature of its own.
+        EObject plain = pkg.getEFactoryInstance().create(extInfoClass);
+
+        FormHolder h = ModifyMetadataTool.resolveFormHolder(plain, "united"); //$NON-NLS-1$
+        assertFalse("a member with no extInfo feature routes directly", h.onExtInfo); //$NON-NLS-1$
+        assertNull("no extInfo instance is threaded when the element has no extInfo feature", //$NON-NLS-1$
+            h.classifyExtInfo);
+    }
+
+    // ===== reject a classifier `type` change batched with an extInfo layout prop (#235 review) =====
+    //
+    // A group's `type` decides which concrete <extInfo> EClass applies; the extInfo props are classified
+    // against the PRE-change type's EClass, so combining a direct `type` change with any onExtInfo prop in
+    // ONE call is order-dependent and unsafe. formTypeExtInfoComboError rejects that combination up front
+    // (a mixed direct + extInfo batch that does NOT change `type` is still allowed). Reuses the shared
+    // prop(name, value) helper above.
+
+    @Test
+    public void testComboRejectsTypeChangeWithExtInfoLayoutProp()
+    {
+        // `type` (the classifier) + `group` (lives on <extInfo>) in one call must be refused with an
+        // actionable "change the type in a separate call" error.
+        EPackage pkg = buildFormLikePackage();
+        EObject group = newGroupWithExtInfo(pkg, new EObject[1]);
+
+        String err = ModifyMetadataTool.formTypeExtInfoComboError(group,
+            Arrays.asList(prop("type", "Pages"), prop("group", "Horizontal"))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        assertNotNull("combining a group type change with an extInfo prop must be rejected", err); //$NON-NLS-1$
+        assertTrue("the error must be a ToolResult error json", err.contains("\"error\"")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("the error must point at making the type change separately", //$NON-NLS-1$
+            err.contains("separate call")); //$NON-NLS-1$
+        // Order-independent: the reverse batch (extInfo prop first) is refused just the same.
+        assertNotNull("the reverse order must be rejected identically", //$NON-NLS-1$
+            ModifyMetadataTool.formTypeExtInfoComboError(group,
+                Arrays.asList(prop("group", "Horizontal"), prop("type", "Pages")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    @Test
+    public void testComboAllowsExtInfoPropAlone()
+    {
+        // An extInfo layout prop on its own (no `type` change) is safe - the extInfo is resolved against
+        // the element's current, unchanged type.
+        EPackage pkg = buildFormLikePackage();
+        EObject group = newGroupWithExtInfo(pkg, new EObject[1]);
+
+        assertNull("an extInfo prop with no type change must be allowed", //$NON-NLS-1$
+            ModifyMetadataTool.formTypeExtInfoComboError(group,
+                Collections.singletonList(prop("group", "Horizontal")))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testComboAllowsTypeChangeAlone()
+    {
+        // A `type` change with no extInfo prop is safe (the extInfo is re-resolved against the new type
+        // on the next call).
+        EPackage pkg = buildFormLikePackage();
+        EObject group = newGroupWithExtInfo(pkg, new EObject[1]);
+
+        assertNull("a type change with no extInfo prop must be allowed", //$NON-NLS-1$
+            ModifyMetadataTool.formTypeExtInfoComboError(group,
+                Collections.singletonList(prop("type", "Pages")))); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testComboAllowsDirectAndExtInfoWithoutTypeChange()
+    {
+        // A mixed batch of a DIRECT feature (`visible`) + an extInfo prop (`group`) that does NOT touch
+        // `type` stays allowed - the classifier is unchanged, so both route to their correct holder.
+        EPackage pkg = buildFormLikePackage();
+        EObject group = newGroupWithExtInfo(pkg, new EObject[1]);
+
+        assertNull("a direct + extInfo batch without a type change must still be allowed", //$NON-NLS-1$
+            ModifyMetadataTool.formTypeExtInfoComboError(group,
+                Arrays.asList(prop("visible", "true"), prop("group", "Horizontal")))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 }
