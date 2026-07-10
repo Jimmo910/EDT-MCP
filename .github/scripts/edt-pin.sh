@@ -39,7 +39,7 @@ fi
 # channel -> the com._1c.g5.v8.dt.core build qualifier the CI base is validated against.
 case "$CHANNEL" in
   2025.2) EDT_EXPECTED="26.0.1.v202605050943" ;;
-  2026.1) EDT_EXPECTED="27.0.1.v202605141817" ;;
+  2026.1) EDT_EXPECTED="27.0.2.v202607090722" ;;
   *)
     log "::error::edt-pin.sh: no pinned EDT build for channel '$CHANNEL'. Add it to the PIN MAP in .github/scripts/edt-pin.sh."
     exit 1
