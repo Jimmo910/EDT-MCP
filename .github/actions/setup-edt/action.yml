@@ -80,20 +80,29 @@ runs:
         # Xvfb is mandatory — fail loudly if it really didn't install.
         sudo apt-get install -y --no-install-recommends xvfb
 
-    - name: Compute EDT-base cache key
+    - name: Pin guard + compute EDT-base cache key
       id: edtcache
       shell: bash
       run: |
         set -euo pipefail
-        # Key on the inputs that define the IMMUTABLE Eclipse+EDT base (NOT the plugin,
-        # which is rebuilt every run and overlaid afterwards). A new EDT version / Eclipse
-        # archive / platform-support IU ⇒ a different key ⇒ a fresh install + a new cache.
-        H=$(printf '%s|%s|%s|%s|%s' \
+        # Pin the EDT build this base is validated against and FAIL if 1C shipped a newer one.
+        # The public ruby/<ver>/ channel is mutated IN PLACE on every point-release (no immutable
+        # per-release URL), so folding the SERVED build qualifier into the cache key makes the
+        # base cache track the served build — it can never go stale (the felix uses-constraint
+        # overlay flap). The channel is the ruby/<ver>/ segment of edt-p2. edt-pin.sh exits 1 on
+        # a drift, which aborts this step under `set -e` (a red gate that forces a re-pin).
+        CHANNEL="$(printf '%s' '${{ inputs.edt-p2 }}' | sed -E 's#.*/ruby/([^/]+)/?$#\1#')"
+        EDT_BUILD="$(bash "$GITHUB_WORKSPACE/.github/scripts/edt-pin.sh" "$CHANNEL" "${{ inputs.edt-p2 }}")"
+        # Key on the inputs that define the IMMUTABLE Eclipse+EDT base (NOT the plugin, which is
+        # rebuilt every run and overlaid afterwards) + the served EDT build qualifier. A new EDT
+        # build / Eclipse archive / platform-support IU ⇒ a different key ⇒ a fresh install.
+        H=$(printf '%s|%s|%s|%s|%s|%s' \
               "${{ inputs.eclipse-archive }}" \
               "${{ inputs.edt-p2 }}" \
               "${{ inputs.eclipse-p2 }}" \
               "${{ inputs.orbit-p2 }}" \
-              "${{ inputs.platform-support-iu }}" | sha256sum | cut -c1-16)
+              "${{ inputs.platform-support-iu }}" \
+              "$EDT_BUILD" | sha256sum | cut -c1-16)
         echo "key=edt-base-${{ runner.os }}-$H" >> "$GITHUB_OUTPUT"
 
     - name: Restore cached EDT base (Eclipse + 1C:EDT, no plugin)

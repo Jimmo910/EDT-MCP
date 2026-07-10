@@ -166,18 +166,27 @@ jobs:
           done
           sudo apt-get install -y --no-install-recommends xvfb
 
-      - name: "EDT setup 2/8 · compute base cache key"
+      - name: "EDT setup 2/8 · pin guard + compute base cache key"
         id: edtcache
         shell: bash
         run: |
           set -euo pipefail
-          # Key on the IMMUTABLE base inputs (NOT the plugin, which is overlaid fresh).
-          H=$(printf '%s|%s|%s|%s|%s|%s|%s' \
+          # Pin the EDT build this base is validated against and FAIL if 1C shipped a newer one.
+          # The public ruby/<ver>/ channel is mutated IN PLACE on every point-release (no
+          # immutable per-release URL), so folding the SERVED build qualifier into the cache key
+          # makes the base cache track the served build — it can never go stale, which is what
+          # caused the felix uses-constraint overlay flap. edt-pin.sh exits 1 on a drift, which
+          # aborts this step under `set -e` (a red gate that forces a conscious re-pin).
+          EDT_BUILD="$(bash "$GITHUB_WORKSPACE/.github/scripts/edt-pin.sh" "${{ inputs.edt }}" "$EDT_P2")"
+          # Key on the IMMUTABLE base inputs (NOT the plugin, which is overlaid fresh) + the
+          # served EDT build qualifier.
+          H=$(printf '%s|%s|%s|%s|%s|%s|%s|%s' \
                 "$ECLIPSE_ARCHIVE" "$EDT_P2" "$ECLIPSE_P2" "$ORBIT_P2" \
                 "$PLATFORM_SUPPORT_IU" "$PROFILING_IU" "$BSL_EXTENSION_IU" \
+                "$EDT_BUILD" \
                 | sha256sum | cut -c1-16)
           echo "key=edt-base-${{ runner.os }}-$H" >> "$GITHUB_OUTPUT"
-          echo "EDT-base cache key: edt-base-${{ runner.os }}-$H"
+          echo "EDT-base cache key: edt-base-${{ runner.os }}-$H (edt build: $EDT_BUILD)"
 
       - name: "EDT setup 3/8 · RESTORE base cache (Eclipse+EDT, no plugin)"
         id: restore-edt
