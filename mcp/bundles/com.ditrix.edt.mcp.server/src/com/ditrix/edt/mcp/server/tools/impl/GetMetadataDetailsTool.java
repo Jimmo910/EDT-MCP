@@ -23,12 +23,15 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractRoleDescription;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicTemplate;
+import com._1c.g5.v8.dt.metadata.mdclass.Catalog;
+import com._1c.g5.v8.dt.metadata.mdclass.ChartOfCharacteristicTypes;
 import com._1c.g5.v8.dt.metadata.mdclass.CommonModule;
 import com._1c.g5.v8.dt.metadata.mdclass.Configuration;
 import com._1c.g5.v8.dt.metadata.mdclass.InformationRegister;
 import com._1c.g5.v8.dt.metadata.mdclass.InformationRegisterDimension;
 import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.PredefinedItem;
 import com._1c.g5.v8.dt.metadata.mdclass.Role;
 import com._1c.g5.v8.dt.metadata.mdclass.ScheduledJob;
 import com._1c.g5.v8.dt.metadata.mdclass.XDTOPackage;
@@ -50,6 +53,7 @@ import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.ProjectContext;
 import com.ditrix.edt.mcp.server.utils.RoleRightsReader;
 import com.ditrix.edt.mcp.server.utils.XdtoStructureReader;
@@ -89,7 +93,10 @@ public class GetMetadataDetailsTool implements IMcpTool
                "In the default (non-full) view a ScheduledJob or CommonModule also renders a " + //$NON-NLS-1$
                "type-specific Properties table (e.g. methodName/schedule/use for a job; " + //$NON-NLS-1$
                "server/serverCall/global/returnValuesReuse for a module), and an InformationRegister's " + //$NON-NLS-1$
-               "Dimensions additionally show their Indexing. " + //$NON-NLS-1$
+               "Dimensions additionally show their Indexing. A Catalog / ChartOfCharacteristicTypes " + //$NON-NLS-1$
+               "also renders its 'Predefined items' table (in both basic and full mode); a single " + //$NON-NLS-1$
+               "predefined item FQN ('Catalog.X.Predefined.ItemName') renders that one item's " + //$NON-NLS-1$
+               "properties. " + //$NON-NLS-1$
                "Use this for the full properties of one named object; to list objects by type use get_metadata_objects. " + //$NON-NLS-1$
                "Full parameters and examples: call get_tool_guide('get_metadata_details')."; //$NON-NLS-1$
     }
@@ -115,7 +122,9 @@ public class GetMetadataDetailsTool implements IMcpTool
                 "Instead of the details view, return the ASSIGNABLE-property schema (default false): " + //$NON-NLS-1$
                 "per property its value kind, current value and ALLOWED values (enum literals). This " + //$NON-NLS-1$
                 "is what modify_metadata can set; FQNs may address members (e.g. " + //$NON-NLS-1$
-                "'Catalog.Products.Attribute.Weight').") //$NON-NLS-1$
+                "'Catalog.Products.Attribute.Weight'), but NOT a predefined item " + //$NON-NLS-1$
+                "('...Predefined.<Item>' is not resolvable in this mode - its settable surface is " + //$NON-NLS-1$
+                "fixed: description / code / isFolder).") //$NON-NLS-1$
             .stringProperty("language", //$NON-NLS-1$
                 "Synonym language code, e.g. 'en'/'ru' (default: configuration default)") //$NON-NLS-1$
             .build();
@@ -303,6 +312,19 @@ public class GetMetadataDetailsTool implements IMcpTool
             return;
         }
 
+        // A FQN addressing a single PREDEFINED item (Catalog/ChartOfCharacteristicTypes.Name.Predefined.
+        // Item, issue #293) renders that ONE item's properties. This must run BEFORE resolveObject
+        // below: resolveObject only looks at the first two FQN segments, so without this branch a
+        // predefined-item FQN would silently render its OWNER's full details instead of the item (or
+        // fail outright) - never a silent wrong render.
+        String normFqnForPredefined = MetadataTypeUtils.normalizeFqn(fqn);
+        PredefinedWriter.PredefinedRef predefinedRef = PredefinedWriter.parseRef(normFqnForPredefined);
+        if (predefinedRef != null)
+        {
+            appendPredefinedItemView(predefinedRef, fqn, normFqnForPredefined, sb, failures, ctx);
+            return;
+        }
+
         MdObject mdObject = resolveObject(ctx.config, fqn);
         if (mdObject == null)
         {
@@ -412,13 +434,89 @@ public class GetMetadataDetailsTool implements IMcpTool
     }
 
     /**
+     * Renders a single PREDEFINED item's properties (issue #293). The predefined items are plain EMF
+     * containment on the already-resolved {@code Configuration} - the SAME in-resource data the owner
+     * FQN's own "Predefined items" section reads ({@link #appendPredefinedItems}) - NOT a
+     * lazily-loaded sub-resource like a form's content or a role's rights, so it needs no BM read
+     * transaction and stays inspectable even before the project's BM model is built (matching the
+     * owner-section behaviour: a client must not be able to read the whole table yet be denied a
+     * single row of it).
+     */
+    private void appendPredefinedItemView(PredefinedWriter.PredefinedRef ref, String fqn, String normFqn,
+        StringBuilder sb, List<String[]> failures, RenderContext ctx)
+    {
+        String rendered = renderPredefinedItemViewBody(ref, fqn, normFqn, failures, ctx);
+        if (rendered != null)
+        {
+            sb.append(rendered);
+            sb.append(SECTION_SEPARATOR);
+        }
+    }
+
+    /**
+     * The body of {@link #appendPredefinedItemView}: resolves the owner
+     * (yo-fallback), finds the item (recursive, exact name match) and renders a Property/Value table
+     * (Name / Code / Description / Folder / Parent / nested-item count when it is a folder). Returns
+     * the Markdown, or {@code null} after adding a {fqn, reason} failure row when the owner TYPE is
+     * unsupported, the owner does not exist, or the item is not found - never a silent wrong render.
+     * Package-private: the unit tests exercise it directly against an in-memory {@code Configuration}.
+     */
+    String renderPredefinedItemViewBody(PredefinedWriter.PredefinedRef ref, String fqn, String normFqn,
+        List<String[]> failures, RenderContext ctx)
+    {
+        String ownerTypeErr = PredefinedWriter.unsupportedOwnerTypeError(ref.ownerType);
+        if (ownerTypeErr != null)
+        {
+            failures.add(new String[] { fqn, ownerTypeErr });
+            return null;
+        }
+        MetadataNodeResolver.ResolvedNode ownerResolved =
+            MetadataNodeResolver.resolveExistingWithYoFallback(ctx.config, ref.ownerFqn());
+        if (ownerResolved.node == null)
+        {
+            failures.add(new String[] { fqn, "Owner object not found: " + ref.ownerFqn() //$NON-NLS-1$
+                + ". Use get_metadata_objects to list available objects." }); //$NON-NLS-1$
+            return null;
+        }
+        PredefinedWriter.ItemLookup lookup = PredefinedWriter.lookup(ownerResolved.node.object, ref.itemName);
+        if (lookup == null)
+        {
+            failures.add(new String[] { fqn, "Predefined item not found: '" + ref.itemName + "' on " //$NON-NLS-1$ //$NON-NLS-2$
+                + ref.ownerFqn() }); //$NON-NLS-1$
+            return null;
+        }
+        return formatPredefinedItem(normFqn, lookup);
+    }
+
+    /** Renders one predefined item's properties as a Property/Value Markdown table. */
+    private static String formatPredefinedItem(String normFqn, PredefinedWriter.ItemLookup lookup)
+    {
+        PredefinedItem item = lookup.item;
+        StringBuilder sb = new StringBuilder();
+        sb.append("## Predefined item: ").append(normFqn).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        sb.append(MarkdownUtils.tableHeader("Property", "Value")); //$NON-NLS-1$ //$NON-NLS-2$
+        sb.append(MarkdownUtils.tableRow("Name", item.getName())); //$NON-NLS-1$
+        sb.append(MarkdownUtils.tableRow("Code", valueOrDash(PredefinedWriter.displayCode(item)))); //$NON-NLS-1$
+        sb.append(MarkdownUtils.tableRow("Description", valueOrDash(item.getDescription()))); //$NON-NLS-1$
+        boolean folder = PredefinedWriter.isFolder(item);
+        sb.append(MarkdownUtils.tableRow("Folder", yesNo(folder))); //$NON-NLS-1$
+        sb.append(MarkdownUtils.tableRow("Parent", valueOrDash(lookup.parentName))); //$NON-NLS-1$
+        if (folder)
+        {
+            sb.append(MarkdownUtils.tableRow("Nested items", //$NON-NLS-1$
+                String.valueOf(PredefinedWriter.countDescendants(item))));
+        }
+        return sb.toString();
+    }
+
+    /**
      * Immutable per-request render context threaded through {@link #processFqn}: the resolved
      * configuration, the (best-effort) BM model used only for a form's cross-model hop, the
      * effective synonym language code and the three rendering flags. Computed once in
      * {@link #getMetadataDetailsInternal} and constant across every FQN. Bundles the parameters
      * without changing any value or rendering behaviour.
      */
-    private static final class RenderContext
+    static final class RenderContext
     {
         final Configuration config;
         final IBmModel bmModel;
@@ -547,7 +645,36 @@ public class GetMetadataDetailsTool implements IMcpTool
         {
             appendDimensionIndexing(sb, (InformationRegister)mdObject);
         }
+        // Predefined items (issue #293): rendered in BOTH basic and full modes - a mode must never
+        // carry less (the #288 lesson above). A Catalog / ChartOfCharacteristicTypes with no predefined
+        // content yet renders nothing (PredefinedWriter.listAll returns an empty list).
+        if (mdObject instanceof Catalog || mdObject instanceof ChartOfCharacteristicTypes)
+        {
+            appendPredefinedItems(sb, mdObject);
+        }
         return sb.toString();
+    }
+
+    /**
+     * Renders the owner's "Predefined items" section: one row per item (recursively, items + content),
+     * with Name / Code / Description / Folder / Parent columns - the Parent column shows nesting
+     * (top-level items carry {@link #DASH}). A no-op (no section at all) when the owner has no
+     * predefined content yet.
+     */
+    private static void appendPredefinedItems(StringBuilder sb, MdObject mdObject)
+    {
+        List<PredefinedWriter.ItemRow> rows = PredefinedWriter.listAll(mdObject);
+        if (rows.isEmpty())
+        {
+            return;
+        }
+        sb.append("\n### Predefined items\n\n"); //$NON-NLS-1$
+        sb.append(MarkdownUtils.tableHeader("Name", "Code", "Description", "Folder", "Parent")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+        for (PredefinedWriter.ItemRow row : rows)
+        {
+            sb.append(MarkdownUtils.tableRow(row.name, valueOrDash(row.code), valueOrDash(row.description),
+                yesNo(row.isFolder), valueOrDash(row.parentName)));
+        }
     }
 
     /**

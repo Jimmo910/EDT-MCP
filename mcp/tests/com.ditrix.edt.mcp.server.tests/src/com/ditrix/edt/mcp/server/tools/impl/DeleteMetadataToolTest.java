@@ -27,6 +27,7 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter;
 import com.ditrix.edt.mcp.server.utils.FormElementWriter.FormObjectRef;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 
 /**
  * Lightweight contract tests for {@link DeleteMetadataTool}: tool metadata and JSON schema, without
@@ -550,5 +551,33 @@ public class DeleteMetadataToolTest
         assertTrue("description should mention the XDTO package member FQN shape", //$NON-NLS-1$
             desc.contains("XDTOPackage")); //$NON-NLS-1$
         assertTrue("description should mention the ObjectType member kind", desc.contains("ObjectType")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // ---- the predefined-item FQN is recognized by the delete dispatch (issue #293) -----------------
+
+    /**
+     * The delete dispatch routes a 4-part predefined-item FQN ({@code Type.Owner.Predefined.Item}) to
+     * its dedicated branch via {@link PredefinedWriter#parseRef} - the SAME recognizer create_metadata
+     * / modify_metadata use. Mirrors {@link #testFormObjectFqnRecognizedByDeleteDispatch}.
+     */
+    @Test
+    public void testPredefinedItemFqnRecognizedByDeleteDispatch()
+    {
+        PredefinedWriter.PredefinedRef ref = PredefinedWriter.parseRef("Catalog.Products.Predefined.Blue"); //$NON-NLS-1$
+        assertNotNull("a 4-part predefined-item FQN must be recognized", ref); //$NON-NLS-1$
+        assertEquals("Catalog", ref.ownerType); //$NON-NLS-1$
+        assertEquals("Products", ref.ownerName); //$NON-NLS-1$
+        assertEquals("Blue", ref.itemName); //$NON-NLS-1$
+        // The dispatch checks the form-object / form-member parsers first; a predefined-item FQN must
+        // not ALSO be claimed by either (they key off a different kind token at the same position).
+        assertNull(FormElementWriter.parse("Catalog.Products.Predefined.Blue")); //$NON-NLS-1$
+        assertNull(FormElementWriter.parseFormObjectCreate("Catalog.Products.Predefined.Blue")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDescriptionMentionsPredefinedItems()
+    {
+        String desc = new DeleteMetadataTool().getDescription();
+        assertTrue("description should mention predefined items", desc.contains("PREDEFINED")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }

@@ -41,6 +41,14 @@ A StyleItem (created generically with create_metadata) has no value yet; set its
 - Font: `{name:'value', value:{font:{faceName:'Arial', height:12, bold:true, italic:false, underline:false, strikeout:false}}}` - at least one of faceName / height / bold / italic / underline / strikeout is required; height is a positive integer.
 get_metadata_details renders the assigned value under a `Value` section (Style Type + Color `RGB(r, g, b)` / `Auto`, or the Font face / height / flags).
 
+## Predefined items (`Catalog` / `ChartOfCharacteristicTypes` only)
+A predefined item is addressed by its own FQN, `Catalog.X.Predefined.ItemName` or `ChartOfCharacteristicTypes.X.Predefined.ItemName` (create it first with create_metadata - see its guide for the grammar, `code` / `isFolder` / `parent` and the ChartOfAccounts / ChartOfCalculationTypes deferral). `properties` sets:
+- `description` (string, strict - a JSON string value is required; an explicitly empty string is stored as-is) - the item's presentation text, taken exactly as supplied (no yo-normalization on modify).
+- `code` - matched to the owner's code type (a Catalog: String or Number per `codeType`, strict JSON type; a ChartOfCharacteristicTypes: plain string), validated against `codeLength`. Setting it to an explicit JSON `null` CLEARS the code (unsets it); an entry MISSING its `value` key is rejected as malformed, never treated as a clear.
+- `isFolder` (boolean) - a folder->plain-item change (`isFolder:false`) is REJECTED while the folder still has children (move or delete them first); item->folder is always allowed.
+
+NOT supported on a predefined item: `name` (its identity IS the FQN leaf - delete_metadata + create_metadata under the new name instead of renaming), and `parent` (moving it to a different folder) - both are refused with an actionable error. Discover a predefined item's current properties with `get_metadata_details` on its FQN, and an owner's whole predefined-item tree with `get_metadata_details` on the owner FQN (the "Predefined items" section).
+
 ## Form members
 A FORM member is addressed like its create FQN: `Catalog.X.Form.F.<Kind>.Name` (or `CommonForm.F.<Kind>.Name`), Kind = Attribute / Command / Field / Button / Group / Decoration / Table. The same assignable properties apply: an item's `title` (bilingual; defaults to the config language when `language` is omitted), `visible`, `readOnly` (fields / groups / tables only) and any other assignable scalar / boolean / enum the item carries. NB `type` is context-dependent: on a form ATTRIBUTE it aliases the data `valueType` (same `{types:[...]}` shape as an mdclass attribute); on a form FIELD / Button / Decoration it is the display-kind ENUM (InputField / LabelField / ...). A wrong property name is rejected WITH the member's assignable list. The form item `id` cannot be set (auto-allocated). The change persists to the form's `Form.form` on disk.
 

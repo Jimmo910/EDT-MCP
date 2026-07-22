@@ -54,6 +54,7 @@ import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver.CreateTarget;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeBuilder;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.XdtoWriteException;
 import com.ditrix.edt.mcp.server.utils.XdtoWriter;
 import com.google.gson.JsonElement;
@@ -150,7 +151,9 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             + "an XDTO package MEMBER: 'XDTOPackage.<Package>.ObjectType.<Name>' (an ObjectType), " //$NON-NLS-1$
             + "'XDTOPackage.<Package>.Property.<Name>' (a package-global property) or " //$NON-NLS-1$
             + "'XDTOPackage.<Package>.ObjectType.<Type>.Property.<Name>' (a property nested in an " //$NON-NLS-1$
-            + "ObjectType) - see 'properties' for the XDTO-specific attribute vocabulary. " //$NON-NLS-1$
+            + "ObjectType) - see 'properties' for the XDTO-specific attribute vocabulary. Also creates " //$NON-NLS-1$
+            + "a PREDEFINED item ('Catalog.X.Predefined.ItemName' or " //$NON-NLS-1$
+            + "'ChartOfCharacteristicTypes.X.Predefined.ItemName'). " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('create_metadata')."; //$NON-NLS-1$
     }
 
@@ -176,13 +179,16 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
                 + "'string', the EXACT name of an ObjectType already in the same package for a " //$NON-NLS-1$
                 + "same-package reference, or an object {nsUri, name}) plus the optional 'lowerBound' / " //$NON-NLS-1$
                 + "'upperBound' (integers, ObjectType-nested properties only), 'nillable' / 'fixed' " //$NON-NLS-1$
-                + "(booleans, 'fixed'=true needs a 'default') and 'default' (string).") //$NON-NLS-1$
+                + "(booleans, 'fixed'=true needs a 'default') and 'default' (string). A PREDEFINED " //$NON-NLS-1$
+                + "item ('...Predefined.<Item>') uses yet another vocabulary: 'description', 'code', " //$NON-NLS-1$
+                + "'isFolder' and 'parent'.") //$NON-NLS-1$
             .booleanProperty(KEY_EXPECTED_NOT_EXISTS,
                 "Optional stale-intent guard (default false): assert the node does not yet exist for " //$NON-NLS-1$
                 + "a sharper precondition error. A real duplicate is always rejected anyway.") //$NON-NLS-1$
             .booleanProperty("normalizeYo", //$NON-NLS-1$
                 "Normalize the Russian letter 'ё'->'е' / 'Ё'->'Е' in the new node's NAME (the trailing " //$NON-NLS-1$
-                + "FQN segment) and in any synonym / comment value (default true). 'ё' in a Name is " //$NON-NLS-1$
+                + "FQN segment) and in any synonym / comment / predefined-item description value " //$NON-NLS-1$
+                + "(default true). 'ё' in a Name is " //$NON-NLS-1$
                 + "flagged by the 1C standard mdo-ru-name-unallowed-letter, so normalizing on input " //$NON-NLS-1$
                 + "stores a compliant name. Set false to keep 'ё' exactly as supplied.") //$NON-NLS-1$
             .booleanProperty(KEY_SET_AS_DEFAULT,
@@ -332,6 +338,17 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
         if (xdtoRef != null)
         {
             return createXdtoMember(projectName, normFqn, xdtoRef, properties);
+        }
+
+        // A FQN addressing a PREDEFINED item (Catalog/ChartOfCharacteristicTypes.Name.Predefined.Item)
+        // is handled by a dedicated branch: the predefined content is a plain EMF containment on the
+        // owner (not an mdclass member collection MetadataNodeResolver knows), so it must be parsed
+        // and dispatched BEFORE the generic member resolution below (issue #293).
+        PredefinedWriter.PredefinedRef predefinedRef = PredefinedWriter.parseRef(normFqn);
+        if (predefinedRef != null)
+        {
+            return createPredefinedItem(projectName, normFqn, predefinedRef, properties,
+                expectedNotExists, normReport);
         }
 
         // Parse the supported properties (synonym/comment); reject anything else early. The synonym /
@@ -675,6 +692,119 @@ public class CreateMetadataTool extends AbstractMetadataWriteTool
             .put(McpKeys.MESSAGE, verb + normFqn + (result.applied.isEmpty() ? "" //$NON-NLS-1$
                 : " (" + String.join(", ", result.applied) + ")")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             .toJson();
+    }
+
+    // ---- predefined-item creation (a plain EMF containment on the owner, issue #293) --------------
+
+    /**
+     * Creates a PREDEFINED item on a {@code Catalog} / {@code ChartOfCharacteristicTypes} owner,
+     * addressed by {@code Type.Owner.Predefined.ItemName}. Unlike a form object, the predefined
+     * content is a plain EMF containment on the owner (verified from {@code MdClass.xcore}) - there
+     * is no separate top object to attach, so the mutation runs on the OWNER (re-fetched by bmId
+     * inside the write transaction) and only the owner's canonical FQN is force-exported.
+     */
+    private String createPredefinedItem(String projectName, String normFqn,
+        PredefinedWriter.PredefinedRef ref, List<JsonObject> properties, boolean expectedNotExists,
+        MdNameNormalizer.Report normReport)
+    {
+        if (!isValidIdentifier(ref.itemName))
+        {
+            return ToolResult.error("Invalid name '" + ref.itemName + "'. A name must start with a " //$NON-NLS-1$ //$NON-NLS-2$
+                + "letter or underscore and contain only letters, digits and underscores.").toJson(); //$NON-NLS-1$
+        }
+        String ownerTypeErr = PredefinedWriter.unsupportedOwnerTypeError(ref.ownerType);
+        if (ownerTypeErr != null)
+        {
+            return ToolResult.error(ownerTypeErr).toJson();
+        }
+
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        String propErr = PredefinedWriter.parseProperties(properties, false, props);
+        if (propErr != null)
+        {
+            return propErr;
+        }
+        // This tool's normalizeYo contract covers every supplied text value (name/synonym/comment),
+        // so a predefined item's description is normalized here too - on CREATE only; modify_metadata
+        // promises free text stays exactly as supplied. The policy lives in the tool, not the writer.
+        if (props.descriptionSet && props.description != null)
+        {
+            props.description = normReport.apply("description", props.description); //$NON-NLS-1$
+        }
+
+        ProjectContext ctx = resolveProjectAndConfig(projectName);
+        if (ctx.hasError())
+        {
+            return ctx.error;
+        }
+        IProject project = ctx.project;
+        Configuration config = ctx.config;
+
+        // Owner resolution uses the yo-fallback (create_metadata itself normalizes 'yo'->'ye' in Names
+        // by default), and force-export targets the RESOLVED owner's canonical FQN.
+        MetadataNodeResolver.ResolvedNode ownerResolved =
+            MetadataNodeResolver.resolveExistingWithYoFallback(config, ref.ownerFqn());
+        if (ownerResolved.node == null)
+        {
+            return ToolResult.error("Owner object not found: " + ref.ownerFqn() + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Use get_metadata_objects to list available objects." //$NON-NLS-1$
+                + MetadataNodeResolver.yoNotFoundHint(ref.ownerFqn())).toJson();
+        }
+        MdObject owner = ownerResolved.node.object;
+        if (!(owner instanceof IBmObject))
+        {
+            return ToolResult.error("Owner object is not a BM object").toJson(); //$NON-NLS-1$
+        }
+
+        BmContext bm = resolveBmContext(project, projectName);
+        if (bm.hasError())
+        {
+            return bm.error;
+        }
+
+        final long ownerBmId = ((IBmObject)owner).bmGetId();
+        final String itemName = ref.itemName;
+        final String[] createdKindHolder = new String[1];
+        // The force-export must target the owner's CANONICAL FQN (its own bmGetFqn()), never the
+        // caller's spelling (ownerResolved.fqn echoes the input) - a case/spelling variant that
+        // still resolves would otherwise export a non-existent FQN and leave the change in memory.
+        final String[] canonicalOwnerFqnHolder = new String[1];
+
+        try
+        {
+            BmTransactions.<Void>write(bm.bmModel, "CreatePredefinedItem", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txOwner = (EObject)tx.getObjectById(ownerBmId);
+                if (txOwner == null)
+                {
+                    throw new RuntimeException("Owner object not found in transaction"); //$NON-NLS-1$
+                }
+                canonicalOwnerFqnHolder[0] = ((IBmObject)txOwner).bmGetFqn();
+                PredefinedWriter.WriteResult result =
+                    PredefinedWriter.create(txOwner, itemName, props, expectedNotExists);
+                if (result.isError())
+                {
+                    throw new IllegalStateException(result.error);
+                }
+                createdKindHolder[0] = result.item.eClass().getName();
+                return null;
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error creating predefined item", e); //$NON-NLS-1$
+            return ToolResult.error(unwrapCauseMessage(e)).toJson();
+        }
+
+        boolean persisted = BmTransactions.forceExportToDisk(project, canonicalOwnerFqnHolder[0]);
+        ToolResult result = ToolResult.success()
+            .put(McpKeys.ACTION, VAL_CREATED)
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put("kind", createdKindHolder[0]) //$NON-NLS-1$
+            .put("name", itemName) //$NON-NLS-1$
+            .put(KEY_PERSISTED, persisted);
+        normReport.addTo(result);
+        return result.put(McpKeys.MESSAGE, "Created " + normFqn).toJson(); //$NON-NLS-1$
     }
 
     // ---- top-level creation (mirrors the former create_metadata_object) -------------------------

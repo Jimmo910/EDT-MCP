@@ -55,6 +55,7 @@ import com.ditrix.edt.mcp.server.utils.FormValidationException;
 import com.ditrix.edt.mcp.server.utils.MetadataNodeResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataPathResolver;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.XdtoWriteException;
 import com.ditrix.edt.mcp.server.utils.XdtoWriter;
 
@@ -99,10 +100,11 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
     public String getDescription()
     {
         return "Delete a metadata node (object or member, including a FORM object " //$NON-NLS-1$
-            + "'Type.Object.Form.Name', a FORM member - item / attribute / " //$NON-NLS-1$
-            + "command / handler - or an XDTO package member 'XDTOPackage.<Package>.ObjectType.<Name>' " //$NON-NLS-1$
-            + "/ '...Property.<Name>' / '...ObjectType.<Type>.Property.<Name>') addressed by a 1C " //$NON-NLS-1$
-            + "full-name FQN, cascading the cleanup of all " //$NON-NLS-1$
+            + "'Type.Object.Form.Name', a FORM member - item / attribute / command / handler - an XDTO " //$NON-NLS-1$
+            + "package member 'XDTOPackage.<Package>.ObjectType.<Name>' / '...Property.<Name>' / " //$NON-NLS-1$
+            + "'...ObjectType.<Type>.Property.<Name>', or a PREDEFINED item " //$NON-NLS-1$
+            + "'Catalog.X.Predefined.ItemName' / 'ChartOfCharacteristicTypes.X.Predefined.ItemName') " //$NON-NLS-1$
+            + "addressed by a 1C full-name FQN, cascading the cleanup of all " //$NON-NLS-1$
             + "references in BSL code, forms and other metadata. Two-phase: call without confirm to " //$NON-NLS-1$
             + "preview what would be removed, then confirm=true to apply (deletion is hard to reverse). " //$NON-NLS-1$
             + "If the node is still referenced by metadata the refactoring cannot auto-clean, a " //$NON-NLS-1$
@@ -208,9 +210,19 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
             return deleteXdtoMember(ctx, normFqn, xdtoRef, confirm);
         }
 
+        // A FQN addressing a PREDEFINED item (Catalog/ChartOfCharacteristicTypes.Name.Predefined.Item)
+        // is handled by a dedicated branch too: the predefined content is a plain EMF containment on
+        // the owner, not a top object the md-refactoring service can see (issue #293).
+        PredefinedWriter.PredefinedRef predefinedRef = PredefinedWriter.parseRef(normFqn);
+        if (predefinedRef != null)
+        {
+            return deletePredefinedItem(ctx, normFqn, predefinedRef, confirm);
+        }
+
         // The md-refactoring service is needed ONLY by the generic mdclass path below - the
-        // form-member / form-object / XDTO-member branches above delete directly through their
-        // own content models, so its unavailability (e.g. during startup) must not block them.
+        // form-member / form-object / XDTO-member / predefined-item branches above delete directly
+        // through their own content models, so its unavailability (e.g. during startup) must not block
+        // them.
         IMdRefactoringService refactoringService = Activator.getDefault().getMdRefactoringService();
         if (refactoringService == null)
         {
@@ -808,6 +820,177 @@ public class DeleteMetadataTool extends AbstractMetadataWriteTool
         }
         // Remove the MD-form from the owner's 'forms' containment list.
         EcoreUtil.remove(txMdForm);
+    }
+
+    // ==================== PREDEFINED item (a plain EMF containment on the owner) ====================
+
+    /**
+     * Deletes a PREDEFINED item addressed by {@code Type.Owner.Predefined.ItemName}. Two-phase like
+     * the rest of this tool: {@code confirm=false} previews (a FOLDER's preview reports how many
+     * nested items the delete would cascade), {@code confirm=true} removes it from its ACTUAL
+     * containing list and force-exports the OWNER's canonical FQN (the predefined content is a plain
+     * EMF containment - there is no separate top object to detach, unlike an owned form).
+     */
+    private String deletePredefinedItem(ProjectContext ctx, String normFqn,
+        PredefinedWriter.PredefinedRef ref, boolean confirm)
+    {
+        String ownerTypeErr = PredefinedWriter.unsupportedOwnerTypeError(ref.ownerType);
+        if (ownerTypeErr != null)
+        {
+            return ToolResult.error(ownerTypeErr).toJson();
+        }
+
+        MetadataNodeResolver.ResolvedNode ownerResolved =
+            MetadataNodeResolver.resolveExistingWithYoFallback(ctx.config, ref.ownerFqn());
+        if (ownerResolved.node == null)
+        {
+            return ToolResult.error("Owner object not found: " + ref.ownerFqn() + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Use get_metadata_objects to list available objects." //$NON-NLS-1$
+                + MetadataNodeResolver.yoNotFoundHint(ref.ownerFqn())).toJson();
+        }
+        MdObject owner = ownerResolved.node.object;
+        if (!(owner instanceof IBmObject))
+        {
+            return ToolResult.error("Owner object is not a BM object").toJson(); //$NON-NLS-1$
+        }
+
+        PredefinedWriter.DeletePreview preview = PredefinedWriter.preview(owner, ref.itemName);
+        if (!preview.found)
+        {
+            return ToolResult.error("Predefined item not found: '" + ref.itemName + "' on " //$NON-NLS-1$ //$NON-NLS-2$
+                + ref.ownerFqn() + ". Use get_metadata_details to list the owner's predefined items.") //$NON-NLS-1$
+                .toJson();
+        }
+
+        if (!confirm)
+        {
+            return buildPredefinedItemDeletePreview(normFqn, ref, preview);
+        }
+
+        // Destructive-operation consent gate: the LAST check before the mutation, mirroring the
+        // generic-node path above. delete_metadata is a gated tool, and a FOLDER delete cascades its
+        // whole content tree - so an interactive session that requires confirmation must get the
+        // dialog here too. On ALLOW the behaviour is unchanged; headless / env-bypass never block.
+        int cascadeTotal = 1 + preview.descendantCount;
+        String consentSubtitle = preview.isFolder && preview.descendantCount > 0
+            ? "This deletes predefined item '" + ref.itemName + "' (a folder) and its " //$NON-NLS-1$ //$NON-NLS-2$
+                + preview.descendantCount + " nested item(s) from " + ref.ownerFqn() + "." //$NON-NLS-1$ //$NON-NLS-2$
+            : "This deletes predefined item '" + ref.itemName + "' from " + ref.ownerFqn() + "."; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        ConsentPreview consentPreview = new ConsentPreview(
+            "Delete predefined item", //$NON-NLS-1$
+            consentSubtitle, cascadeTotal, Collections.singletonList(normFqn));
+        DestructiveConsentGate.ConsentDecision consentDecision =
+            DestructiveConsentGate.getInstance().requireConsent(NAME, consentPreview);
+        if (consentDecision != DestructiveConsentGate.ConsentDecision.ALLOW)
+        {
+            return ToolResult.error(DestructiveConsentGate.consentDeniedMessage(consentDecision, NAME)).toJson();
+        }
+
+        return performPredefinedItemDelete(ctx.project, owner, normFqn, ref);
+    }
+
+    /**
+     * Preview (no mutation): a {name, type} row for the item itself AND one per cascaded descendant
+     * (a folder delete removes its whole content tree - the structured {@code items} must list
+     * everything the confirm would remove, like the owned-form preview does), plus a message noting
+     * a folder's cascade count.
+     */
+    private String buildPredefinedItemDeletePreview(String normFqn, PredefinedWriter.PredefinedRef ref,
+        PredefinedWriter.DeletePreview preview)
+    {
+        Map<String, Object> head = new java.util.LinkedHashMap<>();
+        head.put("name", ref.itemName); //$NON-NLS-1$
+        head.put("type", preview.kind); //$NON-NLS-1$
+        List<Map<String, Object>> items = new ArrayList<>();
+        items.add(head);
+        for (String[] descendant : preview.descendants)
+        {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("name", descendant[0]); //$NON-NLS-1$
+            row.put("type", descendant[1]); //$NON-NLS-1$
+            items.add(row);
+        }
+
+        boolean cascades = preview.isFolder && preview.descendantCount > 0;
+        String message = cascades
+            ? "Preview: deleting predefined item '" + ref.itemName + "' (a FOLDER) from " //$NON-NLS-1$ //$NON-NLS-2$
+                + ref.ownerFqn() + " would remove it AND its " + preview.descendantCount //$NON-NLS-1$
+                + " nested item(s). Call confirm=true to apply." //$NON-NLS-1$
+            : "Preview: deleting predefined item '" + ref.itemName + "' from " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
+                + " would remove the item itself. Call confirm=true to apply."; //$NON-NLS-1$
+
+        ToolResult result = ToolResult.success()
+            .put(McpKeys.ACTION, VAL_PREVIEW)
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put(KEY_REFACTORING_TITLE, "Delete predefined item " + ref.itemName) //$NON-NLS-1$
+            .put(KEY_ITEMS, items)
+            .put(KEY_BLOCKING, false);
+        return putBlockingReferences(result, Collections.emptyList())
+            .put(McpKeys.MESSAGE, message)
+            .toJson();
+    }
+
+    /** Delete inside a WRITE transaction: re-fetch the owner, remove the item, export the owner FQN. */
+    private String performPredefinedItemDelete(IProject project, MdObject owner,
+        String normFqn, PredefinedWriter.PredefinedRef ref)
+    {
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error("IBmModelManager not available").toJson(); //$NON-NLS-1$
+        }
+        IBmModel bmModel = bmModelManager.getModel(project);
+        if (bmModel == null)
+        {
+            return ToolResult.error("BM model not available for project: " + project.getName()).toJson(); //$NON-NLS-1$
+        }
+
+        final long ownerBmId = ((IBmObject)owner).bmGetId();
+        final String itemName = ref.itemName;
+        // Force-export must target the owner's CANONICAL FQN (its own bmGetFqn()), never the
+        // caller's spelling; and the cascade count in the result message is re-taken INSIDE the
+        // write transaction (the pre-confirm preview may be stale by the time confirm runs).
+        final String[] canonicalOwnerFqnHolder = new String[1];
+        final PredefinedWriter.DeletePreview[] txPreviewHolder = new PredefinedWriter.DeletePreview[1];
+
+        try
+        {
+            BmTransactions.<Void>write(bmModel, "DeletePredefinedItem", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txOwner = (EObject)tx.getObjectById(ownerBmId);
+                if (txOwner == null)
+                {
+                    throw new RuntimeException("Owner object not found in transaction"); //$NON-NLS-1$
+                }
+                canonicalOwnerFqnHolder[0] = ((IBmObject)txOwner).bmGetFqn();
+                txPreviewHolder[0] = PredefinedWriter.preview(txOwner, itemName);
+                PredefinedWriter.WriteResult result = PredefinedWriter.delete(txOwner, itemName);
+                if (result.isError())
+                {
+                    throw new IllegalStateException(result.error);
+                }
+                return null;
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error deleting predefined item", e); //$NON-NLS-1$
+            return ToolResult.error("Delete failed: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = BmTransactions.forceExportToDisk(project, canonicalOwnerFqnHolder[0]);
+        PredefinedWriter.DeletePreview txPreview = txPreviewHolder[0];
+        boolean cascaded = txPreview != null && txPreview.isFolder && txPreview.descendantCount > 0;
+
+        return ToolResult.success()
+            .put(McpKeys.ACTION, VAL_EXECUTED)
+            .put("fqn", normFqn) //$NON-NLS-1$
+            .put(McpKeys.MESSAGE, "Deleted predefined item '" + itemName + "' from " + ref.ownerFqn() //$NON-NLS-1$ //$NON-NLS-2$
+                + (cascaded ? " (with its " + txPreview.descendantCount + " nested item(s))" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + (persisted ? " and persisted to disk." //$NON-NLS-1$
+                    : " (in-memory only; on-disk write did not complete - re-check before relying on " //$NON-NLS-1$
+                        + "it).")) //$NON-NLS-1$
+            .toJson();
     }
 
     /** Outcome of the orphan form-folder cleanup - never conflate "not found" with "removed". */

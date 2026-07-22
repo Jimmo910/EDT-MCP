@@ -9,6 +9,7 @@ package com.ditrix.edt.mcp.server.tools.impl;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -22,6 +23,7 @@ import com.ditrix.edt.mcp.server.tools.IMcpTool.ResponseType;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataTool.CommonModuleFlags;
 import com.ditrix.edt.mcp.server.tools.impl.CreateMetadataTool.CommonModuleKind;
 import com.ditrix.edt.mcp.server.utils.MetadataLanguageUtils;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 
 /**
  * Lightweight contract tests for {@link CreateMetadataTool}: tool metadata and JSON schema,
@@ -453,5 +455,46 @@ public class CreateMetadataToolTest
         String schema = new CreateMetadataTool().getOutputSchema();
         assertTrue("output schema must declare 'applied' (XDTO member create counts)", //$NON-NLS-1$
             schema.contains("\"applied\"")); //$NON-NLS-1$
+    }
+
+    // ==================== predefined-item dispatch (issue #293) ====================
+
+    /**
+     * The create dispatch routes a 4-part predefined-item FQN ({@code Type.Owner.Predefined.Item}) to
+     * its dedicated branch via {@link PredefinedWriter#parseRef} - this asserts the recognizer the
+     * dispatch keys off, runtime-free (mirrors {@code DeleteMetadataToolTest
+     * .testFormObjectFqnRecognizedByDeleteDispatch}).
+     */
+    @Test
+    public void testPredefinedItemFqnRecognizedByCreateDispatch()
+    {
+        PredefinedWriter.PredefinedRef ref = PredefinedWriter.parseRef("Catalog.Products.Predefined.Blue"); //$NON-NLS-1$
+        assertNotNull("a 4-part predefined-item FQN must be recognized", ref); //$NON-NLS-1$
+        assertEquals("Catalog", ref.ownerType); //$NON-NLS-1$
+        assertEquals("Products", ref.ownerName); //$NON-NLS-1$
+        assertEquals("Blue", ref.itemName); //$NON-NLS-1$
+        // A normal mdclass member FQN (Attribute at the same position) must NOT be misread as a
+        // predefined item - otherwise the ordinary member-create branch would be unreachable.
+        assertNull("a normal member FQN is not a predefined item", //$NON-NLS-1$
+            PredefinedWriter.parseRef("Catalog.Products.Attribute.Weight")); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testDescriptionMentionsPredefinedItems()
+    {
+        String desc = new CreateMetadataTool().getDescription();
+        assertTrue("description should mention predefined items", desc.contains("Predefined")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** A ChartOfAccounts predefined item is recognized structurally but rejected as not-yet-supported. */
+    @Test
+    public void testChartOfAccountsPredefinedItemIsDeferred()
+    {
+        PredefinedWriter.PredefinedRef ref =
+            PredefinedWriter.parseRef("ChartOfAccounts.Main.Predefined.Cash"); //$NON-NLS-1$
+        assertNotNull(ref);
+        String err = PredefinedWriter.unsupportedOwnerTypeError(ref.ownerType);
+        assertNotNull("ChartOfAccounts predefined items must be rejected as not-yet-supported", err); //$NON-NLS-1$
+        assertTrue(err.contains("not yet supported")); //$NON-NLS-1$
     }
 }

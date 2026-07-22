@@ -83,6 +83,7 @@ import com.ditrix.edt.mcp.server.utils.MetadataPropertyIntrospector.PropertyInfo
 import com.ditrix.edt.mcp.server.utils.MetadataTypeBuilder;
 import com.ditrix.edt.mcp.server.utils.MetadataTypeUtils;
 import com.ditrix.edt.mcp.server.utils.MethodReferenceValidator;
+import com.ditrix.edt.mcp.server.utils.PredefinedWriter;
 import com.ditrix.edt.mcp.server.utils.ReferenceMembershipWriter;
 import com.ditrix.edt.mcp.server.utils.RoleRightsWriter;
 import com.ditrix.edt.mcp.server.utils.SpreadsheetTemplateWriter;
@@ -252,7 +253,12 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
             + "{nsUri, name}), 'lowerBound' / 'upperBound' (integers, ObjectType-nested properties " //$NON-NLS-1$
             + "only), 'nillable' / 'fixed' (booleans, 'fixed'=true needs a 'default') and 'default' " //$NON-NLS-1$
             + "(string). " //$NON-NLS-1$
-            + "Discover assignable properties + allowed values with " //$NON-NLS-1$
+            + "Set a PREDEFINED item's properties with 'properties' on its own FQN " //$NON-NLS-1$
+            + "('Catalog.X.Predefined.ItemName' or 'ChartOfCharacteristicTypes.X.Predefined.ItemName'): " //$NON-NLS-1$
+            + "description / code / isFolder (folder->item with existing children is refused; moving to " //$NON-NLS-1$
+            + "a different 'parent' is not yet supported - delete and re-create; these three names ARE " //$NON-NLS-1$
+            + "the item's whole settable surface, no assignable-schema round-trip needed). " //$NON-NLS-1$
+            + "For other nodes, discover assignable properties + allowed values with " //$NON-NLS-1$
             + "get_metadata_details(assignable:true). To rename, use rename_metadata_object. " //$NON-NLS-1$
             + "Full parameters and examples: call get_tool_guide('modify_metadata')."; //$NON-NLS-1$
     }
@@ -390,6 +396,15 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         if (formRef != null)
         {
             return dispatchFormMemberFqn(ctx, normFqn, formRef, args);
+        }
+
+        // A FQN addressing a PREDEFINED item (Catalog/ChartOfCharacteristicTypes.Name.Predefined.Item)
+        // is dispatched EARLY too: the predefined content is a plain EMF containment on the owner, not
+        // an mdclass member collection the generic resolver below knows about (issue #293).
+        PredefinedWriter.PredefinedRef predefinedRef = PredefinedWriter.parseRef(normFqn);
+        if (predefinedRef != null)
+        {
+            return dispatchPredefinedItemFqn(ctx, normFqn, predefinedRef, args);
         }
 
         // A SUBSYSTEM-content payload (content[] on a Subsystem FQN) is dispatched EARLY, before the
@@ -577,6 +592,123 @@ public class ModifyMetadataTool extends AbstractMetadataWriteTool
         }
         return dispatchFormMember(ctx, normFqn, formRef, args.properties, args.normReport,
             args.hasRolePayload, args.hasContentPayload);
+    }
+
+    /**
+     * Dispatches a FQN addressing a PREDEFINED item on a {@code Catalog} /
+     * {@code ChartOfCharacteristicTypes} owner ({@code Type.Owner.Predefined.ItemName}). Refuses the
+     * sibling payloads (Role / membership {@code content} / {@code template} / {@code dcs}) up front
+     * so they are never silently dropped, then validates the owner kind, parses the
+     * {@code description} / {@code code} / {@code isFolder} properties (via the SHARED
+     * {@link PredefinedWriter#parseProperties}, which also refuses {@code name} and {@code parent} -
+     * a move - on modify), resolves the owner (yo-fallback) and mutates it inside a BM write
+     * transaction. Like create, there is no separate top object to attach - only the owner's
+     * canonical FQN is force-exported.
+     */
+    private String dispatchPredefinedItemFqn(ProjectContext ctx, String normFqn,
+        PredefinedWriter.PredefinedRef ref, ModifyArgs args)
+    {
+        if (args.hasTemplatePayload)
+        {
+            return templateOnlyForTemplateFqnError(normFqn, "addresses a predefined item"); //$NON-NLS-1$
+        }
+        if (args.hasDcsPayload)
+        {
+            return dcsOnlyForReportFqnError(normFqn, "addresses a predefined item"); //$NON-NLS-1$
+        }
+        if (args.hasRolePayload || args.hasContentPayload)
+        {
+            return ToolResult.error("'rights'/'templates'/'roleProperties'/'content' do not apply to " //$NON-NLS-1$
+                + "a predefined item; '" + normFqn + "' addresses a predefined item. Use 'properties' " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(description / code / isFolder).").toJson(); //$NON-NLS-1$
+        }
+
+        String ownerTypeErr = PredefinedWriter.unsupportedOwnerTypeError(ref.ownerType);
+        if (ownerTypeErr != null)
+        {
+            return ToolResult.error(ownerTypeErr).toJson();
+        }
+
+        PredefinedWriter.ItemProps props = new PredefinedWriter.ItemProps();
+        String propErr = PredefinedWriter.parseProperties(args.properties, true, props);
+        if (propErr != null)
+        {
+            return propErr;
+        }
+
+        Configuration config = ctx.config;
+        // Owner resolution uses the yo-fallback; force-export targets the RESOLVED owner's canonical FQN.
+        MetadataNodeResolver.ResolvedNode ownerResolved =
+            MetadataNodeResolver.resolveExistingWithYoFallback(config, ref.ownerFqn());
+        if (ownerResolved.node == null)
+        {
+            return ToolResult.error("Owner object not found: " + ref.ownerFqn() + ". " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Use get_metadata_objects to list available objects." //$NON-NLS-1$
+                + MetadataNodeResolver.yoNotFoundHint(ref.ownerFqn())).toJson();
+        }
+        MdObject owner = ownerResolved.node.object;
+        if (!(owner instanceof IBmObject))
+        {
+            return ToolResult.error("Owner object is not a BM object").toJson(); //$NON-NLS-1$
+        }
+
+        IBmModelManager bmModelManager = Activator.getDefault().getBmModelManager();
+        if (bmModelManager == null)
+        {
+            return ToolResult.error(ERR_NO_BM_MANAGER).toJson();
+        }
+        IBmModel bmModel = bmModelManager.getModel(ctx.project);
+        if (bmModel == null)
+        {
+            return ToolResult.error(ERR_NO_BM_MODEL + args.projectName).toJson();
+        }
+
+        final long ownerBmId = ((IBmObject)owner).bmGetId();
+        final String itemName = ref.itemName;
+        // Force-export must target the owner's CANONICAL FQN (its own bmGetFqn()), never the
+        // caller's spelling (ownerResolved.fqn echoes the input) - a case/spelling variant that
+        // still resolves would otherwise export a non-existent FQN and leave the change in memory.
+        final String[] canonicalOwnerFqnHolder = new String[1];
+
+        try
+        {
+            BmTransactions.<Void>write(bmModel, "ModifyPredefinedItem", (tx, pm) -> //$NON-NLS-1$
+            {
+                EObject txOwner = (EObject)tx.getObjectById(ownerBmId);
+                if (txOwner == null)
+                {
+                    throw new RuntimeException("Owner object not found in transaction"); //$NON-NLS-1$
+                }
+                canonicalOwnerFqnHolder[0] = ((IBmObject)txOwner).bmGetFqn();
+                PredefinedWriter.WriteResult result = PredefinedWriter.modify(txOwner, itemName, props);
+                if (result.isError())
+                {
+                    throw new IllegalStateException(result.error);
+                }
+                return null;
+            });
+        }
+        catch (Exception e)
+        {
+            Activator.logError("Error modifying predefined item", e); //$NON-NLS-1$
+            return ToolResult.error("Failed to modify: " + unwrapCauseMessage(e)).toJson(); //$NON-NLS-1$
+        }
+
+        boolean persisted = BmTransactions.forceExportToDisk(ctx.project, canonicalOwnerFqnHolder[0]);
+        List<String> applied = new ArrayList<>();
+        if (props.descriptionSet)
+        {
+            applied.add("description"); //$NON-NLS-1$
+        }
+        if (props.codeSet)
+        {
+            applied.add("code"); //$NON-NLS-1$
+        }
+        if (props.isFolderSet)
+        {
+            applied.add("isFolder"); //$NON-NLS-1$
+        }
+        return buildModifiedResult(normFqn, applied, persisted, args.normReport);
     }
 
     /**
