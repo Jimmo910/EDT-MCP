@@ -55,6 +55,9 @@ public final class Toolsets
     /** Project operations: build/validate/update DB, export/import, problems. */
     public static final String PROJECT = "project"; //$NON-NLS-1$
 
+    /** Raw git command tool (its own group; disabled by default via PreferenceConstants). */
+    public static final String GIT = "git"; //$NON-NLS-1$
+
     /** A toolset: a stable id plus a human-readable title and description. */
     public static final class Toolset
     {
@@ -114,6 +117,10 @@ public final class Toolsets
             "Configuration translation via LanguageTool: extract, translate, project info."); //$NON-NLS-1$
         define(PROJECT, "Project",
             "Project operations: clean/revalidate, update DB, export/import XML, problems and markers, docs."); //$NON-NLS-1$
+        define(GIT, "Git",
+            "Run raw git commands (status/diff/commit/push/pull/...) in a project's repository via the " //$NON-NLS-1$
+            + "'git' tool. Powerful (it can push, checkout, stash); DISABLED by default - check it in the " //$NON-NLS-1$
+            + "MCP Server Tools preference tab to enable."); //$NON-NLS-1$
 
         assign(CORE,
             "list_toolsets", "enable_toolset", //$NON-NLS-1$ //$NON-NLS-2$
@@ -163,9 +170,10 @@ public final class Toolsets
             "get_event_log", //$NON-NLS-1$
             "get_mcp_history", //$NON-NLS-1$
             "list_git_branches", "switch_git_branch", "set_branch_infobase", "create_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "create_git_repository", "commit_git_changes", "push_git_branch", "pull_git_branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            "get_git_status", //$NON-NLS-1$
             "get_check_description", "get_platform_documentation"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        assign(GIT,
+            "git"); //$NON-NLS-1$
     }
 
     private Toolsets()
