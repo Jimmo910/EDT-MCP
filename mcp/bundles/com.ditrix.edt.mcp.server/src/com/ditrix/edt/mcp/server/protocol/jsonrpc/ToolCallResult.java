@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.ditrix.edt.mcp.server.protocol.McpKeys;
+import com.ditrix.edt.mcp.server.utils.OutputSizeGuard;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -76,6 +77,25 @@ public class ToolCallResult
         {
             result.isError = Boolean.TRUE;
         }
+        return result;
+    }
+
+    /**
+     * A text-only ERROR result: the real error message in the text channel plus {@code isError:true},
+     * and NO {@code structuredContent}. Used when a client opted out of structuredContent but the
+     * failure must stay machine-detectable (issue #302 follow-up) - suppressing the structured payload
+     * must not turn a failure into a success-looking result.
+     *
+     * @param structuredContent the structured error payload (typically a Gson {@link JsonElement})
+     * @return a text result flagged {@code isError:true}
+     */
+    public static ToolCallResult errorText(Object structuredContent)
+    {
+        ToolCallResult result = new ToolCallResult();
+        // Cap the text like the normal text path (buildToolCallTextResponse) does, so an opted-out
+        // client cannot receive an unbounded content[0].text from a huge error message.
+        result.content.add(ContentItem.text(OutputSizeGuard.cap(buildErrorText(structuredContent))));
+        result.isError = Boolean.TRUE;
         return result;
     }
 

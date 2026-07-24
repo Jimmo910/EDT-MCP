@@ -96,9 +96,22 @@ public final class FanOut
                 {
                     firstEnvelope = envelope;
                 }
-                if (!appendProjects(envelope, mergedProjects))
+                JsonObject result = Json.obj(envelope, KEY_RESULT);
+                if (!appendStructuredProjects(result, mergedProjects))
                 {
-                    allStructured = false; // a content-only (legacy/failed-structured) backend
+                    // A content-only backend (legacy build / failed structured generation): recover its
+                    // project NAMES from the Markdown table so its live projects are NOT hidden from the
+                    // merged structuredContent.projects. The registry already discovers them via the same
+                    // fallback, so routed calls reach them - the proxy must not omit them here. The human
+                    // content is still rebuilt only when EVERY backend was structured (below), so a legacy
+                    // backend's richer table is not downgraded to name-only.
+                    allStructured = false;
+                    for (String name : BackendRegistry.namesFromMarkdownTable(result))
+                    {
+                        JsonObject project = new JsonObject();
+                        project.addProperty(KEY_NAME, name);
+                        mergedProjects.add(project);
+                    }
                 }
             }
         }
@@ -280,15 +293,16 @@ public final class FanOut
     /**
      * Appends the entries of {@code result.structuredContent.projects} to the merged array.
      *
-     * @param envelope the usable backend response
+     * @param result the usable backend response's {@code result} object
      * @param mergedProjects the accumulator to append to
      * @return {@code true} when the backend exposed a {@code structuredContent.projects} ARRAY (even
      *         empty), {@code false} when it was content-only (legacy / failed structured generation) -
-     *         the caller uses this to decide whether the merged table is complete enough to rebuild
+     *         the caller then recovers its names from the Markdown table and marks the merge as not
+     *         all-structured (so the human content is not rebuilt from an incomplete field set)
      */
-    private static boolean appendProjects(JsonObject envelope, JsonArray mergedProjects)
+    private static boolean appendStructuredProjects(JsonObject result, JsonArray mergedProjects)
     {
-        JsonObject structured = Json.obj(Json.obj(envelope, KEY_RESULT), KEY_STRUCTURED_CONTENT);
+        JsonObject structured = Json.obj(result, KEY_STRUCTURED_CONTENT);
         if (structured == null)
         {
             return false;

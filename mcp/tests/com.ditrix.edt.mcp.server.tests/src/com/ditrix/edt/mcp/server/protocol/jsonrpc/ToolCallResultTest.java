@@ -236,4 +236,22 @@ public class ToolCallResultTest
         assertEquals("Trade", el.getAsJsonObject().get("projects").getAsJsonArray()
             .get(0).getAsJsonObject().get("name").getAsString());
     }
+
+    @Test
+    public void testErrorTextKeepsIsErrorWithoutStructuredContent()
+    {
+        // The opted-out error result (issue #302 follow-up): the real message in the text channel +
+        // isError:true, and NO structuredContent - suppressing the structured payload must not turn a
+        // failure into a success-looking result.
+        JsonElement payload = JsonParser.parseString("{\"success\":false,\"error\":\"boom\"}");
+        ToolCallResult result = ToolCallResult.errorText(payload);
+
+        assertEquals(Boolean.TRUE, result.getIsError());
+        assertNull("no structuredContent when opted out", result.getStructuredContent());
+        assertEquals("boom", result.getContent().get(0).getText());
+
+        JsonElement el = JsonParser.parseString(GsonProvider.toJson(result));
+        assertTrue("isError must serialize", el.getAsJsonObject().get("isError").getAsBoolean());
+        assertNull("structuredContent must be absent", el.getAsJsonObject().get("structuredContent"));
+    }
 }

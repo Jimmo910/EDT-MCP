@@ -112,20 +112,27 @@ public class FanOutTest
     }
 
     @Test
-    public void testContentNotRebuiltWhenABackendIsContentOnly()
+    public void testContentOnlyBackendProjectsAreMergedAndItsContentPreserved()
     {
-        // A backend WITHOUT a structuredContent.projects array (a legacy build, or one whose
-        // structured generation failed) makes the merged table incomplete - so the human content is
-        // NOT rebuilt; the first backend's real content is preserved (no "Total: 0" regression).
-        String legacy = legacyContentOnlyResponse(1, "the legacy human table"); //$NON-NLS-1$
+        // A content-only (legacy) backend's projects must STILL appear in the merged
+        // structuredContent.projects (recovered from its Markdown table) so the proxy does not hide
+        // live projects the registry can already route to. Its richer human table is preserved - the
+        // content is NOT rebuilt (which would downgrade its columns to name-only).
+        String legacyTable = "## Workspace Projects\n\n**Total:** 1 projects\n\n" //$NON-NLS-1$
+            + "| Name | State | Path | Open | EDT Project | Natures |\n" //$NON-NLS-1$
+            + "|------|-------|------|------|-------------|--------|\n" //$NON-NLS-1$
+            + "| LegacyProj | ready | /ws/Legacy | Yes | Yes | V8ConfigurationNature |\n"; //$NON-NLS-1$
+        String legacy = legacyContentOnlyResponse(1, legacyTable);
         String structured = listProjectsResponse(2, "ProjectA"); //$NON-NLS-1$
 
         String merged = FanOut.mergeListProjects(Arrays.asList(legacy, structured), 99);
 
         JsonObject parsed = Json.parseObject(merged);
-        assertEquals("the legacy human table", contentTextOf(parsed)); //$NON-NLS-1$
-        // structuredContent still merges what it can.
-        assertEquals(List.of("ProjectA"), projectNamesOf(parsed)); //$NON-NLS-1$
+        // The legacy backend's project is no longer hidden - it merges with the structured one.
+        assertEquals(List.of("LegacyProj", "ProjectA"), projectNamesOf(parsed)); //$NON-NLS-1$ //$NON-NLS-2$
+        // The legacy backend's OWN rich table (first content) is preserved, not rebuilt to name-only.
+        String content = contentTextOf(parsed);
+        assertTrue("legacy rich content preserved: " + content, content.contains("/ws/Legacy")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     @Test

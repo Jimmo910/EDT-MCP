@@ -503,12 +503,14 @@ public class McpProtocolHandler
         // are machine-detectable regardless of the declared response type.
         if (isJsonErrorPayload(result))
         {
-            // Honor the structuredContent opt-out for the error envelope too, matching the JSON
-            // path: an opted-out client gets the error as text (its message is in content[0].text),
-            // not as a structuredContent payload.
+            // Honor the structuredContent opt-out for the error envelope too, matching the JSON path.
+            // Suppress the structuredContent payload but KEEP isError:true (with the real message in
+            // the text channel) so the failure stays machine-detectable - a suppressed structured
+            // payload must not turn an error into a success-looking result.
             if (!clientCapabilities.get().allowsStructuredContent())
             {
-                return buildToolCallTextResponse(result, requestId);
+                ToolCallResult errorResult = ToolCallResult.errorText(JsonParser.parseString(result));
+                return GsonProvider.toJson(JsonRpcResponse.success(requestId, errorResult));
             }
             return buildToolCallJsonResponse(result, requestId, tool.getName());
         }

@@ -471,7 +471,7 @@ public final class BackendRegistry
      * @param result the JSON-RPC {@code result} object
      * @return the project names; empty when no table is present
      */
-    private static List<String> namesFromMarkdownTable(JsonObject result)
+    static List<String> namesFromMarkdownTable(JsonObject result)
     {
         JsonElement content = result.get("content"); //$NON-NLS-1$
         if (content == null || !content.isJsonArray())
