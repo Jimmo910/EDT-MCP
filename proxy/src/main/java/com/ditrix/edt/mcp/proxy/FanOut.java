@@ -38,6 +38,21 @@ public final class FanOut
     private static final String KEY_IS_ERROR = "isError"; //$NON-NLS-1$
     private static final String KEY_STRUCTURED_CONTENT = "structuredContent"; //$NON-NLS-1$
     private static final String KEY_PROJECTS = "projects"; //$NON-NLS-1$
+    private static final String KEY_CONTENT = "content"; //$NON-NLS-1$
+    private static final String KEY_RESOURCE = "resource"; //$NON-NLS-1$
+    private static final String KEY_TEXT = "text"; //$NON-NLS-1$
+    private static final String KEY_BLOB = "blob"; //$NON-NLS-1$
+    private static final String KEY_TYPE = "type"; //$NON-NLS-1$
+    /** The {@code type} value of a plain text content item. */
+    private static final String TYPE_TEXT = "text"; //$NON-NLS-1$
+    private static final String KEY_URI = "uri"; //$NON-NLS-1$
+    private static final String KEY_MIME_TYPE = "mimeType"; //$NON-NLS-1$
+    private static final String KEY_NAME = "name"; //$NON-NLS-1$
+    private static final String KEY_STATE = "state"; //$NON-NLS-1$
+    private static final String KEY_PATH = "path"; //$NON-NLS-1$
+    private static final String KEY_OPEN = "open"; //$NON-NLS-1$
+    private static final String KEY_EDT_PROJECT = "edtProject"; //$NON-NLS-1$
+    private static final String KEY_NATURES = "natures"; //$NON-NLS-1$
     private static final String KEY_CODE = "code"; //$NON-NLS-1$
     private static final String KEY_MESSAGE = "message"; //$NON-NLS-1$
     private static final String JSONRPC_VERSION = "2.0"; //$NON-NLS-1$
@@ -66,6 +81,7 @@ public final class FanOut
     {
         JsonArray mergedProjects = new JsonArray();
         JsonObject firstEnvelope = null;
+        boolean allStructured = true;
 
         if (backendResponses != null)
         {
@@ -80,7 +96,10 @@ public final class FanOut
                 {
                     firstEnvelope = envelope;
                 }
-                appendProjects(envelope, mergedProjects);
+                if (!appendProjects(envelope, mergedProjects))
+                {
+                    allStructured = false; // a content-only (legacy/failed-structured) backend
+                }
             }
         }
 
@@ -97,8 +116,144 @@ public final class FanOut
             result.add(KEY_STRUCTURED_CONTENT, structured);
         }
         structured.add(KEY_PROJECTS, mergedProjects);
+        // Rebuild the human `content` channel from the MERGED projects so a client reading `content`
+        // sees ALL backends, consistent with the merged structuredContent (issue #302) - but ONLY
+        // when EVERY usable backend exposed a structuredContent.projects array, so the merged table is
+        // COMPLETE. If any backend was content-only (a legacy build, or one whose structured
+        // generation failed), its projects are not in mergedProjects, so keep the first backend's real
+        // content rather than replacing it with an incomplete/empty table.
+        if (allStructured)
+        {
+            rebuildContent(result, mergedProjects);
+        }
         writeId(firstEnvelope, requestId);
         return Json.compact(firstEnvelope);
+    }
+
+    /**
+     * Replaces {@code result.content} so its rendered text reflects ALL merged projects. The first
+     * content item's SHAPE is preserved (an embedded {@code resource.text} stays a resource, a plain
+     * {@code text} block stays text); when there is no usable content item a fresh embedded
+     * {@code text/markdown} resource is attached.
+     *
+     * @param result the merged JSON-RPC {@code result} object
+     * @param mergedProjects the concatenated projects array
+     */
+    private static void rebuildContent(JsonObject result, JsonArray mergedProjects)
+    {
+        String markdown = renderProjectsTable(mergedProjects);
+        JsonObject item = firstContentItem(result);
+        if (item != null)
+        {
+            JsonObject resource = Json.obj(item, KEY_RESOURCE);
+            // Only a TEXT embedded resource (has `text`, no `blob`) can have its text rewritten. A
+            // BLOB resource (image/binary: `resource.blob` + a binary mimeType) uses the same
+            // type:"resource" shape, so stamping `text` onto it would produce a mixed text+blob
+            // resource - attach a fresh one instead.
+            if (resource != null && resource.has(KEY_TEXT) && !resource.has(KEY_BLOB))
+            {
+                resource.addProperty(KEY_TEXT, markdown);
+                return;
+            }
+            if (resource == null && TYPE_TEXT.equals(Json.str(item, KEY_TYPE)))
+            {
+                item.addProperty(KEY_TEXT, markdown); // a plain text block: rewrite its text
+                return;
+            }
+        }
+        // A blob/image resource, an image item, a malformed/absent item -> attach a fresh embedded
+        // text/markdown resource rather than stamping a `text` field onto an incompatible item.
+        result.add(KEY_CONTENT, freshResourceContent(markdown));
+    }
+
+    /** The first {@code result.content} item when it is a JSON object, else {@code null}. */
+    private static JsonObject firstContentItem(JsonObject result)
+    {
+        JsonElement content = result.get(KEY_CONTENT);
+        if (content != null && content.isJsonArray() && content.getAsJsonArray().size() > 0
+            && content.getAsJsonArray().get(0).isJsonObject())
+        {
+            return content.getAsJsonArray().get(0).getAsJsonObject();
+        }
+        return null;
+    }
+
+    /** A one-item {@code content} array carrying {@code markdown} as an embedded {@code text/markdown} resource. */
+    private static JsonArray freshResourceContent(String markdown)
+    {
+        JsonObject resource = new JsonObject();
+        resource.addProperty(KEY_URI, "embedded://list-projects.md"); //$NON-NLS-1$
+        resource.addProperty(KEY_MIME_TYPE, "text/markdown"); //$NON-NLS-1$
+        resource.addProperty(KEY_TEXT, markdown);
+        JsonObject item = new JsonObject();
+        item.addProperty(KEY_TYPE, KEY_RESOURCE);
+        item.add(KEY_RESOURCE, resource);
+        JsonArray content = new JsonArray();
+        content.add(item);
+        return content;
+    }
+
+    /**
+     * Renders the merged projects as the same Markdown table {@code list_projects} produces, so the
+     * aggregated human view mirrors a single backend's columns. Missing structured fields degrade to
+     * a {@code "-"} cell; an {@code edtProject} boolean renders Yes/No, and its ABSENCE renders
+     * {@code "-"} (not inspected).
+     */
+    private static String renderProjectsTable(JsonArray projects)
+    {
+        StringBuilder md = new StringBuilder();
+        md.append("## Workspace Projects\n\n"); //$NON-NLS-1$
+        md.append("**Total:** ").append(projects.size()).append(" projects\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (projects.size() == 0)
+        {
+            md.append("*No projects found.*\n"); //$NON-NLS-1$
+            return md.toString();
+        }
+        md.append("| Name | State | Path | Open | EDT Project | Natures |\n"); //$NON-NLS-1$
+        md.append("|------|-------|------|------|-------------|--------|\n"); //$NON-NLS-1$
+        for (JsonElement element : projects)
+        {
+            if (!element.isJsonObject())
+            {
+                continue;
+            }
+            JsonObject p = element.getAsJsonObject();
+            md.append("| ").append(cell(Json.str(p, KEY_NAME))) //$NON-NLS-1$
+                .append(" | ").append(cell(Json.str(p, KEY_STATE))) //$NON-NLS-1$
+                .append(" | ").append(cell(Json.str(p, KEY_PATH))) //$NON-NLS-1$
+                .append(" | ").append(boolCell(p, KEY_OPEN)) //$NON-NLS-1$
+                .append(" | ").append(edtCell(p)) //$NON-NLS-1$
+                .append(" | ").append(cell(Json.str(p, KEY_NATURES))) //$NON-NLS-1$
+                .append(" |\n"); //$NON-NLS-1$
+        }
+        return md.toString();
+    }
+
+    /** A table cell: {@code "-"} for a missing value, with {@code |}/newlines escaped (mirrors escapeForTable). */
+    private static String cell(String value)
+    {
+        if (value == null || value.isEmpty())
+        {
+            return "-"; //$NON-NLS-1$
+        }
+        return value.replace("|", "\\|").replace("\n", " ").replace("\r", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+    }
+
+    /** Renders a boolean field as Yes/No, or {@code "-"} when absent/not-a-boolean. */
+    private static String boolCell(JsonObject p, String key)
+    {
+        JsonElement el = p.get(key);
+        if (el == null || !el.isJsonPrimitive() || !el.getAsJsonPrimitive().isBoolean())
+        {
+            return "-"; //$NON-NLS-1$
+        }
+        return el.getAsBoolean() ? "Yes" : "No"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** edtProject: Yes/No when present, {@code "-"} when ABSENT (a closed/uninspected project). */
+    private static String edtCell(JsonObject p)
+    {
+        return p.has(KEY_EDT_PROJECT) ? boolCell(p, KEY_EDT_PROJECT) : "-"; //$NON-NLS-1$
     }
 
     /**
@@ -123,24 +278,31 @@ public final class FanOut
     }
 
     /**
-     * Appends the entries of {@code result.structuredContent.projects} (when present) to the
-     * merged array. A usable response without a projects array simply contributes nothing.
+     * Appends the entries of {@code result.structuredContent.projects} to the merged array.
+     *
+     * @param envelope the usable backend response
+     * @param mergedProjects the accumulator to append to
+     * @return {@code true} when the backend exposed a {@code structuredContent.projects} ARRAY (even
+     *         empty), {@code false} when it was content-only (legacy / failed structured generation) -
+     *         the caller uses this to decide whether the merged table is complete enough to rebuild
      */
-    private static void appendProjects(JsonObject envelope, JsonArray mergedProjects)
+    private static boolean appendProjects(JsonObject envelope, JsonArray mergedProjects)
     {
         JsonObject structured = Json.obj(Json.obj(envelope, KEY_RESULT), KEY_STRUCTURED_CONTENT);
         if (structured == null)
         {
-            return;
+            return false;
         }
         JsonElement projects = structured.get(KEY_PROJECTS);
-        if (projects != null && projects.isJsonArray())
+        if (projects == null || !projects.isJsonArray())
         {
-            for (JsonElement project : projects.getAsJsonArray())
-            {
-                mergedProjects.add(project);
-            }
+            return false;
         }
+        for (JsonElement project : projects.getAsJsonArray())
+        {
+            mergedProjects.add(project);
+        }
+        return true;
     }
 
     /**

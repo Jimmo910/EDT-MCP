@@ -84,6 +84,174 @@ public class FanOutTest
     }
 
     @Test
+    public void testMergedContentReflectsAllBackendsNotJustFirst()
+    {
+        // The human `content` channel must show ALL merged projects, not only the first backend's
+        // envelope (issue #302): the rebuilt table's total and rows cover every backend.
+        String responseA = listProjectsResponse(1, "ProjectA", "ProjectB"); //$NON-NLS-1$ //$NON-NLS-2$
+        String responseB = listProjectsResponse(2, "ProjectC"); //$NON-NLS-1$
+
+        String merged = FanOut.mergeListProjects(Arrays.asList(responseA, responseB), 99);
+
+        String content = contentTextOf(Json.parseObject(merged));
+        assertTrue("total must reflect all backends: " + content, //$NON-NLS-1$
+            content.contains("**Total:** 3 projects")); //$NON-NLS-1$
+        for (String name : new String[] { "ProjectA", "ProjectB", "ProjectC" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            assertTrue("content must list " + name + ": " + content, //$NON-NLS-1$ //$NON-NLS-2$
+                content.contains("| " + name + " |")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static String contentTextOf(JsonObject response)
+    {
+        JsonObject item = Json.obj(response, "result").getAsJsonArray("content") //$NON-NLS-1$ //$NON-NLS-2$
+            .get(0).getAsJsonObject();
+        JsonObject resource = Json.obj(item, "resource"); //$NON-NLS-1$
+        return resource != null ? Json.str(resource, "text") : Json.str(item, "text"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    @Test
+    public void testContentNotRebuiltWhenABackendIsContentOnly()
+    {
+        // A backend WITHOUT a structuredContent.projects array (a legacy build, or one whose
+        // structured generation failed) makes the merged table incomplete - so the human content is
+        // NOT rebuilt; the first backend's real content is preserved (no "Total: 0" regression).
+        String legacy = legacyContentOnlyResponse(1, "the legacy human table"); //$NON-NLS-1$
+        String structured = listProjectsResponse(2, "ProjectA"); //$NON-NLS-1$
+
+        String merged = FanOut.mergeListProjects(Arrays.asList(legacy, structured), 99);
+
+        JsonObject parsed = Json.parseObject(merged);
+        assertEquals("the legacy human table", contentTextOf(parsed)); //$NON-NLS-1$
+        // structuredContent still merges what it can.
+        assertEquals(List.of("ProjectA"), projectNamesOf(parsed)); //$NON-NLS-1$
+    }
+
+    @Test
+    public void testRebuildAttachesFreshResourceForIncompatibleContentItem()
+    {
+        // When the first content item is incompatible (an image), the rebuild must NOT stamp a text
+        // property onto it; it attaches a fresh embedded resource instead.
+        String withImage = listProjectsResponseWithImageContent(7, "ProjectA"); //$NON-NLS-1$
+
+        String merged = FanOut.mergeListProjects(List.of(withImage), 7);
+
+        JsonObject item = Json.obj(Json.parseObject(merged), "result") //$NON-NLS-1$
+            .getAsJsonArray("content").get(0).getAsJsonObject(); //$NON-NLS-1$
+        assertEquals("resource", Json.str(item, "type")); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject resource = Json.obj(item, "resource"); //$NON-NLS-1$
+        assertTrue("fresh resource must be attached", resource != null); //$NON-NLS-1$
+        assertTrue("rebuilt table must list the project", //$NON-NLS-1$
+            Json.str(resource, "text").contains("ProjectA")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** A usable list_projects response with a human content table but NO structuredContent. */
+    private static String legacyContentOnlyResponse(Object id, String text)
+    {
+        JsonObject textItem = new JsonObject();
+        textItem.addProperty("type", "text"); //$NON-NLS-1$ //$NON-NLS-2$
+        textItem.addProperty("text", text); //$NON-NLS-1$
+        JsonArray content = new JsonArray();
+        content.add(textItem);
+        JsonObject result = new JsonObject();
+        result.add("content", content); //$NON-NLS-1$
+        result.addProperty("isError", false); //$NON-NLS-1$
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty("jsonrpc", "2.0"); //$NON-NLS-1$ //$NON-NLS-2$
+        FanOut.writeId(envelope, id);
+        envelope.add("result", result); //$NON-NLS-1$
+        return Json.compact(envelope);
+    }
+
+    @Test
+    public void testRebuildAttachesFreshResourceForBlobResource()
+    {
+        // A BLOB embedded resource (type:"resource" with resource.blob + a binary mimeType) shares the
+        // resource shape but is NOT text-compatible; the rebuild must attach a fresh text resource,
+        // not stamp Markdown text onto the blob resource.
+        String withBlob = listProjectsResponseWithBlobResource(3, "ProjectA"); //$NON-NLS-1$
+
+        String merged = FanOut.mergeListProjects(List.of(withBlob), 3);
+
+        JsonObject item = Json.obj(Json.parseObject(merged), "result") //$NON-NLS-1$
+            .getAsJsonArray("content").get(0).getAsJsonObject(); //$NON-NLS-1$
+        JsonObject resource = Json.obj(item, "resource"); //$NON-NLS-1$
+        assertTrue("fresh resource must be attached", resource != null); //$NON-NLS-1$
+        assertTrue("rebuilt table must list the project", //$NON-NLS-1$
+            Json.str(resource, "text").contains("ProjectA")); //$NON-NLS-1$ //$NON-NLS-2$
+        assertTrue("the image blob must not be reused/mixed in", //$NON-NLS-1$
+            !resource.has("blob")); //$NON-NLS-1$
+    }
+
+    /** A structured list_projects response whose content[0] is a BLOB (image) embedded resource. */
+    private static String listProjectsResponseWithBlobResource(Object id, String... projectNames)
+    {
+        JsonObject structured = new JsonObject();
+        JsonArray projects = new JsonArray();
+        for (String name : projectNames)
+        {
+            JsonObject project = new JsonObject();
+            project.addProperty("name", name); //$NON-NLS-1$
+            projects.add(project);
+        }
+        structured.add("projects", projects); //$NON-NLS-1$
+
+        JsonObject resource = new JsonObject();
+        resource.addProperty("uri", "embedded://chart.png"); //$NON-NLS-1$ //$NON-NLS-2$
+        resource.addProperty("mimeType", "image/png"); //$NON-NLS-1$ //$NON-NLS-2$
+        resource.addProperty("blob", "AAAA"); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonObject item = new JsonObject();
+        item.addProperty("type", "resource"); //$NON-NLS-1$ //$NON-NLS-2$
+        item.add("resource", resource); //$NON-NLS-1$
+        JsonArray content = new JsonArray();
+        content.add(item);
+
+        JsonObject result = new JsonObject();
+        result.add("content", content); //$NON-NLS-1$
+        result.addProperty("isError", false); //$NON-NLS-1$
+        result.add("structuredContent", structured); //$NON-NLS-1$
+
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty("jsonrpc", "2.0"); //$NON-NLS-1$ //$NON-NLS-2$
+        FanOut.writeId(envelope, id);
+        envelope.add("result", result); //$NON-NLS-1$
+        return Json.compact(envelope);
+    }
+
+    /** A structured list_projects response whose content[0] is an IMAGE (not text/resource). */
+    private static String listProjectsResponseWithImageContent(Object id, String... projectNames)
+    {
+        JsonArray projects = new JsonArray();
+        for (String name : projectNames)
+        {
+            JsonObject project = new JsonObject();
+            project.addProperty("name", name); //$NON-NLS-1$
+            projects.add(project);
+        }
+        JsonObject structured = new JsonObject();
+        structured.add("projects", projects); //$NON-NLS-1$
+
+        JsonObject imageItem = new JsonObject();
+        imageItem.addProperty("type", "image"); //$NON-NLS-1$ //$NON-NLS-2$
+        imageItem.addProperty("data", "AAAA"); //$NON-NLS-1$ //$NON-NLS-2$
+        imageItem.addProperty("mimeType", "image/png"); //$NON-NLS-1$ //$NON-NLS-2$
+        JsonArray content = new JsonArray();
+        content.add(imageItem);
+
+        JsonObject result = new JsonObject();
+        result.add("content", content); //$NON-NLS-1$
+        result.addProperty("isError", false); //$NON-NLS-1$
+        result.add("structuredContent", structured); //$NON-NLS-1$
+
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty("jsonrpc", "2.0"); //$NON-NLS-1$ //$NON-NLS-2$
+        FanOut.writeId(envelope, id);
+        envelope.add("result", result); //$NON-NLS-1$
+        return Json.compact(envelope);
+    }
+
+    @Test
     public void testMergePreservesTheOrderOfTheGivenResponseList()
     {
         String responseA = listProjectsResponse(1, "ProjectA"); //$NON-NLS-1$

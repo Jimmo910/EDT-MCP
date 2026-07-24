@@ -503,6 +503,13 @@ public class McpProtocolHandler
         // are machine-detectable regardless of the declared response type.
         if (isJsonErrorPayload(result))
         {
+            // Honor the structuredContent opt-out for the error envelope too, matching the JSON
+            // path: an opted-out client gets the error as text (its message is in content[0].text),
+            // not as a structuredContent payload.
+            if (!clientCapabilities.get().allowsStructuredContent())
+            {
+                return buildToolCallTextResponse(result, requestId);
+            }
             return buildToolCallJsonResponse(result, requestId, tool.getName());
         }
         // Append user signal as markdown
@@ -510,9 +517,13 @@ public class McpProtocolHandler
         {
             result = result + "\n\n---\n**USER SIGNAL:** " + signal.getMessage();
         }
-        // A markdown tool may ALSO expose a machine-readable structuredContent (issue #302);
-        // it rides alongside the human content and is null for tools that do not opt in.
-        String structuredJson = tool.getStructuredContent(params);
+        // A markdown tool may ALSO expose a machine-readable structuredContent (issue #302); it
+        // rides alongside the human content and is null for tools that do not opt in. Honor the SAME
+        // capability gate the JSON path uses: a client that explicitly opted out of structuredContent
+        // must not receive it here either (default keeps it — the no-regression guarantee).
+        String structuredJson = clientCapabilities.get().allowsStructuredContent()
+            ? tool.getStructuredContent(params)
+            : null;
         // In plain text mode, return markdown as plain text instead of embedded resource
         if (plainTextMode)
         {
